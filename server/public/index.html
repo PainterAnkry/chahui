@@ -408,6 +408,14 @@
       <button class="icon-btn" id="btnEntryClose">×</button>
     </div>
     <div class="modal-body">
+      <div class="lan-bar hidden" id="lanBar">
+        <span class="lan-dot"></span>
+        <div class="lan-text">
+          <b>本机已开好服务器，可以直接联机</b>
+          <span>同一 WiFi 下的朋友用浏览器打开 <code id="lanAddr">—</code> 就能加入</span>
+        </div>
+        <button class="btn tiny ghost" id="btnCopyLan">复制地址</button>
+      </div>
       <div class="form-row">
         <label>昵称</label>
         <input type="text" id="nameInput" maxlength="16" placeholder="输入你的名字" />

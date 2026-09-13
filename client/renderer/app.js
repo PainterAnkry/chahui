@@ -1202,9 +1202,32 @@
     if (show) {
       $('#nameInput').value = S.me.name || Cfg.getName() || '';
       $('#serverInput').value = net.url || Cfg.resolve();
+      renderLanBar();
       if (net.isOpen()) net.send(P.C2S.ROOM_LIST, {});
       else toast('尚未连接到服务器，房间列表可能为空');
       bindCreateSizeToggle();
+    }
+  }
+
+  /** 桌面端内置服务器起来后，把局域网地址显眼地摆出来 —— 用户最需要的就是这条链接 */
+  function renderLanBar() {
+    var bar = $('#lanBar');
+    if (!bar) return;
+    var lan = Cfg.lanBase ? Cfg.lanBase() : '';
+    bar.classList.toggle('hidden', !lan);
+    if (!lan) return;
+    $('#lanAddr').textContent = lan;
+  }
+
+  function copyLan() {
+    var lan = Cfg.lanBase ? Cfg.lanBase() : '';
+    if (!lan) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(lan).then(function () {
+        toast('局域网地址已复制：' + lan, 'ok', 3200);
+      }, function () { toast(lan); });
+    } else {
+      toast(lan);
     }
   }
 
@@ -2510,10 +2533,21 @@
     download(stampName() + '.png', engine.exportPNG());
   }
 
+  /**
+   * 分享链接的基地址。
+   * 优先用局域网地址：桌面端内置服务器起来后，朋友要用你的内网 IP 才能打开，
+   * 用 localhost 发出去对方点开只会连到他自己那台机器。
+   */
+  function shareBase() {
+    var lan = Cfg.lanBase ? Cfg.lanBase() : '';
+    if (lan) return lan;
+    return Cfg.httpBaseOf(net.url);
+  }
+
   function doShare() {
     if (!S.room) { toast('还没有进入房间'); return; }
-    var httpBase = Cfg.httpBaseOf(net.url);
-    var text = httpBase ? httpBase + '/?room=' + S.room.id : S.room.id;
+    var base = shareBase();
+    var text = base ? base + '/?room=' + S.room.id : S.room.id;
     if (S.room.hasPassword) text += '（房间有密码，请向房主索取）';
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(function () {
@@ -2536,6 +2570,10 @@
       '<div class="kv"><label>笔迹</label><div>' + engine.strokes.length + ' 笔（我可撤销 ' + S.myUndo.length + ' 笔）</div></div>' +
       '<div class="kv"><label>图层</label><div>' + engine.layers.length + ' 层</div></div>' +
       '<div class="kv"><label>服务器</label><div><code>' + esc(net.url) + '</code></div></div>' +
+      (Cfg.lanBase && Cfg.lanBase()
+        ? '<div class="kv"><label>局域网</label><div><code>' + esc(Cfg.lanBase()) + '</code>' +
+          '<span class="hint">（同一 WiFi 下的朋友用浏览器打开这个地址就能加入）</span></div></div>'
+        : '') +
       '<div class="kv"><label>分享链接</label><div><code id="shareLinkText">' + esc(text || '-') + '</code></div></div>' +
       '<div class="info-actions">' +
       '<button class="btn tiny" id="btnInfoCopy">复制链接</button>' +
@@ -3323,6 +3361,7 @@
       applyServer($('#serverInput').value);
       setTimeout(function () { net.send(P.C2S.ROOM_LIST, {}); }, 350);
     });
+    $('#btnCopyLan').addEventListener('click', copyLan);
     $('#btnPurgeRooms').addEventListener('click', purgeRooms);
     $('#serverInput').addEventListener('change', function () { applyServer(this.value); this.value = net.url; });
     $('#btnCreateRoom').addEventListener('click', doCreate);

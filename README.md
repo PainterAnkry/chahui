@@ -69,9 +69,27 @@
 
 ## 快速开始
 
-需要 **Node.js 18+**。
+需要 **Node.js 18+**（只玩桌面版的话不需要 —— 见下面「最省事的用法」）。
 
-### 1. 起服务端
+### 最省事的用法：双击 exe
+
+装好桌面版之后，**双击图标就能用，不用另外装 Node、也不用单独起服务端** ——
+客户端里内置了一个服务器，开程序时它会自己起来（默认 8437 端口）：
+
+1. 双击「茶绘」
+2. 入口弹窗顶部会显示 **本机已开好服务器**，以及一条局域网地址（形如 `http://192.168.1.23:8437`）
+3. 创建房间，点「分享」或「复制地址」把那条链接发给同一个 WiFi 下的朋友
+4. 朋友**用浏览器打开那个链接**就能进来一起画（他们什么都不用装）
+
+![双击即联机](docs/05-双击即联机.png)
+
+> 这条链路的前提是大家在**同一个局域网**（同一个 WiFi / 同一个路由器）。
+> 想让身处不同网络的朋友加入，需要一台公网服务器，见下面的「公网部署」。
+>
+> 内置服务器也可以关掉：配置文件 `<用户数据目录>/chahu-config.json` 里设 `"embeddedServer": false`，
+> 它就只当客户端用，连你在「服务器」一栏里填的地址。
+
+### 网页版 / 自建服务端
 
 ```bash
 npm install --prefix server
@@ -88,24 +106,33 @@ npm run server          # 默认监听 0.0.0.0:8437
 | `PORT` | `8437` | 监听端口 |
 | `HOST` | `0.0.0.0` | 监听地址 |
 | `DATA_DIR` | `server/data/rooms` | 房间存档目录 |
+| `PUBLIC_DIR` | `server/public` | 静态资源目录（桌面端内置时指向 renderer） |
 | `MAX_ROOMS` | `400` | 房间数上限 |
 | `MAX_LAYERS` | `16` | 单房间图层上限 |
 | `MAX_MEMBERS` | `40` | 单房间人数上限 |
 | `IDLE_ROOM_TTL` | `12h` | 有内容的房间闲置多久回收 |
 | `EMPTY_ROOM_TTL` | `5min` | 空房（没人在线 + 一笔没画）多久回收 |
 
-### 2. 桌面端
+### 公网部署（让不同网络的朋友也能一起画）
+
+把 `server/` 放到一台有公网 IP 的机器上（云服务器 / 家里路由器做端口转发都行），
+起好服务后让所有人访问 `http://<公网地址>:8437`；桌面端则在「服务器」一栏里填
+`ws://<公网地址>:8437/ws`（填了具体地址后内置服务器就不会再启动）。
+
+放在 HTTPS 域名后面时把协议换成 `wss://`，分享链接用 `https://` 即可。
+
+### 桌面端（开发模式）
 
 ```bash
 npm install --prefix client
 npm run client          # 启动 Electron
 ```
 
-### 3. 打包 Windows 安装包
+### 打包 Windows 安装包
 
 ```bash
 npm install
-npm run dist            # = 同步前端 + electron-builder --win --x64
+npm run dist            # = 同步协议/服务端/前端 + electron-builder --win --x64
 ```
 
 产物在 `dist/`：`茶绘-安装程序-<版本>.exe`（NSIS 安装版）与 `茶绘-便携版-<版本>.exe`。
@@ -137,9 +164,11 @@ npm run dist            # = 同步前端 + electron-builder --win --x64
 茶绘软件/
 ├── shared/protocol.js       通信协议（唯一来源）
 ├── client/
-│   ├── main.js              Electron 主进程
+│   ├── main.js              Electron 主进程（启动时拉起内置服务器）
+│   ├── server-embed.js      内置服务器：把服务端 require 进来跑，端口被占用就复用
 │   ├── preload.js
 │   ├── build/icon.png       应用图标
+│   ├── server/              ← 由 server/src 同步而来（桌面端内置服务器用）
 │   └── renderer/            前端（Electron 与网页版共用同一套）
 │       ├── index.html
 │       ├── styles.css
@@ -158,13 +187,15 @@ npm run dist            # = 同步前端 + electron-builder --win --x64
 └── tools/                   同步、测试、验收、维护脚本
 ```
 
-### ⚠️ 改代码前必读：三个「唯一来源」
+### ⚠️ 改代码前必读：四个「唯一来源」
 
 1. **协议**只改 `shared/protocol.js`，然后 `node tools/sync-protocol.js`
    同步到 `server/src/protocol.js` 与 `client/renderer/protocol.js`。
 2. **前端**只改 `client/renderer/`，然后 `node tools/sync-web.js` 同步到 `server/public/`。
    **漏这步网页版就是旧代码。**
-3. 一条命令搞定：`npm run sync`。
+3. **服务端**只改 `server/src/`，然后 `node tools/sync-server.js` 同步到 `client/server/`
+   （桌面端内置服务器跑的是这一份）。
+4. 一条命令搞定：`npm run sync`。
 
 改了协议还要**重启服务端进程**才生效（Node 已缓存模块）。
 
@@ -172,6 +203,9 @@ npm run dist            # = 同步前端 + electron-builder --win --x64
 
 ## 架构与关键设计
 
+- **桌面端自带服务器**：`client/server-embed.js` 在 Electron 主进程里 `require` 服务端代码，
+  双击 exe 就有一间房。端口被占用时**不抢** —— 认为已经有一个服务端在跑，直接复用，
+  所以「先开了独立服务端、又开桌面端」不会打架。房间存档写用户数据目录，不写安装目录。
 - **服务端只做「哑存储」**：图层级的像素操作（复制 / 向下合并 / 合并可见 / 固化底图 /
   图像变换 / 缩放画面）全部由客户端渲染成 PNG 回传，服务端只存 `baseImage` + `baseSeq`。
   统一入口是 `C2S.LAYER_PIXELS`。这样服务端永远不需要重放笔迹。
@@ -197,6 +231,8 @@ npm run check         # CSS 括号配对 + 未定义函数扫描
 npm test              # 双虚拟客户端端到端（不需要浏览器）
 npm run test:browser  # Chrome 双上下文端到端（含两端像素比对）
 npm run test:stroke   # 笔迹连续性回归
+npm run test:embed    # 桌面端内置服务器（起服务 / 托管网页版 / 建房 / 端口复用）
+npm run test:lan      # 「双击 exe → 局域网朋友用浏览器加入」整条链路（需先启动桌面端）
 npm run verify        # 第一轮反馈验收（光标 / 图层清除 / 面板排序 / 分辨率 / 房间清理）
 npm run verify2       # 第二轮反馈验收（选区语义 / 导航器 / 图像大小 / 图像变换 + 跨端同步）
 npm run verify3       # 第三轮反馈验收（魔棒框选套索 / 自动变换 / 撤销 / 翻转不越界）

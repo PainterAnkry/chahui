@@ -1,10 +1,10 @@
 {
   "name": "chahui",
-  "version": "1.2.4",
+  "version": "1.2.5",
   "private": true,
   "description": "茶绘 · 多人实时协作绘画聊天室（桌面端 + 公网服务端，SAI2 风格笔刷体系）",
   "scripts": {
-    "sync": "node tools/sync-protocol.js && node tools/sync-web.js",
+    "sync": "node tools/sync-protocol.js && node tools/sync-server.js && node tools/sync-web.js",
     "server": "node server/src/index.js",
     "client": "npm --prefix client start",
     "check": "node tools/check-css.js client/renderer/styles.css && node tools/check-defs.js",
@@ -18,7 +18,9 @@
     "rooms": "node tools/rooms-admin.js",
     "shots": "node tools/shots-readme.js",
     "dist": "npm run sync && npm --prefix client run dist",
-    "test:stroke": "node tools/test-stroke.js"
+    "test:stroke": "node tools/test-stroke.js",
+    "test:embed": "node tools/test-embed.js",
+    "test:lan": "node tools/test-lan.js"
   },
   "license": "MIT",
   "repository": {

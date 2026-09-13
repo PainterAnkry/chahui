@@ -6,6 +6,8 @@ const fs = require('fs');
 
 const isDev = !!process.env.CHAHU_DEV;
 let win = null;
+// 内置服务器的运行信息（端口 / 局域网地址），渲染进程要拿去显示分享链接
+let serverInfo = null;
 
 /* ---------------- 本地配置（服务器地址等） ---------------- */
 
@@ -33,6 +35,12 @@ function createWindow() {
   const cfg = readConfig();
   const params = [];
   if (cfg.server) params.push('server=' + encodeURIComponent(cfg.server));
+  // 内置服务器起来之后，把它的局域网地址告诉渲染进程 —— 分享链接要用它，
+  // 用 localhost 分享出去朋友是打不开的。
+  if (serverInfo && serverInfo.lan && serverInfo.lan.length) {
+    params.push('lan=' + encodeURIComponent(serverInfo.lan[0]));
+    params.push('port=' + serverInfo.port);
+  }
   const qs = params.length ? '?' + params.join('&') : '';
 
   win = new BrowserWindow({
@@ -75,10 +83,17 @@ function createWindow() {
 ipcMain.handle('chahu:get-info', () => ({
   version: app.getVersion(),
   platform: process.platform,
-  config: readConfig()
+  config: readConfig(),
+  server: serverInfo
 }));
 
 ipcMain.handle('chahu:set-server', (e, url) => writeConfig({ server: String(url || '') }));
+
+/** 开关内置服务器（下次启动生效） */
+ipcMain.handle('chahu:set-embedded', (e, on) => writeConfig({ embeddedServer: !!on }));
+
+/** 局域网地址 / 端口，分享链接要用 */
+ipcMain.handle('chahu:server-info', () => serverInfo);
 
 ipcMain.handle('chahu:save', async (e, name, payload) => {
   const filters = [];
@@ -118,7 +133,27 @@ ipcMain.handle('chahu:save', async (e, name, payload) => {
 
 Menu.setApplicationMenu(null);
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  const cfg = readConfig();
+  // 默认开内置服务器：双击 exe 就能自己开房联机，不需要另外装 Node / 起服务端。
+  // 想在设置里指向公网服务端时把它关掉（config.embeddedServer = false）。
+  if (cfg.embeddedServer !== false && !cfg.server) {
+    try {
+      const embed = require('./server-embed');
+      serverInfo = await embed.start({
+        port: Number(cfg.port) || 8437,
+        // 房间存档放用户数据目录，别塞进安装目录（那里通常没有写权限）
+        dataDir: path.join(app.getPath('userData'), 'rooms'),
+        // 内置服务器同时托管网页版，好让局域网的朋友直接用浏览器加入
+        publicDir: path.join(__dirname, 'renderer')
+      });
+      console.log('[chahu] 内置服务器 ' + (serverInfo.reused ? '复用已运行实例' : '已启动') +
+        ' · 端口 ' + serverInfo.port +
+        (serverInfo.lan.length ? ' · 局域网 ' + serverInfo.lan.map(function (ip) { return 'http://' + ip + ':' + serverInfo.port; }).join(' / ') : ' · 未检测到局域网地址'));
+    } catch (e) {
+      console.error('[chahu] 内置服务器启动失败：' + e.message);
+    }
+  }
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

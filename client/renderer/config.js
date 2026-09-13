@@ -83,6 +83,22 @@ window.CHAHU = window.CHAHU || {};
     } catch (e) { return ''; }
   }
 
+  /**
+   * 局域网地址：桌面端内置服务器起来后由主进程通过 ?lan=<ip>&port=<端口> 传进来。
+   * 分享链接必须用它 —— 用 localhost 发出去朋友是打不开的。
+   */
+  var LAN = (function () {
+    try {
+      var q = new URLSearchParams(location.search || '');
+      var ip = q.get('lan') || '';
+      var port = q.get('port') || '';
+      if (!ip) return '';
+      return 'http://' + ip + (port ? ':' + port : '');
+    } catch (e) { return ''; }
+  })();
+
+  function lanBase() { return LAN; }
+
   window.ChaConfig = {
     normalize: normalize,
     resolve: resolve,
@@ -92,6 +108,7 @@ window.CHAHU = window.CHAHU || {};
     getName: getName,
     setName: setName,
     queryRoom: queryRoom,
+    lanBase: lanBase,
     cfg: CFG
   };
 })();

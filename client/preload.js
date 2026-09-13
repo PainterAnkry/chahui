@@ -24,5 +24,7 @@ contextBridge.exposeInMainWorld('chahuDesktop', {
     }
   },
   getInfo: () => ipcRenderer.invoke('chahu:get-info'),
-  setServer: (url) => ipcRenderer.invoke('chahu:set-server', url)
+  setServer: (url) => ipcRenderer.invoke('chahu:set-server', url),
+  setEmbeddedServer: (on) => ipcRenderer.invoke('chahu:set-embedded', on),
+  getServerInfo: () => ipcRenderer.invoke('chahu:server-info')
 });

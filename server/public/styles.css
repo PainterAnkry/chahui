@@ -1072,8 +1072,38 @@ input[type=range]::-webkit-slider-thumb {
   border-radius: 999px;
   padding: 0 6px;
 }
-.room-list-ops { display: flex; gap: 6px; }
-.room-list-ops .btn { flex: 1; }
+/* 入口里的「本机已开好服务器」提示条：桌面端双击 exe 之后最该看到的一条信息 */
+.lan-bar {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 12px;
+  padding: 9px 11px;
+  background: linear-gradient(#f2f8ff, #e8f2ff);
+  border: 1px solid #bcd8f5;
+  border-radius: var(--radius-sm);
+}
+.lan-dot {
+  width: 8px; height: 8px; flex: none;
+  border-radius: 50%;
+  background: #34a853;
+  box-shadow: 0 0 0 3px rgba(52, 168, 83, .18);
+}
+.lan-text { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.5; }
+.lan-text b { font-size: 12.5px; color: #1d5dad; }
+.lan-text span { font-size: 11.5px; color: var(--text-dim); }
+.lan-text code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  background: #fff;
+  border: 1px solid #cfe0f2;
+  border-radius: 3px;
+  padding: 0 4px;
+  color: #1d5dad;
+  user-select: all;
+}
+
+.room-list-ops { display: flex; gap: 6px; }.room-list-ops .btn { flex: 1; }
 .room-list .room-item.blank { background: #f7f8fa; }
 .room-list .room-item.blank .rn b { color: var(--text-dim); font-weight: 500; }
 .tag-blank {

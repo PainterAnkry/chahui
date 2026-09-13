@@ -1,7 +1,7 @@
 {
   "name": "chahui-desktop",
   "productName": "茶绘",
-  "version": "1.2.4",
+  "version": "1.2.5",
   "private": true,
   "description": "茶绘 · 多人实时协作绘画聊天室（桌面端）",
   "author": "Ankry",
@@ -15,6 +15,10 @@
     "electron": "^33.2.1",
     "electron-builder": "^25.1.8"
   },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "//": "注意：不要在 client 里依赖根包（npm install --prefix client 会自作主张塞一条 \"chahui\": \"file:..\"，那会把整个工程目录连同 dist 里的旧安装包一起打进 asar，安装包从 78MB 涨到 638MB）。",
   "build": {
     "appId": "com.painterankry.chahui",
     "productName": "茶绘",
@@ -26,8 +30,11 @@
     "files": [
       "main.js",
       "preload.js",
+      "server-embed.js",
+      "server/**/*",
       "renderer/**/*",
-      "build/icon.png"
+      "build/icon.png",
+      "!node_modules/chahui/**"
     ],
     "win": {
       "icon": "build/icon.png",
