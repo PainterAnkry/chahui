@@ -28,7 +28,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await sleep(300);
 
   // ── 1) 完整界面：选水彩笔并画几笔 ──
-  await page.click('#toolGrid .tool[data-item="watercolor"]');
+  await page.click('#toolGrid .tool[data-item="watercolor"], #brushGrid .tool[data-item="watercolor"]');
   await sleep(300);
   await page.evaluate(() => {
     const el = document.querySelector('#sizeRange');
@@ -52,7 +52,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   }
   await stroke(0.16, 0.3, 0.5, 0.55, 26);
   await sleep(150);
-  await page.click('#toolGrid .tool[data-item="airbrush"]');
+  await page.click('#toolGrid .tool[data-item="airbrush"], #brushGrid .tool[data-item="airbrush"]');
   await sleep(250);
   await page.evaluate(() => {
     const el = document.querySelector('#sizeRange');

@@ -167,7 +167,7 @@ async function main() {
     proto: typeof window.CHAPROTO,
     net: typeof window.Net,
     app: typeof window.ChaApp,
-    tools: document.querySelectorAll('#toolGrid .tool').length,
+    tools: document.querySelectorAll('#toolGrid .tool, #brushGrid .tool').length,
     palette: document.querySelectorAll('#palette i').length
   }));
   ok('引擎 / 协议 / 网络层均已就绪', stage0.engine === 'function' && stage0.proto === 'object' && stage0.net === 'function' && stage0.app === 'object',
@@ -190,7 +190,7 @@ async function main() {
   await A.screenshot({ path: path.join(OUT, '02-建房后空画布.png') });
 
   console.log('\n[4] 本机作画');
-  await A.click('#toolGrid .tool[data-item="brush"]');
+  await A.click('#toolGrid .tool[data-item="brush"], #brushGrid .tool[data-item="brush"]');
   await A.fill('#hexInput', '#ec4141');
   await A.dispatchEvent('#hexInput', 'change');
   await A.fill('#sizeRange', '18');
@@ -205,7 +205,7 @@ async function main() {
   await sleep(400);
   const layerCount = await A.evaluate(() => window.ChaApp.engine.layers.length);
   ok('新建图层成功', layerCount === 2, '实际 ' + layerCount);
-  await A.click('#toolGrid .tool[data-item="blur"]');
+  await A.click('#toolGrid .tool[data-item="blur"], #brushGrid .tool[data-item="blur"]');
   await sleep(200);
   const blurOnly = await A.evaluate(() => ({
     tool: window.ChaApp.state.tool,
@@ -235,7 +235,7 @@ async function main() {
   await B.screenshot({ path: path.join(OUT, '04-B端同步画面.png') });
 
   console.log('\n[7] B 作画，A 实时看到');
-  await B.click('#toolGrid .tool[data-item="brush"]');
+  await B.click('#toolGrid .tool[data-item="brush"], #brushGrid .tool[data-item="brush"]');
   await B.fill('#sizeRange', '12');
   await B.dispatchEvent('#sizeRange', 'input');
   await drawStroke(B, { x0: 0.2, y0: 0.7, x1: 0.8, y1: 0.8 });
@@ -367,7 +367,7 @@ async function main() {
   const rejoin = await B.evaluate(() => ({ joins: window.ChaApp.state.joinCount, joined: window.ChaApp.state.joined, strokes: window.ChaApp.engine.strokes.length }));
   ok('重连后自动重新加入房间（服务端确认过一次 room:joined）', rejoin.joins >= 2, JSON.stringify(rejoin));
   const beforeRe = (await inkStats(A)).strokes;
-  await B.click('#toolGrid .tool[data-item="brush"]');
+  await B.click('#toolGrid .tool[data-item="brush"], #brushGrid .tool[data-item="brush"]');
   await drawStroke(B, { x0: 0.15, y0: 0.22, x1: 0.45, y1: 0.18 });
   await sleep(900);
   const bSelf = await inkStats(B);
@@ -394,7 +394,7 @@ async function main() {
 
   console.log('\n[16.5] v3 · SAI2 基本笔刷工具栏');
   const grid0 = await A.evaluate(() => {
-    const btns = Array.prototype.slice.call(document.querySelectorAll('#toolGrid .tool'));
+    const btns = Array.prototype.slice.call(document.querySelectorAll('#toolGrid .tool, #brushGrid .tool'));
     return {
       n: btns.length,
       ids: btns.map(b => b.dataset.item),
@@ -410,7 +410,7 @@ async function main() {
   ok('每个工具都有图标', grid0.withIcon === grid0.n, grid0.withIcon + '/' + grid0.n);
   ok('工具栏为四列九宫格布局', grid0.n >= 14, '共 ' + grid0.n + ' 项');
 
-  await A.click('#toolGrid .tool[data-item="pencil"]');
+  await A.click('#toolGrid .tool[data-item="pencil"], #brushGrid .tool[data-item="pencil"]');
   await sleep(250);
   // 家族标签在切换工具后才会刷新，必须重新读取
   const famAfter = await A.evaluate(() => ({
@@ -438,7 +438,7 @@ async function main() {
   }));
   ok('选择纸张质感会写入笔刷参数', paper.paper === 'coarse' && paper.grain > 0, JSON.stringify(paper));
 
-  await A.click('#toolGrid .tool[data-item="watercolor"]');
+  await A.click('#toolGrid .tool[data-item="watercolor"], #brushGrid .tool[data-item="watercolor"]');
   await sleep(350);
   const wc = await A.evaluate(() => ({
     id: window.ChaApp.state.brushId,
@@ -450,7 +450,7 @@ async function main() {
   ok('特殊效果「宽度」滑块反映边缘值', wc.fxWidth > 0, 'fxWidth=' + wc.fxWidth);
 
   console.log('\n[16.5.2] v3 · 圆形画笔光标（直径 = 笔刷大小）');
-  await A.click('#toolGrid .tool[data-item="brush"]');
+  await A.click('#toolGrid .tool[data-item="brush"], #brushGrid .tool[data-item="brush"]');
   await sleep(200);
   await A.fill('#sizeRange', '60');
   await A.dispatchEvent('#sizeRange', 'input');
@@ -478,45 +478,54 @@ async function main() {
   await A.click('#btnToolEdit');
   await sleep(250);
   const editing = await A.evaluate(() => ({
-    cls: document.querySelector('#toolGrid').classList.contains('editing'),
-    badges: document.querySelectorAll('#toolGrid .tbadge').length
+    toolCls: document.querySelector('#toolGrid').classList.contains('editing'),
+    brushCls: document.querySelector('#brushGrid').classList.contains('editing'),
+    badges: document.querySelectorAll('#toolGrid .tbadge, #brushGrid .tbadge').length
   }));
-  ok('进入工具栏编辑模式', editing.cls === true && editing.badges > 0, JSON.stringify(editing));
-  const beforeHide = await A.evaluate(() => document.querySelectorAll('#toolGrid .tool').length);
+  ok('进入编辑模式（工具栏与笔刷栏一起）',
+    editing.toolCls === true && editing.brushCls === true && editing.badges > 0, JSON.stringify(editing));
+  const beforeHide = await A.evaluate(() => document.querySelectorAll('#toolGrid .tool, #brushGrid .tool').length);
+  // scatter 是笔刷，现在住在笔刷栏里
   await A.evaluate(() => {
-    const b = document.querySelector('#toolGrid .tool[data-item="scatter"] .tbadge button[data-act="hide"]');
+    const b = document.querySelector('#brushGrid .tool[data-item="scatter"] .tbadge button[data-act="hide"]');
     if (b) b.click();
   });
   await sleep(250);
   const afterHide = await A.evaluate(() => ({
-    n: document.querySelectorAll('#toolGrid .tool').length,
+    n: document.querySelectorAll('#toolGrid .tool, #brushGrid .tool').length,
     pool: document.querySelectorAll('#toolHiddenPool .tb-item').length
   }));
-  ok('可以把工具从工具栏收起', afterHide.n === beforeHide - 1 && afterHide.pool === 1, JSON.stringify(afterHide));
+  ok('可以把笔刷从笔刷栏收起', afterHide.n === beforeHide - 1 && afterHide.pool === 1, JSON.stringify(afterHide));
   // 记录点「▶」之前的前两项，断言它们确实换了位置（不写死具体是哪个笔刷，
   // 否则以后往工具栏里加一支笔就会误报）
   const pair0 = await A.evaluate(() =>
-    Array.prototype.map.call(document.querySelectorAll('#toolGrid .tool'), b => b.dataset.item).slice(0, 2));
+    Array.prototype.map.call(document.querySelectorAll('#toolGrid .tool, #brushGrid .tool'), b => b.dataset.item).slice(0, 2));
   await A.evaluate((first) => {
-    const b = document.querySelector('#toolGrid .tool[data-item="' + first + '"] .tbadge button[data-act="right"]');
+    // 注意：两栏分开之后，后代选择器要**两边都写全**。
+    // 写成 `A, B .child` 是选择器列表，第一项只匹配到工具按钮本身，点了个寂寞。
+    const sel = '#toolGrid .tool[data-item="' + first + '"] .tbadge button[data-act="right"],' +
+      '#brushGrid .tool[data-item="' + first + '"] .tbadge button[data-act="right"]';
+    const b = document.querySelector(sel);
     if (b) b.click();
   }, pair0[0]);
   await sleep(200);
   const order1 = await A.evaluate(() =>
-    Array.prototype.map.call(document.querySelectorAll('#toolGrid .tool'), b => b.dataset.item).slice(0, 2));
+    Array.prototype.map.call(document.querySelectorAll('#toolGrid .tool, #brushGrid .tool'), b => b.dataset.item).slice(0, 2));
   ok('可以调整工具顺序', order1[0] === pair0[1] && order1[1] === pair0[0], pair0.join(',') + ' → ' + order1.join(','));
   await A.click('#btnToolReset');
   await sleep(250);
   const restored = await A.evaluate(() => ({
-    n: document.querySelectorAll('#toolGrid .tool').length,
-    first: (document.querySelector('#toolGrid .tool') || {}).dataset.item
+    n: document.querySelectorAll('#toolGrid .tool, #brushGrid .tool').length,
+    firstTool: (document.querySelector('#toolGrid .tool') || {}).dataset.item,
+    firstBrush: (document.querySelector('#brushGrid .tool') || {}).dataset.item
   }));
-  ok('恢复默认工具栏', restored.n === grid0.n && restored.first === 'pencil', JSON.stringify(restored));
+  ok('恢复默认工具栏', restored.n === grid0.n && restored.firstBrush === 'pencil',
+    JSON.stringify(restored));
   await A.click('#btnToolEdit');
   await sleep(200);
 
   console.log('\n[16.6] v3 · 对称尺、渐变与视图工具');
-  await A.click('#toolGrid .tool[data-item="watercolor"]');
+  await A.click('#toolGrid .tool[data-item="watercolor"], #brushGrid .tool[data-item="watercolor"]');
   await sleep(250);
   await A.selectOption('#symSelect', 'xy');
   await sleep(250);
@@ -545,7 +554,7 @@ async function main() {
       return n;
     })()
   }));
-  await A.click('#toolGrid .tool[data-item="gradient"]');
+  await A.click('#toolGrid .tool[data-item="gradient"], #brushGrid .tool[data-item="gradient"]');
   await sleep(250);
   await drawStroke(A, { x0: 0.2, y0: 0.78, x1: 0.8, y1: 0.78 });
   await sleep(700);
@@ -769,7 +778,7 @@ async function main() {
   ok('表情面板可收起', closed === true);
 
   console.log('\n[16.10] v3 · 选区工具（本地私有状态）');
-  await A.click('#toolGrid .tool[data-item="select"]');
+  await A.click('#toolGrid .tool[data-item="select"], #brushGrid .tool[data-item="select"]');
   await sleep(250);
   const strokesBeforeSel = await A.evaluate(() => window.ChaApp.engine.strokes.length);
   await A.click('#btnSelAll');
@@ -792,7 +801,7 @@ async function main() {
   ok('可以取消选区', (await A.evaluate(() => window.ChaApp.engine.hasSelection())) === false);
 
   // 只用左半边选区画一笔横跨整幅的线，右侧不应落墨
-  await A.click('#toolGrid .tool[data-item="brush"]');
+  await A.click('#toolGrid .tool[data-item="brush"], #brushGrid .tool[data-item="brush"]');
   await A.fill('#sizeRange', '30');
   await A.dispatchEvent('#sizeRange', 'input');
   await sleep(250);

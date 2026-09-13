@@ -233,7 +233,7 @@
 
   /* ---------------------------------------------------------- 左栏面板排序（可拖拽） */
 
-  var PANEL_DEFAULT_ORDER = ['nav', 'tools', 'brush', 'fx', 'color', 'layers'];
+  var PANEL_DEFAULT_ORDER = ['nav', 'tools', 'brushes', 'brush', 'fx', 'color', 'layers'];
 
   function loadPanelOrder() {
     var raw = null;
@@ -374,11 +374,18 @@
       .filter(Boolean);
   }
 
-  function renderToolGrid() {
-    var box = $('#toolGrid');
+  /** 「工具栏」放工具，「笔刷栏」放笔刷 —— 和 SAI2 一样分开两栏 */
+  function isBrushItem(it) { return it.type === 'brush'; }
+
+  /**
+   * 渲染一格工具/笔刷按钮。
+   * 工具栏和笔刷栏共用这套渲染，也共用同一份顺序/显隐偏好（S.toolPrefs），
+   * 只是各自只挑自己那一半来画。
+   */
+  function renderItemGrid(box, list) {
     box.innerHTML = '';
     box.classList.toggle('editing', S.toolEdit);
-    visibleItems().forEach(function (it) {
+    list.forEach(function (it) {
       var b = document.createElement('button');
       b.className = 'tool' + (it.id === S.brushId ? ' active' : '');
       b.dataset.tool = it.tool;
@@ -404,10 +411,25 @@
       };
       box.appendChild(b);
     });
+  }
+
+  function renderToolGrid() {
+    var all = visibleItems();
+    var tools = all.filter(function (it) { return !isBrushItem(it); });
+    var brushes = all.filter(isBrushItem);
+    var toolBox = $('#toolGrid');
+    var brushBox = $('#brushGrid');
+
+    if (toolBox) renderItemGrid(toolBox, tools);
+    if (brushBox) renderItemGrid(brushBox, brushes);
+
+    // 收起池挂在笔刷栏下面（那里空间更宽裕），但「放回来」是按各自归属归位的
     renderHiddenPool();
     var cur = Brushes.get(S.brushId);
-    $('#brushFamily').textContent = Brushes.FAMILY[S.tool] || '画笔';
-    $('#brushTip').textContent = cur ? cur.tip : '—';
+    var fam = $('#brushFamily');
+    if (fam) fam.textContent = Brushes.FAMILY[S.tool] || '画笔';
+    var tip = $('#brushTip');
+    if (tip) tip.textContent = cur ? cur.tip : '—';
   }
 
   function renderHiddenPool() {
@@ -441,22 +463,39 @@
     return S.toolPrefs.order.length - 1;
   }
 
+  /**
+   * 在当前这一栏里前后移动。
+   * 顺序数组是两栏共用的，所以只能和**同类**的邻居换位 ——
+   * 否则「工具栏里第一项往前移」会溜到笔刷栏去。
+   */
   function moveItem(id, dir) {
     var order = S.toolPrefs.order;
+    var it = Brushes.get(id);
+    if (!it) return;
     var i = itemIndex(id);
     var j = i + dir;
+    while (j >= 0 && j < order.length) {
+      var nb = Brushes.get(order[j]);
+      if (nb && isBrushItem(nb) === isBrushItem(it)) break;
+      j += dir;
+    }
     if (j < 0 || j >= order.length) return;
     var t = order[i]; order[i] = order[j]; order[j] = t;
     saveToolPrefs();
     renderToolGrid();
   }
-
   function hideItem(id) {
     var vis = visibleItems();
-    if (vis.length <= 1) { toast('至少保留一个工具', 'err'); return; }
+    var it = Brushes.get(id);
+    // 「至少留一个」按各自那一栏算：工具和笔刷现在是两栏，互不兜底
+    var sameKind = vis.filter(function (x) { return isBrushItem(x) === isBrushItem(it); });
+    if (sameKind.length <= 1) {
+      toast(isBrushItem(it) ? '笔刷栏至少要留一支笔' : '工具栏至少要留一个工具', 'err');
+      return;
+    }
     if (S.toolPrefs.hidden.indexOf(id) < 0) S.toolPrefs.hidden.push(id);
     if (S.brushId === id) {
-      var next = visibleItems()[0] || Brushes.ITEMS[0];
+      var next = sameKind.filter(function (x) { return x.id !== id; })[0] || Brushes.ITEMS[0];
       saveToolPrefs();
       loadBrush(next.id);
       return;
@@ -1393,7 +1432,10 @@
     // 直径严格对应笔刷实际落笔尺寸（× 视图缩放）
     var raw = (Number(S.brush.size) || 1) * (engine.scale || 1);
     var style = S.cursorStyle || 'auto';
-    var cross = style === 'cross' || (style === 'auto' && raw < 9);
+    // 框选 / 套索 / 魔棒不吃笔刷大小，跟着画一个「笔刷大小圈」纯属干扰（用户反馈过
+    // 「所有选区工具都会冒出一个圈」）。这三个一律用十字准星。
+    var noSizeCursor = isRegionSelectId(S.tool);
+    var cross = noSizeCursor || style === 'cross' || (style === 'auto' && raw < 9);
     var d = Math.max(CURSOR_MIN, Math.round(raw));
     var x, y;
     if (cross) {
@@ -1644,8 +1686,9 @@
       S.modAlt = !!e.altKey;
       var dp = engine.screenToDoc(sp.x, sp.y);
 
-      // Alt 临时吸管（SAI 习惯）
-      if (S.tool === 'picker' || e.altKey) {
+      // Alt 临时吸管（SAI 习惯）。
+      // 但选区工具下 Alt 是「减选」，不能被吸管抢走 —— 否则 Alt 减选永远用不了。
+      if (S.tool === 'picker' || (e.altKey && !isSelectToolId(S.tool))) {
         e.preventDefault();
         var c = engine.pickColor(dp.x, dp.y);
         setColor(c);
@@ -3069,8 +3112,11 @@
     s.ctx.drawImage(tmp, 0, 0);
     s.active = true;
     engine.refreshSelectionTint();
+    // 反选之后可能一个像素都不剩（比如原本就是全选）——那就等于没有选区，
+    // 不要留下「有选区」的假状态，否则用户会发现画笔什么都画不上
+    if (!s.bbox) { s.active = false; s.bbox = null; }
     engine.drawOverlay();
-    engine.emit('selection', { active: true });
+    engine.emit('selection', { active: engine.hasSelection() });
     engine.invalidate();
     toast('已反选');
   }
@@ -3335,12 +3381,16 @@
     });
     $('#btnSwap').addEventListener('click', swapColors);
 
-    $('#btnToolEdit').addEventListener('click', function () {
+    // 工具栏和笔刷栏各有一个「编辑」按钮，但共用同一个编辑状态 —— 点哪个都是两栏一起进编辑
+    function toggleToolEdit(btn) {
       S.toolEdit = !S.toolEdit;
-      this.classList.toggle('active', S.toolEdit);
+      $$('#btnToolEdit, #btnBrushEdit').forEach(function (b) { b.classList.toggle('active', S.toolEdit); });
       renderToolGrid();
-      toast(S.toolEdit ? '工具栏编辑中：◀ ▶ 调顺序，✕ 收起' : '已退出工具栏编辑');
-    });
+      toast(S.toolEdit ? '编辑中：◀ ▶ 调顺序，✕ 收起' : '已退出编辑');
+      void btn;
+    }
+    $('#btnToolEdit').addEventListener('click', function () { toggleToolEdit(this); });
+    $('#btnBrushEdit').addEventListener('click', function () { toggleToolEdit(this); });
     $('#btnToolReset').addEventListener('click', resetToolPrefs);
 
     $$('.tab').forEach(function (t) {

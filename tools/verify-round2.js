@@ -85,7 +85,7 @@ function check(name, ok, extra) {
   console.log('\n=== [选区：选取笔 / 选取擦 / 撤销栈不被污染] ===');
   await page.evaluate(() => document.querySelector('#btnZoomFit').click());
   await sleep(400);
-  await page.click('#toolGrid .tool[data-item="brush"]');
+  await page.click('#toolGrid .tool[data-item="brush"], #brushGrid .tool[data-item="brush"]');
   await sleep(150);
   await page.evaluate(() => { const e = document.querySelector('#sizeRange'); e.value = 60; e.dispatchEvent(new Event('input', { bubbles: true })); });
   const b1 = await mk(400, 300), b2 = await mk(1200, 700);
@@ -98,7 +98,7 @@ function check(name, ok, extra) {
   console.log('  画一笔后: strokes=' + s.strokes + ' seq=' + s.seq + ' undo=' + s.undo);
   const seqBefore = s.seq, undoBefore = s.undo;
 
-  await page.click('#toolGrid .tool[data-item="select"]');
+  await page.click('#toolGrid .tool[data-item="select"], #brushGrid .tool[data-item="select"]');
   await sleep(200);
   await page.evaluate(() => { const e = document.querySelector('#sizeRange'); e.value = 40; e.dispatchEvent(new Event('input', { bubbles: true })); });
   const c1 = await mk(700, 400), c2 = await mk(1000, 600);
@@ -114,7 +114,7 @@ function check(name, ok, extra) {
   check('选区笔不虚增 engine.seq（固化水位）', s.seq === seqBefore, `${seqBefore} → ${s.seq}`);
 
   // 选区外落笔 → 应给出提示
-  await page.click('#toolGrid .tool[data-item="brush"]');
+  await page.click('#toolGrid .tool[data-item="brush"], #brushGrid .tool[data-item="brush"]');
   await sleep(200);
   const o1 = await mk(150, 150), o2 = await mk(260, 200);
   await page.evaluate(() => { document.querySelectorAll('#toastWrap .toast').forEach(t => t.remove()); });
@@ -128,7 +128,7 @@ function check(name, ok, extra) {
   check('选区外落笔会明确提示（不是「画布坏了」）', /选区/.test(toastTxt), toastTxt);
 
   // 选区擦：擦掉一块，掩膜像素数必须变少（比对比包围盒可靠 —— 擦中间不动边界时 bbox 不变）
-  await page.click('#toolGrid .tool[data-item="selectErase"]');
+  await page.click('#toolGrid .tool[data-item="selectErase"], #brushGrid .tool[data-item="selectErase"]');
   await sleep(200);
   await page.evaluate(() => { const e = document.querySelector('#sizeRange'); e.value = 90; e.dispatchEvent(new Event('input', { bubbles: true })); });
   const maskPx = () => page.evaluate(() => {
@@ -266,17 +266,37 @@ function check(name, ok, extra) {
   check('透视滑块生效', persp === 40, String(persp));
 
   // 90° 旋转 + 翻转
+  const quadBox = () => page.evaluate(() => {
+    const q = window.ChaApp.engine.transform.quad;
+    const xs = q.map(function (p) { return p.x; }), ys = q.map(function (p) { return p.y; });
+    return {
+      w: Math.round(Math.max.apply(null, xs) - Math.min.apply(null, xs)),
+      h: Math.round(Math.max.apply(null, ys) - Math.min.apply(null, ys)),
+      cx: Math.round((Math.max.apply(null, xs) + Math.min.apply(null, xs)) / 2),
+      cy: Math.round((Math.max.apply(null, ys) + Math.min.apply(null, ys)) / 2)
+    };
+  });
+  const qb0 = await quadBox();
   await page.evaluate(() => document.querySelector('#tpRot90cw').click());
   await sleep(300);
+  const qb1 = await quadBox();
   await page.evaluate(() => document.querySelector('#tpHFlip').click());
   await sleep(300);
+  const qb2 = await quadBox();
   const srcSize = await page.evaluate(() => {
-    // 浮层现在是「裁到选区大小」的 buf（以前是整幅文档的 src）
+    // 浮层是「裁到选区大小」的 buf（以前是整幅文档的 src）。
+    // 注意：翻转 / 90° 旋转**只动变换框**，不动 buf（两边都动会互相抵消 —— 那是之前的 bug）。
     const t = window.ChaApp.engine.transform;
-    return { w: t.buf.width, h: t.buf.height, rect: t.rect };
+    return { bufW: t.buf.width, bufH: t.buf.height };
   });
-  console.log('  旋转/翻转后浮层尺寸:', JSON.stringify(srcSize));
-  check('90° 旋转改变了浮层尺寸', srcSize.w === 800 && srcSize.h === 1280, srcSize.w + '×' + srcSize.h);
+  console.log('  变换框: 旋转前 ' + qb0.w + '×' + qb0.h + ' → 旋转后 ' + qb1.w + '×' + qb1.h +
+    ' → 翻转后 ' + qb2.w + '×' + qb2.h + '   浮层 ' + srcSize.bufW + '×' + srcSize.bufH);
+  check('90° 旋转后变换框宽高互换（中心不变）',
+    Math.abs(qb1.w - qb0.h) <= 3 && Math.abs(qb1.h - qb0.w) <= 3 && Math.abs(qb1.cx - qb0.cx) <= 4,
+    qb0.w + '×' + qb0.h + ' → ' + qb1.w + '×' + qb1.h);
+  check('水平翻转后变换框外接尺寸不变',
+    Math.abs(qb2.w - qb1.w) <= 3 && Math.abs(qb2.h - qb1.h) <= 3,
+    qb1.w + '×' + qb1.h + ' → ' + qb2.w + '×' + qb2.h);
 
   // 中止 → 画面还原
   const pxDuring = (await eng()).layerPx;    // 变换中：源像素被「拿起来」了，图层是空的

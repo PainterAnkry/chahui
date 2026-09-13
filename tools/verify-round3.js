@@ -70,7 +70,7 @@ function check(name, ok, extra) {
   check('工具栏有「魔棒」', tools.indexOf('wand') >= 0);
 
   // 先画一块纯色，方便魔棒选
-  await page.click('#toolGrid .tool[data-item="bucket"]');
+  await page.click('#toolGrid .tool[data-item="bucket"], #brushGrid .tool[data-item="bucket"]');
   await sleep(200);
   await page.fill('#hexInput', '#3a86e0');
   await page.dispatchEvent('#hexInput', 'change');
@@ -79,7 +79,7 @@ function check(name, ok, extra) {
   await page.mouse.down();
   await page.mouse.up();
   await sleep(500);
-  await page.click('#toolGrid .tool[data-item="brush"]');
+  await page.click('#toolGrid .tool[data-item="brush"], #brushGrid .tool[data-item="brush"]');
   await sleep(200);
   await page.evaluate(() => { const e = document.querySelector('#sizeRange'); e.value = 30; e.dispatchEvent(new Event('input', { bubbles: true })); });
   await page.fill('#hexInput', '#111111');
@@ -93,7 +93,7 @@ function check(name, ok, extra) {
   console.log('  铺好底色 + 一条黑线');
 
   /* ---- 框选 ---- */
-  await page.click('#toolGrid .tool[data-item="marquee"]');
+  await page.click('#toolGrid .tool[data-item="marquee"], #brushGrid .tool[data-item="marquee"]');
   await sleep(250);
   await page.evaluate(() => { window.ChaApp.state.autoTransform = false; });
   const m1 = await mk(400, 350), m2 = await mk(900, 650);
@@ -116,7 +116,7 @@ function check(name, ok, extra) {
   /* ---- 魔棒 ---- */
   await page.evaluate(() => document.querySelector('#btnSelNone').click());
   await sleep(400);
-  await page.click('#toolGrid .tool[data-item="wand"]');
+  await page.click('#toolGrid .tool[data-item="wand"], #brushGrid .tool[data-item="wand"]');
   await sleep(250);
   const w1 = await mk(300, 300);   // 点蓝色区域
   await page.mouse.move(w1[0], w1[1]);
@@ -133,7 +133,7 @@ function check(name, ok, extra) {
   /* ---- 套索 ---- */
   await page.evaluate(() => document.querySelector('#btnSelNone').click());
   await sleep(400);
-  await page.click('#toolGrid .tool[data-item="lasso"]');
+  await page.click('#toolGrid .tool[data-item="lasso"], #brushGrid .tool[data-item="lasso"]');
   await sleep(250);
   const cx = 800, cy = 500;
   const start = await mk(cx + 150, cy);
@@ -159,7 +159,7 @@ function check(name, ok, extra) {
   await page.evaluate(() => document.querySelector('#btnSelNone').click());
   await sleep(400);
   await page.evaluate(() => { const c = document.querySelector('#tpAuto'); c.checked = true; c.dispatchEvent(new Event('change', { bubbles: true })); });
-  await page.click('#toolGrid .tool[data-item="marquee"]');
+  await page.click('#toolGrid .tool[data-item="marquee"], #brushGrid .tool[data-item="marquee"]');
   await sleep(250);
   const a1 = await mk(500, 400), a2 = await mk(1000, 700);
   await page.mouse.move(a1[0], a1[1]);
@@ -222,7 +222,7 @@ function check(name, ok, extra) {
   // 撤销选区：框选两次，撤销应回到上一个选区
   await page.evaluate(() => document.querySelector('#btnSelNone').click());
   await sleep(400);
-  await page.click('#toolGrid .tool[data-item="marquee"]');
+  await page.click('#toolGrid .tool[data-item="marquee"], #brushGrid .tool[data-item="marquee"]');
   await page.evaluate(() => { const c = document.querySelector('#tpAuto'); c.checked = false; c.dispatchEvent(new Event('change', { bubbles: true })); });
   const b1 = await mk(300, 250), b2 = await mk(700, 500);
   await page.mouse.move(b1[0], b1[1]);
@@ -257,7 +257,7 @@ function check(name, ok, extra) {
   await page.evaluate(() => document.querySelector('#btnSelNone').click());
   await sleep(400);
   // 在左上角框一小块（远离文档中心），这样「绕文档中心翻」的错误一定会暴露
-  await page.click('#toolGrid .tool[data-item="marquee"]');
+  await page.click('#toolGrid .tool[data-item="marquee"], #brushGrid .tool[data-item="marquee"]');
   await sleep(250);
   await page.evaluate(() => { const c = document.querySelector('#tpAuto'); c.checked = true; c.dispatchEvent(new Event('change', { bubbles: true })); });
   const c1 = await mk(200, 150), c2 = await mk(500, 380);

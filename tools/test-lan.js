@@ -87,7 +87,7 @@ function check(name, ok, extra) {
 
   // 房主画一笔，朋友那边应该收到
   const box = await desk.locator('#view').boundingBox();
-  await desk.click('#toolGrid .tool[data-item="pencil"]');
+  await desk.click('#toolGrid .tool[data-item="pencil"], #brushGrid .tool[data-item="pencil"]');
   await sleep(250);
   await desk.evaluate(() => { const e = document.querySelector('#sizeRange'); e.value = 30; e.dispatchEvent(new Event('input', { bubbles: true })); });
   await desk.mouse.move(box.x + 200, box.y + 200);

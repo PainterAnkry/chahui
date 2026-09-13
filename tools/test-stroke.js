@@ -90,7 +90,7 @@ function check(name, ok, extra) {
   for (const tool of ['pencil', 'pencilSoft', 'brush', 'watercolor', 'marker', 'airbrush']) {
     await clear();
     await sleep(250);
-    await page.click('#toolGrid .tool[data-item="' + tool + '"]');
+    await page.click('#toolGrid .tool[data-item="' + tool + '"], #brushGrid .tool[data-item="' + tool + '"]');
     await sleep(220);
     await page.evaluate(() => { const e = document.querySelector('#sizeRange'); e.value = 24; e.dispatchEvent(new Event('input', { bubbles: true })); });
     await sleep(150);

@@ -33,7 +33,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     return [box.x + s.x, box.y + s.y];
   };
   async function stroke(pts, tool, size, color) {
-    await page.click('#toolGrid .tool[data-item="' + tool + '"]');
+    await page.click('#toolGrid .tool[data-item="' + tool + '"], #brushGrid .tool[data-item="' + tool + '"]');
     await sleep(180);
     await page.evaluate(([s, c]) => {
       const e = document.querySelector('#sizeRange');
@@ -63,7 +63,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await stroke(curve, 'watercolor', 46, '#3f8be8');
   await stroke([[1250, 300], [1420, 380], [1500, 520], [1380, 640], [1220, 560], [1180, 420], [1250, 300]], 'airbrush', 70, '#e8544f');
   await page.evaluate(() => { const s = document.querySelector('#sizeRange'); s.value = 26; s.dispatchEvent(new Event('input', { bubbles: true })); });
-  await page.click('#toolGrid .tool[data-item="brush"]');
+  await page.click('#toolGrid .tool[data-item="brush"], #brushGrid .tool[data-item="brush"]');
   await sleep(200);
   const p = await mk(760, 880);
   await page.mouse.move(p[0], p[1]);
@@ -72,7 +72,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   console.log('已存 docs/01-主界面.png');
 
   // ── 2) 选区 + 变换 ──
-  await page.click('#toolGrid .tool[data-item="marquee"]');
+  await page.click('#toolGrid .tool[data-item="marquee"], #brushGrid .tool[data-item="marquee"]');
   await sleep(250);
   const m1 = await mk(240, 300), m2 = await mk(1150, 640);
   await page.mouse.move(m1[0], m1[1]);
@@ -123,7 +123,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const names = { pencil: '铅笔', pencilSoft: '软铅笔', airbrush: '喷枪', brush: '画笔', watercolor: '水彩笔', marker: '马克笔', eraser: '橡皮擦', effect: '特效笔', scatter: '散布' };
   let y = 150;
   for (const t of tools) {
-    await page.click('#toolGrid .tool[data-item="' + t + '"]');
+    await page.click('#toolGrid .tool[data-item="' + t + '"], #brushGrid .tool[data-item="' + t + '"]');
     await sleep(160);
     await page.evaluate(() => {
       const e = document.querySelector('#sizeRange'); e.value = 22; e.dispatchEvent(new Event('input', { bubbles: true }));

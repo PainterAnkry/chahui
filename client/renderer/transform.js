@@ -184,12 +184,16 @@
     return null;
   };
 
+  /** 点是否在四边形内。镜像之后绕向会反，所以两种绕向都要认。 */
   function pointInQuad(p, q) {
+    var pos = 0, neg = 0;
     for (var i = 0; i < 4; i++) {
       var a = q[i], b = q[(i + 1) % 4];
-      if ((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x) < 0) return false;
+      var cross = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+      if (cross > 0) pos++;
+      else if (cross < 0) neg++;
     }
-    return true;
+    return pos === 0 || neg === 0;
   }
 
   Session.prototype.dragStart = function (handle, p) {
@@ -281,34 +285,34 @@
 
   Session.prototype.dragEnd = function () { this.drag = null; };
 
+  /**
+   * 水平 / 垂直翻转。
+   *
+   * 关键：**只动变换框，不动源图**。
+   * 之前是「源图绕自己的中心镜像」+「变换框绕自己的中心镜像」两个操作叠在一起 ——
+   * 两次镜像互相抵消，画面看起来毫无变化（用户报的「翻转有 bug」就是这个）。
+   * 现在把框镜像过去、源图原样贴上去：源图的 u 轴方向就反了，画面等于就地镜像，
+   * 而框仍然停在原地（镜像一个平行四边形，它的外接框不变）。
+   */
   Session.prototype.flip = function (axis) {
-    // 在「小图自己的坐标系」里翻转，同时把变换框绕自己的中心镜像 ——
-    // 两者是同一个相对操作，所以内容不会跑出选区。
-    var w = this.buf.width, h = this.buf.height;
-    var c = document.createElement('canvas');
-    c.width = w; c.height = h;
-    var cx = c.getContext('2d');
-    cx.translate(axis === 'h' ? w : 0, axis === 'v' ? h : 0);
-    cx.scale(axis === 'h' ? -1 : 1, axis === 'v' ? -1 : 1);
-    cx.drawImage(this.buf, 0, 0);
-    this.buf = c;
     var cq = quadCenter(this.quad);
     this.quad = this.quad.map(function (p) {
       return axis === 'h' ? pt(2 * cq.x - p.x, p.y) : pt(p.x, 2 * cq.y - p.y);
     });
+    // 镜像会把四个角的绕向反过来，命中测试要能认出来（见 pointInQuad）
+    this.mirrored = !this.mirrored;
   };
 
+  /**
+   * 顺时针 / 逆时针旋转 90°。同样只动变换框：
+   * 把四个角绕框心转 90°，源图原样贴上去，画面就跟着转了 90°，
+   * 而框自然变成「宽高互换」的样子（和 SAI2 一致）。
+   * 之前是「源图转 90°」+「框转 90°」叠加 → 实际转了 180°。
+   */
   Session.prototype.rotate90 = function (dir) {
-    var w = this.buf.width, h = this.buf.height;
-    var c = document.createElement('canvas');
-    c.width = h; c.height = w;                      // 90° 后宽高互换
-    var cx = c.getContext('2d');
-    cx.translate(h / 2, w / 2);
-    cx.rotate(dir * Math.PI / 2);
-    cx.drawImage(this.buf, -w / 2, -h / 2);
-    this.buf = c;
     var nc = quadCenter(this.quad);
     this.quad = this.quad.map(function (p) { return rotatePt(p, nc, dir * Math.PI / 2); });
+    this.rotation += dir * Math.PI / 2;
   };
 
   /** 把变换结果画到 ctx（ctx 已处于文档坐标系） */

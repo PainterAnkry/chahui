@@ -62,7 +62,7 @@ function check(name, ok, extra) {
 
   /* ============ [6] 铅笔：连续实线，不是一串点 ============ */
   console.log('\n=== [6] SAI2 铅笔（应为连续实线） ===');
-  await page.click('#toolGrid .tool[data-item="pencil"]');
+  await page.click('#toolGrid .tool[data-item="pencil"], #brushGrid .tool[data-item="pencil"]');
   await sleep(250);
   // 用默认直径（2）在 100% 缩放下太细，调到 100% 视图保证可测
   await page.evaluate(() => document.querySelector('#btnZoom100').click());
@@ -233,7 +233,7 @@ function check(name, ok, extra) {
 
   /* ============ [4] 图层清除 ============ */
   console.log('\n=== [4] 图层「清除」 ===');
-  await page.click('#toolGrid .tool[data-item="brush"]');
+  await page.click('#toolGrid .tool[data-item="brush"], #brushGrid .tool[data-item="brush"]');
   await sleep(200);
   await page.evaluate(() => {
     const el = document.querySelector('#sizeRange');
@@ -363,7 +363,7 @@ function check(name, ok, extra) {
     const el = document.querySelector('#sizeRange');
     el.value = 6; el.dispatchEvent(new Event('input', { bubbles: true }));
   });
-  await page.click('#toolGrid .tool[data-item="pencil"]');
+  await page.click('#toolGrid .tool[data-item="pencil"], #brushGrid .tool[data-item="pencil"]');
   await sleep(300);
   await page.mouse.move(box2.x + 100, box2.y + 150);
   await page.mouse.down();

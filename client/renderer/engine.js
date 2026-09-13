@@ -874,6 +874,10 @@
       sym: br.sym,
       brush: br.brush,
       filled: br.filled,
+      // 选区的加选 / 减选标记必须在这里显式带上 —— newStroke 只挑它认识的字段，
+      // 漏掉的话 Shift / Alt 会被静默丢掉，加选退化成「替换」。
+      add: !!info.add,
+      subtract: !!info.subtract,
       seed: br.seed || P.newSeed(),
       points: [],
       ts: info.ts || Date.now(),
