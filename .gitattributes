@@ -1,0 +1,6 @@
+# 统一换行符：仓库里一律 LF，检出到 Windows 也不再被 autocrlf 改写
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ico binary
+*.exe binary

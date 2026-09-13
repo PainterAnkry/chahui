@@ -1,0 +1,63 @@
+{
+  "name": "chahui-desktop",
+  "productName": "茶绘",
+  "version": "1.2.4",
+  "private": true,
+  "description": "茶绘 · 多人实时协作绘画聊天室（桌面端）",
+  "author": "Ankry",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win --x64",
+    "dist:portable": "electron-builder --win portable --x64"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.painterankry.chahui",
+    "productName": "茶绘",
+    "copyright": "Copyright © 2026 Ankry",
+    "directories": {
+      "output": "../dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "build/icon.png"
+    ],
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "茶绘",
+      "artifactName": "茶绘-安装程序-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "茶绘-便携版-${version}.${ext}"
+    },
+    "compression": "maximum"
+  }
+}

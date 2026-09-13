@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>茶绘 · 多人实时协作画板</title>
+<link rel="icon" href="favicon.svg" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<!-- ============ 顶栏 ============ -->
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark">茶</div>
+    <div class="brand-text">
+      <b>茶绘</b>
+      <span>多人实时协作画板</span>
+    </div>
+  </div>
+
+  <div class="room-chip" id="roomChip" title="点击查看房间信息">
+    <span class="dot" id="connDot"></span>
+    <b id="roomTitle">未加入房间</b>
+    <span class="sub" id="roomMeta">—</span>
+  </div>
+
+  <div class="topbar-actions">
+    <button class="btn ghost" id="btnRooms" title="房间列表">房间</button>
+    <button class="btn ghost" id="btnCanvas" title="画布设置：分辨率与底纸">画布</button>
+    <button class="btn ghost" id="btnTransform" title="变换选区内（或整层）的图像 —— Ctrl+T">变换</button>
+    <button class="btn ghost" id="btnReplay" title="回放所有人的作画过程">回放</button>
+    <button class="btn ghost" id="btnRecord" title="把作画过程录成 WebM 视频">录制</button>
+    <button class="btn ghost" id="btnExport" title="导出当前画布为 PNG">导出</button>
+    <button class="btn ghost" id="btnBake" title="把当前画面固化为底图，压缩房间历史">固化</button>
+    <button class="btn primary" id="btnShare" title="复制分享链接">分享</button>
+  </div>
+</header>
+
+<!-- ============ 主体三栏 ============ -->
+<main class="workspace">
+
+  <!-- ==================== 左：SAI2 风格面板 ==================== -->
+  <aside class="panel left">
+    <div class="panel-scroll" id="leftPanelScroll">
+      <div class="panel-handle" id="panelHandle">
+        <span class="panel-handle-grip">⋮⋮</span>
+        <span class="panel-handle-label">拖动小节标题上下排序</span>
+        <button class="panel-handle-reset" id="btnPanelReset" title="恢复默认顺序">↺</button>
+      </div>
+
+      <!-- ── 导航器 ── -->
+      <section class="group" data-section="nav">
+        <h4><span class="section-grip" title="拖动调整顺序">⋮⋮</span>导航器 <em id="navZoom">100%</em></h4>
+        <div class="nav-box" id="navBox">
+          <canvas id="navCanvas" width="240" height="150"></canvas>
+          <div class="nav-rect" id="navRect"></div>
+        </div>
+        <div class="row-line">
+          <span class="lb">缩放比例</span>
+          <input type="range" id="zoomRange" min="5" max="1600" value="100" />
+          <b id="zoomRangeVal">100%</b>
+        </div>
+        <div class="row-line">
+          <span class="lb">显示角度</span>
+          <input type="range" id="angleRange" min="-180" max="180" value="0" />
+          <b id="angleRangeVal">0°</b>
+        </div>
+        <div class="row-btns">
+          <button class="mini" id="btnZoomOut" title="缩小（-）">−</button>
+          <button class="mini" id="btnZoomIn" title="放大（+）">＋</button>
+          <button class="mini" id="btnZoomFit" title="适应窗口（0）">适应</button>
+          <button class="mini" id="btnZoom100" title="原始比例（1）">1:1</button>
+        </div>
+        <div class="row-btns">
+          <button class="mini" id="btnRotateCCW" title="逆时针旋转 15°（,）">⟲</button>
+          <button class="mini" id="btnRotateCW" title="顺时针旋转 15°（.）">⟳</button>
+          <button class="mini" id="btnFlipView" title="水平翻转视图（H）">翻转</button>
+          <button class="mini" id="btnResetView" title="复位视图（R 之外的选项）">复位</button>
+          <button class="mini" id="btnGrid" title="显示网格">网格</button>
+        </div>
+      </section>
+
+      <!-- ── 工具栏（可自定义） ── -->
+      <section class="group" data-section="tools">
+        <h4><span class="section-grip" title="拖动调整顺序">⋮⋮</span>工具栏 <em id="brushFamily">画笔</em>
+          <button class="mini h4-btn" id="btnToolEdit" title="自定义工具栏：调整顺序与显隐">编辑</button>
+        </h4>
+        <div class="tool-grid" id="toolGrid"></div>
+        <div class="tool-edit-bar hidden" id="toolEditBar">
+          <span class="hint-mini">点 ◀ ▶ 调顺序，点 ✕ 收起；下方可找回</span>
+          <button class="mini" id="btnToolReset">恢复默认</button>
+        </div>
+        <div class="tool-hidden hidden" id="toolHiddenPool"></div>
+        <p class="hint" id="brushTip">—</p>
+      </section>
+
+      <!-- ── 画笔 ── -->
+      <section class="group" data-section="brush">
+        <h4><span class="section-grip" title="拖动调整顺序">⋮⋮</span>画笔</h4>
+        <div class="brush-preview"><canvas id="brushPreview" width="240" height="46"></canvas></div>
+        <div class="row-line">
+          <span class="lb">画笔大小</span>
+          <input type="range" id="sizeRange" min="1" max="300" value="6" />
+          <b id="sizeVal">6</b>
+        </div>
+        <div class="size-presets" id="sizePresets"></div>
+        <div class="row-line">
+          <span class="lb">画笔浓度</span>
+          <input type="range" id="opacityRange" min="2" max="100" value="100" />
+          <b id="opacityVal">100</b>
+        </div>
+        <div class="form-row compact">
+          <label>混合模式</label>
+          <select id="brushBlend" class="mini-select wide"></select>
+        </div>
+        <div class="row-line">
+          <span class="lb">硬度</span>
+          <input type="range" id="hardnessRange" min="0" max="100" value="90" />
+          <b id="hardnessVal">90</b>
+        </div>
+        <div class="row-line">
+          <span class="lb">最小大小</span>
+          <input type="range" id="minSizeRange" min="2" max="100" value="20" />
+          <b id="minSizeVal">20</b>
+        </div>
+        <div class="row-line">
+          <span class="lb">笔压→大小</span>
+          <input type="range" id="pressSizeRange" min="0" max="100" value="100" />
+          <b id="pressSizeVal">100</b>
+        </div>
+        <div class="row-line">
+          <span class="lb">笔压→浓度</span>
+          <input type="range" id="pressOpacityRange" min="0" max="100" value="0" />
+          <b id="pressOpacityVal">0</b>
+        </div>
+        <div class="row-line">
+          <span class="lb">抖动修正</span>
+          <input type="range" id="stabilizeRange" min="0" max="15" value="0" />
+          <b id="stabilizeVal">0</b>
+        </div>
+        <div class="form-row compact">
+          <label>对称尺</label>
+          <select id="symSelect" class="mini-select wide" title="以画布中心为轴镜像">
+            <option value="none">关闭</option>
+            <option value="x">垂直镜像</option>
+            <option value="y">水平镜像</option>
+            <option value="xy">四向镜像</option>
+          </select>
+        </div>
+        <div class="form-row compact">
+          <label>光标</label>
+          <select id="cursorStyle" class="mini-select wide" title="画布上的画笔光标形状">
+            <option value="auto">智能（小笔刷自动切十字）</option>
+            <option value="ring">始终圆环</option>
+            <option value="cross">始终十字准星</option>
+          </select>
+        </div>
+        <label class="check-row tool-only-block" data-for="rect|ellipse|gradient">
+          <input type="checkbox" id="filledChk" /><span>填充（图形 / 径向渐变）</span>
+        </label>
+        <label class="check-row">
+          <input type="checkbox" id="pressureChk" checked /><span>使用数位笔压感</span>
+        </label>
+        <button class="mini wide" id="btnBrushReset">复位当前笔刷参数</button>
+      </section>
+
+      <!-- ── 特殊效果 ── -->
+      <section class="group" data-section="fx">
+        <h4><span class="section-grip" title="拖动调整顺序">⋮⋮</span>特殊效果</h4>
+        <div class="form-row compact">
+          <label>纸张质感</label>
+          <select id="paperSelect" class="mini-select wide"></select>
+        </div>
+        <div class="row-line">
+          <span class="lb">强度</span>
+          <input type="range" id="paperStrength" min="0" max="100" value="0" />
+          <b id="paperStrengthVal">0</b>
+        </div>
+        <div class="row-line">
+          <span class="lb">比例</span>
+          <input type="range" id="paperScale" min="20" max="400" value="100" />
+          <b id="paperScaleVal">100%</b>
+        </div>
+        <div class="form-row compact">
+          <label>特殊效果</label>
+          <select id="fxSelect" class="mini-select wide"></select>
+        </div>
+        <div class="row-line">
+          <span class="lb">宽度</span>
+          <input type="range" id="fxWidth" min="0" max="100" value="0" />
+          <b id="fxWidthVal">0</b>
+        </div>
+        <div class="row-line">
+          <span class="lb">强度</span>
+          <input type="range" id="fxStrength" min="0" max="100" value="0" />
+          <b id="fxStrengthVal">0</b>
+        </div>
+        <div class="row-line tool-only" data-for="blur">
+          <span class="lb">模糊强度</span>
+          <input type="range" id="strengthRange" min="5" max="100" value="70" />
+          <b id="strengthVal">70</b>
+        </div>
+        <div class="row-line tool-only" data-for="smudge">
+          <span class="lb">涂抹强度</span>
+          <input type="range" id="smudgeRange" min="5" max="100" value="60" />
+          <b id="smudgeVal">60</b>
+        </div>
+        <div class="row-line tool-only" data-for="fill|wand">
+          <span class="lb">色差范围</span>
+          <input type="range" id="toleranceRange" min="1" max="120" value="32" />
+          <b id="toleranceVal">32</b>
+        </div>
+        <div class="row-line tool-only" data-for="fill">
+          <span class="lb">扩大</span>
+          <input type="range" id="expandRange" min="0" max="8" value="0" />
+          <b id="expandVal">0</b>
+        </div>
+        <div class="row-line tool-only" data-for="select|selectErase">
+          <span class="lb">选区</span>
+          <span class="sel-actions">
+            <button class="mini" id="btnSelAll" title="全选（Ctrl+A）">全选</button>
+            <button class="mini" id="btnSelInvert" title="反选">反选</button>
+            <button class="mini" id="btnSelNone" title="取消选区（Ctrl+D）">取消</button>
+          </span>
+        </div>
+      </section>
+
+      <!-- ── 颜色 ── -->
+      <section class="group" data-section="color">
+        <h4><span class="section-grip" title="拖动调整顺序">⋮⋮</span>颜色</h4>
+        <div class="wheel-wrap"><canvas id="colorWheel" width="180" height="180"></canvas></div>
+        <div class="color-current">
+          <label class="swatch-lg" id="colorPreview" style="background:#2b2b2b">
+            <input type="color" id="colorInput" value="#2b2b2b" />
+          </label>
+          <div class="color-hex">
+            <input type="text" id="hexInput" value="#2B2B2B" spellcheck="false" maxlength="7" />
+            <div class="recent" id="recentColors"></div>
+            <button class="btn tiny ghost full" id="btnSwap" title="交换前景/背景色（X）">前景 / 背景色互换</button>
+          </div>
+        </div>
+        <div class="palette" id="palette"></div>
+      </section>
+
+      <!-- ── 图层 ── -->
+      <section class="group" data-section="layers">
+        <h4><span class="section-grip" title="拖动调整顺序">⋮⋮</span>图层 <em id="layerCount">1</em>
+          <button class="mini h4-btn" id="btnAddLayer" title="新建图层（Ctrl+Shift+N）">＋ 新建</button>
+        </h4>
+        <div class="form-row compact">
+          <label>混合模式</label>
+          <select id="layerBlend" class="mini-select wide"></select>
+        </div>
+        <div class="row-line">
+          <span class="lb">不透明度</span>
+          <input type="range" id="layerOpacity" min="0" max="100" value="100" />
+          <b id="layerOpacityVal">100</b>
+        </div>
+        <div class="lock-row">
+          <label class="lock-item" title="锁定图层，禁止任何人编辑">
+            <input type="checkbox" id="lockChk" /><span>锁定</span>
+          </label>
+          <label class="lock-item" title="保护不透明度：只能在已有像素上作画">
+            <input type="checkbox" id="alphaLockChk" /><span>保护不透明度</span>
+          </label>
+        </div>
+        <div class="layer-list" id="layerList"></div>
+        <div class="layer-ops">
+          <button class="mini" id="btnLayerDup" title="复制当前图层">复制</button>
+          <button class="mini" id="btnLayerUp" title="上移一层">上移</button>
+          <button class="mini" id="btnLayerDown" title="下移一层">下移</button>
+          <button class="mini" id="btnLayerMerge" title="与下方图层合并">向下合并</button>
+        </div>
+        <div class="layer-ops">
+          <button class="mini" id="btnLayerClear" title="清除当前图层内容">清除</button>
+          <button class="mini danger" id="btnLayerDel" title="删除当前图层">删除</button>
+        </div>
+        <div class="layer-ops">
+          <button class="mini wide" id="btnLayerFlatten" title="把所有可见图层合并为一层（仅房主）">合并可见图层</button>
+        </div>
+      </section>
+
+    </div>
+  </aside>
+
+  <!-- ==================== 中：画布 ==================== -->
+  <section class="stage" id="stage">
+    <div class="canvas-wrap" id="canvasWrap">
+      <canvas id="view"></canvas>
+      <canvas id="overlay"></canvas>
+      <div class="cursors" id="cursors"></div>
+      <div class="brush-cursor hidden" id="brushCursor">
+        <span class="bc-dot"></span>
+      </div>
+    </div>
+
+    <div class="stage-empty" id="stageEmpty">
+      <div class="empty-card">
+        <div class="empty-mark">茶</div>
+        <h3>还没有进入茶绘室</h3>
+        <p>创建一个房间，把链接发给朋友，大家就能在同一张纸上一起画了。</p>
+        <button class="btn primary" id="btnOpenEntry">进入茶绘室</button>
+      </div>
+    </div>
+
+    <!-- 变换面板（对照 SAI2 的「变换」小窗） -->
+    <div class="transform-panel hidden" id="transformPanel">
+      <label class="tp-mode"><input type="radio" name="tpMode" value="free" checked /><span>自由变换</span></label>
+      <label class="tp-mode"><input type="radio" name="tpMode" value="scale" /><span>缩放</span></label>
+      <label class="tp-mode"><input type="radio" name="tpMode" value="distort" /><span>扭曲</span></label>
+      <label class="tp-mode"><input type="radio" name="tpMode" value="rotate" /><span>旋转</span></label>
+      <div class="tp-btns">
+        <button class="tp-btn" id="tpApply">确定</button>
+        <button class="tp-btn" id="tpCancel">中止</button>
+      </div>
+      <div class="tp-persp">
+        <span>透视</span>
+        <input type="range" id="tpPersp" min="0" max="200" value="100" />
+        <b id="tpPerspVal">100</b>
+      </div>
+      <label class="tp-mode tp-auto"><input type="checkbox" id="tpAuto" checked /><span>框选后自动变换</span></label>
+      <button class="tp-wide" id="tpHFlip">水平翻转</button>
+      <button class="tp-wide" id="tpVFlip">垂直翻转</button>
+      <button class="tp-wide" id="tpRot90ccw">逆时针旋转 90 度</button>
+      <button class="tp-wide" id="tpRot90cw">顺时针旋转 90 度</button>
+      <p class="tp-tip">拖动角 / 边调整 · Enter 确定 · Esc 中止</p>
+    </div>
+
+    <div class="replay-bar hidden" id="replayBar">
+      <button class="btn tiny ghost" id="btnReplayExit">退出回放</button>
+      <input type="range" id="replayRange" min="0" max="1000" value="0" />
+      <span id="replayTime">0:00 / 0:00</span>
+      <button class="btn tiny" id="btnReplayToggle">暂停</button>
+      <select id="replaySpeed" class="mini-select">
+        <option value="1">1×</option>
+        <option value="4" selected>4×</option>
+        <option value="12">12×</option>
+        <option value="40">40×</option>
+      </select>
+    </div>
+  </section>
+
+  <!-- ==================== 右：聊天 / 成员 / 笔迹 ==================== -->
+  <aside class="panel right">
+    <div class="tabs">
+      <button class="tab active" data-tab="chat">聊天</button>
+      <button class="tab" data-tab="members">成员 <b id="memberCount">0</b></button>
+      <button class="tab" data-tab="history">笔迹 <b id="strokeCount">0</b></button>
+    </div>
+
+    <div class="tab-body" data-body="chat">
+      <div class="chat-list" id="chatList"></div>
+      <div class="sticker-panel hidden" id="stickerPanel">
+        <div class="sticker-head">
+          <b>表情包</b>
+          <span class="spacer"></span>
+          <button class="mini" id="btnStickerAdd" title="从本地图片添加自己的表情">＋ 添加图片</button>
+          <button class="mini" id="btnStickerManage" title="管理自定义表情">管理</button>
+          <button class="mini" id="btnStickerClose">收起</button>
+        </div>
+        <div class="sticker-scroll">
+          <div class="sticker-sec">内置表情</div>
+          <div class="sticker-grid" id="stickerBuiltin"></div>
+          <div class="sticker-sec">我的表情 <span class="hint-mini" id="stickerMineCount">0</span></div>
+          <div class="sticker-grid" id="stickerMine"></div>
+          <div class="sticker-empty" id="stickerMineEmpty">还没有自定义表情，点右上角「添加图片」放几张进来吧。</div>
+        </div>
+      </div>
+      <div class="chat-input">
+        <button class="btn tiny ghost" id="btnSticker" title="表情包">表情</button>
+        <textarea id="chatInput" rows="1" placeholder="说点什么…（Enter 发送，Shift+Enter 换行）"></textarea>
+        <button class="btn primary" id="btnSend">发送</button>
+      </div>
+      <input type="file" id="stickerFile" accept="image/*" multiple class="hidden" />
+    </div>
+
+    <div class="tab-body hidden" data-body="members">
+      <div class="member-list" id="memberList"></div>
+    </div>
+
+    <div class="tab-body hidden" data-body="history">
+      <div class="history-head">
+        <span id="historyInfo">—</span>
+        <button class="btn tiny" id="btnUndo" title="撤销（Ctrl+Z）">撤销</button>
+        <button class="btn tiny" id="btnRedo" title="重做（Ctrl+Y）">重做</button>
+      </div>
+      <div class="history-list" id="historyList"></div>
+    </div>
+  </aside>
+</main>
+
+<!-- ============ 底栏 ============ -->
+<footer class="statusbar">
+  <span id="statusText">就绪</span>
+  <span class="spacer"></span>
+  <span id="selHint" class="hidden">有选区</span>
+  <span id="brushNow">—</span>
+  <span id="cursorPos">—</span>
+  <span id="canvasSize">—</span>
+</footer>
+
+<!-- ============ 入口 / 房间面板 ============ -->
+<div class="modal-mask hidden" id="entryMask">
+  <div class="modal entry">
+    <div class="modal-head">
+      <h3>进入茶绘室</h3>
+      <button class="icon-btn" id="btnEntryClose">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-row">
+        <label>昵称</label>
+        <input type="text" id="nameInput" maxlength="16" placeholder="输入你的名字" />
+      </div>
+      <div class="form-row">
+        <label>服务器</label>
+        <input type="text" id="serverInput" spellcheck="false" placeholder="ws://localhost:8437/ws" />
+      </div>
+
+      <div class="split">
+        <div class="split-col">
+          <h4>公开房间 <em class="room-count" id="roomCount">0</em></h4>
+          <div class="room-list" id="roomList"></div>
+          <div class="room-list-ops">
+            <button class="btn tiny ghost" id="btnRefreshRooms">刷新列表</button>
+            <button class="btn tiny ghost" id="btnPurgeRooms" title="删掉所有没人在线、也没有任何内容的房间">清理空房</button>
+          </div>
+        </div>
+        <div class="split-col">
+          <h4>创建新房间</h4>
+          <div class="form-row">
+            <label>房间名</label>
+            <input type="text" id="newRoomName" maxlength="20" placeholder="例如：周末茶绘" />
+          </div>
+          <div class="form-row">
+            <label>画布</label>
+            <select id="newRoomSize" class="mini-select wide">
+              <option value="1600x1000">1600 × 1000（横）</option>
+              <option value="1920x1080">1920 × 1080（16:9）</option>
+              <option value="1280x1280">1280 × 1280（方）</option>
+              <option value="1080x1920">1080 × 1920（竖）</option>
+              <option value="2400x1350">2400 × 1350（大横）</option>
+              <option value="800x1200">800 × 1200（A4 竖 @100dpi）</option>
+              <option value="custom">自定义…</option>
+            </select>
+          </div>
+          <div class="form-row hidden" id="newRoomCustomRow">
+            <label>宽 × 高</label>
+            <input type="number" id="newRoomW" min="100" max="8000" step="10" placeholder="宽" />
+            <span class="x-mark">×</span>
+            <input type="number" id="newRoomH" min="100" max="8000" step="10" placeholder="高" />
+            <span class="hint">px</span>
+          </div>
+          <div class="form-row">
+            <label>底纸</label>
+            <div class="paper-picker" id="paperPicker"></div>
+          </div>
+          <div class="form-row">
+            <label>密码</label>
+            <input type="text" id="newRoomPass" maxlength="32" placeholder="留空表示公开" />
+          </div>
+          <button class="btn primary full" id="btnCreateRoom">创建并进入</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast-wrap" id="toastWrap"></div>
+
+<div class="modal-mask hidden" id="confirmMask">
+  <div class="modal confirm">
+    <div class="modal-head">
+      <h3 id="confirmTitle">请确认</h3>
+    </div>
+    <div class="modal-body" id="confirmBody">是否继续？</div>
+    <div class="modal-foot">
+      <button class="btn ghost" id="confirmNo">取消</button>
+      <button class="btn primary" id="confirmYes">确定</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask hidden" id="infoMask">
+  <div class="modal info">
+    <div class="modal-head">
+      <h3 id="infoTitle">房间信息</h3>
+      <button class="icon-btn" id="btnInfoClose">×</button>
+    </div>
+    <div class="modal-body" id="infoBody"></div>
+  </div>
+</div>
+
+<script src="protocol.js"></script>
+<script src="config.js"></script>
+<script src="brushes.js"></script>
+<script src="engine.js"></script>
+<script src="transform.js"></script>
+<script src="net.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

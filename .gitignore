@@ -1,0 +1,31 @@
+# 依赖
+node_modules/
+*/node_modules/
+
+# 打包产物
+dist/
+client/dist/
+*.exe
+*.exe.blockmap
+
+# 运行期数据（房间存档不进版本库）
+server/data/
+
+# 测试/探针产物
+screenshots/
+tools/_*.js
+*.log
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 备份
+*.bak
+client/build/icon-red-backup.png
+
+# DSH 工作记忆（本地笔记，不发布）
+.workbuddy/
