@@ -133,11 +133,16 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
 .workspace {
   height: calc(100% - 48px - 26px);
-  display: grid;
-  grid-template-columns: var(--left-w) 1fr var(--right-w);
+  /* 用 flex 而不是 grid：这样把某一栏隐藏时画布会自动铺满，
+     不会像固定列那样留一条空档。 */
+  display: flex;
   gap: 0;
   min-height: 0;
 }
+/* 画布在左，工具面板和聊天侧栏都在右 —— 靠 order 调视觉顺序，不动 DOM */
+.workspace > .stage { order: 1; flex: 1; min-width: 0; }
+.workspace > .panel.left { order: 2; flex: none; width: var(--left-w); }
+.workspace > .panel.right { order: 3; flex: none; width: var(--right-w); }
 
 .panel {
   background: var(--panel);
@@ -145,7 +150,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
   flex-direction: column;
   min-height: 0;
 }
-.panel.left { border-right: 1px solid var(--line); }
+.panel.left { border-left: 1px solid var(--line); }    /* 现在是右边那一栏，边框换到左边 */
 .panel.right { border-left: 1px solid var(--line); }
 .panel-scroll { overflow-y: auto; overflow-x: hidden; padding: 8px; flex: 1; }
 
@@ -1128,6 +1133,83 @@ input[type=range]::-webkit-slider-thumb {
 
 .room-list-ops { display: flex; gap: 6px; }.room-list-ops .btn { flex: 1; }
 
+/* 侧栏收起后的窄条 + 收起把手 */
+.side-collapse { margin-left: auto; font-size: 14px; line-height: 1; }
+.side-rail {
+  order: 4;
+  flex: none;
+  width: 18px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0;
+}
+.side-rail:hover { background: #eef2f8; color: var(--text); }
+
+/* ---------------- 独立浮窗（参考图） ---------------- */
+.float-win {
+  position: absolute;
+  right: 332px;
+  top: 64px;
+  z-index: 55;
+  display: flex;
+  flex-direction: column;
+  width: 320px;
+  height: 260px;
+  min-width: 160px;
+  min-height: 120px;
+  background: var(--panel);
+  border: 1px solid #cfd7e3;
+  border-radius: 10px;
+  box-shadow: 0 10px 28px rgba(20, 30, 50, .20);
+  overflow: hidden;
+  resize: both;
+}
+.fw-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 7px;
+  background: #eef1f5;
+  border-bottom: 1px solid var(--line);
+  cursor: move;
+  user-select: none;
+  flex: none;
+}
+.fw-head b { font-size: 12px; }
+.fw-name {
+  font-size: 11px;
+  color: var(--text-dim);
+  max-width: 92px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fw-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background:
+    linear-gradient(45deg, #eef1f5 25%, transparent 25%, transparent 75%, #eef1f5 75%) 0 0 / 16px 16px,
+    linear-gradient(45deg, #eef1f5 25%, #fff 25%, #fff 75%, #eef1f5 75%) 8px 8px / 16px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+}
+.fw-body img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.fw-foot { flex: none; padding: 3px 7px 5px; border-top: 1px solid var(--line-soft); }
+
 /* ---------------- 画布上沿的快捷小菜单 ---------------- */
 .quickbar {
   position: absolute;
@@ -1192,6 +1274,14 @@ input[type=range]::-webkit-slider-thumb {
 }
 .qb-input:hover { background: #f1f5fa; border-color: #dde3ec; }
 .qb-input:focus { outline: none; background: #fff; border-color: var(--accent); }
+.qb-input.attention, .qb-num.attention {
+  animation: qb-attn 0.35s ease 3;
+}
+@keyframes qb-attn {
+  0%, 100% { background: transparent; }
+  50% { background: #ffe9a8; }
+}
+
 .qb-select {
   font: inherit; font-size: 11.5px;
   height: 22px; border-radius: 5px;

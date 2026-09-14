@@ -215,8 +215,9 @@
           ]
         }),
         SEP,
-        def('ruler', 'ruler.steadierUp', '抖动修正 +', { run: function () { A().nudgeSteadier(1); } }),
-        def('ruler', 'ruler.steadierDown', '抖动修正 −', { run: function () { A().nudgeSteadier(-1); } })
+        def('ruler', 'ruler.steadier', '手抖修正（在画布上沿的快捷条里调）', {
+          run: function () { A().toggleQuickBarSteadier(); }
+        })
       ]
     },
     {
@@ -234,7 +235,7 @@
             sub('filter', 'filter.blurTool', '模糊工具', { key: 'U', run: function () { A().setTool('blur'); } }),
             sub('filter', 'filter.smudgeTool', '涂抹工具', { key: 'S', run: function () { A().setTool('smudge'); } }),
             sub('filter', 'filter.liquify', '液化…', { run: function () { A().setTool('liquify'); } }),
-            { label: '高斯模糊（暂未实现）', disabled: true }
+            sub('filter', 'filter.blur.gauss', '高斯模糊…', { run: function () { A().openBlurDialog(); } })
           ]
         }),
         SEP,
@@ -345,7 +346,9 @@
         SEP,
         def('other', 'other.about', '关于茶绘 / 用户准则 / 风险须知', { mnemonic: 'B', run: function () { A().openAbout(); } }),
         def('other', 'other.update', '检查更新', { mnemonic: 'U', run: function () { A().openAbout(); A().checkUpdate(); } }),
-        def('other', 'other.sysid', '系统 ID', { mnemonic: 'S', disabled: true })
+        // SAI2 这里是「系统 ID」；茶绘没有那套东西，改成显示当前版本更实在
+        def('other', 'other.version', '版本 ' + ((global.CHAHU_CONFIG && global.CHAHU_CONFIG.appVersion) || '—'),
+          { mnemonic: 'V', run: function () { A().openAbout(); } })
       ]
     }
   ];

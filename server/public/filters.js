@@ -16,6 +16,13 @@
 
   function clamp255(v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
 
+  function newCanvas(w, h) {
+    var c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    var ctx = c.getContext('2d');
+    return { canvas: c, ctx: ctx };
+  }
+
   /** 这三个都为 0 就是恒等变换 —— 调用方可以据此跳过整趟循环 */
   function isIdentity(o) {
     return !o || (!o.brightness && !o.contrast && !o.hue && !o.saturation);
@@ -167,7 +174,63 @@
     return out;
   }
 
+  /* ============================================================ 高斯模糊 */
+
+  /**
+   * 高斯模糊（用 canvas 原生的 filter，Chrome/Electron 里就是真高斯）。
+   *
+   * 直接 blur 有个坑：画布外的像素是「透明」，模糊会把四条边的内容也一起
+   * 稀释掉，结果边缘一圈发虚发白。做法是先造一张**四周按边缘像素延展**的
+   * 大画布（把原图在 9 个位置各画一遍），模糊它，再把中间那块裁回来。
+   */
+  function blurCanvas(src, radius, rect) {
+    var W = src.width, H = src.height;
+    var out = newCanvas(W, H);
+    var r = Math.max(0, Math.min(200, Number(radius) || 0));
+    if (r < 0.05) { out.ctx.drawImage(src, 0, 0); return out; }
+
+    var pad = Math.ceil(r * 3);
+    var pw = W + pad * 2, ph = H + pad * 2;
+    var big = document.createElement('canvas');
+    big.width = pw; big.height = ph;
+    var bc = big.getContext('2d');
+    // 9 次平铺：让四周的 padding 拿到边缘像素，模糊时边缘才不会被稀释
+    for (var oy = -1; oy <= 1; oy++) {
+      for (var ox = -1; ox <= 1; ox++) {
+        bc.drawImage(src, pad + ox * W, pad + oy * H);
+      }
+    }
+    out.ctx.save();
+    out.ctx.filter = 'blur(' + r.toFixed(2) + 'px)';
+    out.ctx.drawImage(big, -pad, -pad);
+    out.ctx.restore();
+    out.ctx.filter = 'none';
+
+    // 只保留当前图层原本有像素的地方 —— 模糊不该把透明的图层变成一坨灰雾
+    if (!rect) {
+      var t = document.createElement('canvas');
+      t.width = W; t.height = H;
+      var tc = t.getContext('2d');
+      tc.drawImage(src, 0, 0);
+      tc.globalCompositeOperation = 'destination-in';
+      // 用「原图不透明的范围」当遮罩：先做一份实心轮廓
+      tc.globalCompositeOperation = 'source-in';
+      tc.fillStyle = '#fff';
+      tc.fillRect(0, 0, W, H);
+      // 轮廓按半径膨胀一点，免得边缘被裁掉
+      var grown = document.createElement('canvas');
+      grown.width = W; grown.height = H;
+      var gc = grown.getContext('2d');
+      for (var dy = -1; dy <= 1; dy++) for (var dx = -1; dx <= 1; dx++) gc.drawImage(t, dx * r * 0.5, dy * r * 0.5);
+      out.ctx.globalCompositeOperation = 'destination-in';
+      out.ctx.drawImage(grown, 0, 0);
+      out.ctx.globalCompositeOperation = 'source-over';
+    }
+    return out;
+  }
+
   global.ChaFilters = {
+    blurCanvas: blurCanvas,
     LEVELS_DEFAULTS: LEVELS_DEFAULTS,
     isLevelsIdentity: isLevelsIdentity,
     applyLevels: applyLevels,

@@ -84,38 +84,43 @@ function ok(name, cond, extra) {
     const blob = await new Promise(r => c.toBlob(r, 'image/png'));
     const f = new File([blob], '参考图.png', { type: 'image/png' });
     window.ChaApp.loadReferenceImage(f);
-    await new Promise(r => setTimeout(r, 600));
-    const el = document.querySelector('.ref-canvas');
+    await new Promise(r => setTimeout(r, 800));
+    const w = document.querySelector('#refWindow');
     return {
-      hasCanvas: !!el,
-      badge: !!document.querySelector('#refBadge'),
-      badgeText: (document.querySelector('#refBadge') || {}).textContent || '',
-      pointerEvents: el ? getComputedStyle(el).pointerEvents : '',
-      name: window.ChaApp.state.ref && window.ChaApp.state.ref.name
+      open: w && !w.classList.contains('hidden'),
+      hasImg: !!document.querySelector('#refImg').getAttribute('src'),
+      name: document.querySelector('#refName').textContent,
+      hint: (document.querySelector('#refHint') || {}).textContent || '',
+      isOverlay: !!document.querySelector('.ref-canvas'),
+      // 浮窗是独立 DOM，不再是压在画布上的 canvas
+      tag: w ? w.tagName : ''
     };
   });
   console.log('  ' + JSON.stringify(ref));
-  ok('参考图放上画布了', ref.hasCanvas === true);
-  ok('右下角有「只有自己看得见」的提示条', ref.badge && /只有你自己看得见/.test(ref.badgeText), ref.badgeText.slice(0, 40));
-  ok('参考图不吃鼠标事件（不挡画画）', ref.pointerEvents === 'none', ref.pointerEvents);
+  // 参考图现在是**独立浮窗**（像 PS 另开一张图），可拖动 / 缩放 / 关闭；
+  // 不是盖在画布上的那一层。拖动 / 本地性由 test-layout.js 详细验。
+  ok('参考图以独立浮窗打开', ref.open === true && ref.tag === 'DIV', ref.tag);
+  ok('图片真的加载出来了', ref.hasImg === true);
+  ok('标题栏显示文件名', /参考图\.png/.test(ref.name), ref.name);
+  ok('标注了「只有你自己看得见」', /只有你自己看得见/.test(ref.hint), ref.hint.slice(0, 30));
+  ok('不再是盖在画布上的那一层', ref.isOverlay === false);
 
   // ★ 关键：参考图绝不能出现在同步数据里
   const leak = await page.evaluate(() => {
-    const st = window.ChaApp.engine.strokes;
     const json = JSON.stringify({
-      strokes: st,
+      strokes: window.ChaApp.engine.strokes,
       layers: window.ChaApp.engine.layers.map(l => ({ id: l.id, name: l.name, hasBase: !!l.baseImage }))
     });
-    return { refInStrokes: /ref-canvas|参考图/.test(json), n: st.length };
+    return { refInData: /ref-canvas|参考图/.test(json), n: window.ChaApp.engine.strokes.length };
   });
-  ok('参考图没有混进笔迹 / 图层数据（不会同步给别人）', leak.refInStrokes === false, '笔迹 ' + leak.n + ' 条');
+  ok('参考图没有混进笔迹 / 图层数据（不会同步给别人）', leak.refInData === false, '笔迹 ' + leak.n + ' 条');
 
   const gone = await page.evaluate(async () => {
     window.ChaApp.clearReferenceImage();
     await new Promise(r => setTimeout(r, 300));
-    return { el: !!document.querySelector('.ref-canvas'), badge: !!document.querySelector('#refBadge') };
+    return { open: !document.querySelector('#refWindow').classList.contains('hidden') };
   });
-  ok('能移除参考图', gone.el === false && gone.badge === false, JSON.stringify(gone));
+  ok('能关闭参考图浮窗', gone.open === false, JSON.stringify(gone));
 
   /* ---------- 关于 / 准则 / 风险 / 更新 ---------- */
   console.log('\n=== 关于 ===');

@@ -3915,6 +3915,18 @@
     $('#btnLevelsCancel').addEventListener('click', function () { closeLevelsDialog(false); });
     $('#btnLevelsZero').addEventListener('click', function () { closeLevelsDialog(false); });
 
+    // 高斯模糊
+    $('#blurRadius').addEventListener('input', function () {
+      $('#blurRadiusVal').textContent = Number(this.value).toFixed(1);
+      updateTonePreview();
+    });
+    $('#btnBlurReset').addEventListener('click', function () {
+      $('#blurRadius').value = 6; $('#blurRadiusVal').textContent = '6.0'; updateTonePreview();
+    });
+    $('#btnBlurOk').addEventListener('click', function () { closeBlurDialog(true); });
+    $('#btnBlurCancel').addEventListener('click', function () { closeBlurDialog(false); });
+    $('#btnBlurZero').addEventListener('click', function () { closeBlurDialog(false); });
+
     // 导出
     $('#exportFormat').addEventListener('change', syncExportNote);
     $('#exportQuality').addEventListener('input', function () { $('#exportQualityVal').textContent = this.value; });
@@ -4117,6 +4129,11 @@
     bindWheel();
     bindPanelDnD();
     bindQuickBar();
+    bindRefWindow();
+    // 侧栏收拉：把手 / 窄条 / F4（菜单里那项也走同一个函数）
+    $('#btnSideCollapse').addEventListener('click', function () { setSideCollapsed(true); });
+    $('#sideRail').addEventListener('click', function () { setSideCollapsed(false); });
+    setSideCollapsed(lsGet('chahu.side', '1') === '0');
     $('#btnAboutClose').addEventListener('click', function () { $('#aboutMask').classList.add('hidden'); });
     $('#btnCheckUpdate').addEventListener('click', checkUpdate);
     $$('.about-tabs .tab').forEach(function (t) { t.addEventListener('click', function () { showAboutTab(t.dataset.atab); }); });
@@ -4377,14 +4394,6 @@
   function flipView() { engine.flipView(); }
   function rotateView(deg, reset) { if (reset) engine.setRotation(0); else engine.rotateBy(deg); }
 
-  function toggleSide() {
-    var el = document.querySelector('aside.panel.right');
-    if (!el) return;
-    var hidden = el.classList.toggle('hidden');
-    try { localStorage.setItem('chahu.side', hidden ? '0' : '1'); } catch (e) { /* ignore */ }
-    engine.resize();
-    toast(hidden ? '已隐藏侧栏' : '已显示侧栏');
-  }
 
   function sectionEl(id) { return document.querySelector('#leftPanelScroll [data-section="' + id + '"]'); }
 
@@ -4602,6 +4611,22 @@
 
   var QB_COLLAPSED = 'chahu.quickbar.collapsed';
 
+  /** 菜单里那项「手抖修正」：把快捷条拉出来并高亮一下，告诉用户去哪儿调 */
+  function toggleQuickBarSteadier() {
+    var bar = $('#quickBar');
+    if (bar && bar.classList.contains('collapsed')) {
+      bar.classList.remove('collapsed');
+      $('#qbToggle').textContent = '▾';
+      try { localStorage.setItem('chahu.quickbar.collapsed', '0'); } catch (e) { /* ignore */ }
+    }
+    var el = $('#qbSteadierText');
+    if (el) {
+      el.classList.add('attention');
+      setTimeout(function () { el.classList.remove('attention'); }, 1200);
+    }
+    toast('手抖修正在画布上沿的快捷条里：− 0 ＋');
+  }
+
   function bindQuickBar() {
     var bar = $('#quickBar');
     if (!bar) return;
@@ -4696,93 +4721,6 @@
     if (vm && !vm.dataset.busy) vm.value = engine.flipX ? 'flipH' : 'normal';
     var s = $('#qbSteadierText');
     if (s) s.textContent = String(Math.round(Number(S.brush.steadier) || 0));
-  }
-
-  /* ================================================================
-   * 参考图：只放在本机当描图参考，**不上传、别人看不到**
-   * ================================================================ */
-
-  function pickReferenceImage() {
-    if (S.ref && S.ref.img) {
-      var act = confirm('已经有一张参考图了。\n\n确定 = 换一张\n取消 = 移除参考图');
-      if (!act) { clearReferenceImage(); return; }
-    }
-    var input = $('#refFileInput');
-    if (!input) return;
-    input.value = '';
-    input.click();
-  }
-
-  function clearReferenceImage() {
-    if (S.ref && S.ref.canvas) S.ref.canvas.remove();
-    S.ref = null;
-    var b = $('#refBadge');
-    if (b) b.remove();
-    toast('已移除参考图');
-  }
-
-  function loadReferenceImage(file) {
-    if (!file) return;
-    var fr = new FileReader();
-    fr.onload = function () {
-      var img = new Image();
-      img.onload = function () {
-        if (S.ref && S.ref.canvas) S.ref.canvas.remove();
-        var cv = document.createElement('canvas');
-        cv.width = engine.width;
-        cv.height = engine.height;
-        var cx = cv.getContext('2d');
-        // 按「装得下」缩放，居中放置
-        var k = Math.min(engine.width / img.width, engine.height / img.height, 1);
-        var w = img.width * k, h = img.height * k;
-        cx.globalAlpha = 0.55;
-        cx.drawImage(img, (engine.width - w) / 2, (engine.height - h) / 2, w, h);
-        cv.className = 'ref-canvas';
-        cv.style.position = 'absolute';
-        cv.style.pointerEvents = 'none';
-        cv.style.opacity = String(S.refAlpha || 0.55);
-        $('#canvasWrap').appendChild(cv);
-        S.ref = { canvas: cv, name: file.name, img: img };
-        layoutReference();
-        var b = $('#refBadge');
-        if (!b) {
-          b = document.createElement('div');
-          b.className = 'ref-badge';
-          b.id = 'refBadge';
-          $('#stage').appendChild(b);
-        }
-        b.innerHTML = '参考图 <b>' + esc(file.name) + '</b>（只有你自己看得见）' +
-          ' <button class="mini" id="refAlphaDown">调淡</button>' +
-          ' <button class="mini" id="refAlphaUp">调深</button>' +
-          ' <button class="mini" id="refRemove">移除</button>';
-        $('#refAlphaDown').onclick = function () { setRefAlpha(-0.1); };
-        $('#refAlphaUp').onclick = function () { setRefAlpha(0.1); };
-        $('#refRemove').onclick = clearReferenceImage;
-        toast('参考图已放上（本机可见，不会同步给别人）', 'ok', 4000);
-      };
-      img.onerror = function () { toast('这张图读不出来', 'err'); };
-      img.src = fr.result;
-    };
-    fr.readAsDataURL(file);
-  }
-
-  function setRefAlpha(d) {
-    S.refAlpha = Math.max(0.1, Math.min(1, (S.refAlpha || 0.55) + d));
-    if (S.ref && S.ref.canvas) S.ref.canvas.style.opacity = String(S.refAlpha);
-  }
-
-  /** 参考图要跟着画布的平移缩放一起动，否则它不会贴在纸上 */
-  function layoutReference() {
-    if (!S.ref || !S.ref.canvas) return;
-    var wrap = $('#canvasWrap');
-    var r = wrap.getBoundingClientRect();
-    var s = engine.scale || 1;
-    var cv = S.ref.canvas;
-    cv.style.left = (engine.tx || 0) + 'px';
-    cv.style.top = (engine.ty || 0) + 'px';
-    cv.style.width = (engine.width * s) + 'px';
-    cv.style.height = (engine.height * s) + 'px';
-    void r;
   }
 
   /* ================================================================
@@ -5034,6 +4972,41 @@
       '　输出 ' + o.outBlack + '~' + o.outWhite, 'ok', 3800);
   }
 
+  /* ---------------- 高斯模糊 ---------------- */
+
+  function blurRadius() { return Number($('#blurRadius').value); }
+
+  function openBlurDialog() {
+    if (!S.joined) { toast('先进入一个房间', 'err'); return; }
+    var layer = engine.activeLayer();
+    if (!layer) return;
+    if (engine.transform) { toast('先按 Enter 确定当前的变换'); return; }
+    if (!layer.baseImage && !layer.strokes.length) { toast('「' + layer.name + '」上还没有内容', 'err'); return; }
+    S.filterMode = 'blur';
+    S.toneLayerId = layer.id;
+    $('#blurNote').textContent = '作用于图层「' + layer.name + '」。画布上就是最终效果。';
+    $('#blurRadiusVal').textContent = blurRadius().toFixed(1);
+    updateTonePreview();
+    $('#blurMask').classList.remove('hidden');
+  }
+
+  function closeBlurDialog(apply) {
+    var id = S.toneLayerId;
+    S.toneLayerId = null;
+    engine.layerOverride = null;
+    engine.invalidate();
+    $('#blurMask').classList.add('hidden');
+    if (!apply || !id) return;
+    var r = blurRadius();
+    if (r < 0.05) { toast('半径为 0，没有改动'); return; }
+    var filtered = global.ChaFilters.blurCanvas(engine.renderLayerRaw(id), r).canvas;
+    net.send(P.C2S.LAYER_PIXELS, {
+      layerId: id, png: filtered.toDataURL('image/png'), upToSeq: engine.seq, label: '高斯模糊'
+    });
+    pushOp({ type: 'pixels', layerId: id, label: '高斯模糊', before: null, after: null });
+    toast('已应用高斯模糊：半径 ' + r.toFixed(1) + 'px', 'ok', 3400);
+  }
+
   function openToneDialog() {
     if (!S.joined) { toast('先进入一个房间', 'err'); return; }
     var layer = engine.activeLayer();
@@ -5055,7 +5028,11 @@
     var layer = engine.getLayer(S.toneLayerId);
     if (!layer) return;
     var raw = engine.renderLayerRaw(S.toneLayerId);        // 该图层现在的样子（含未提交笔迹）
-    if (S.filterMode === 'levels') {
+    if (S.filterMode === 'blur') {
+      var br = blurRadius();
+      engine.layerOverride = br < 0.05 ? null
+        : { layerId: S.toneLayerId, canvas: global.ChaFilters.blurCanvas(raw, br).canvas };
+    } else if (S.filterMode === 'levels') {
       var lo = levelsOpts();
       engine.layerOverride = global.ChaFilters.isLevelsIdentity(lo)
         ? null
@@ -5283,6 +5260,164 @@
     setTimeout(function () { $('#textInput').focus(); }, 60);
   }
 
+  /* ================================================================
+   * 参考图（独立浮窗）
+   *
+   * 以前是直接盖在画布上的一层，会挡着画画；现在做成**独立浮窗**——
+   * 像 PS 里另开一张图那样：可以拖着走、拖角缩放、随时关掉。
+   * 仍然是**本机私有**的：不写进笔迹、不写进图层、不上传。
+   * ================================================================ */
+
+  var REF_LS = 'chahu.refWindow';
+
+  function refWindowEl() { return $('#refWindow'); }
+
+  function saveRefRect() {
+    var w = refWindowEl();
+    if (!w || w.classList.contains('hidden')) return;
+    try {
+      localStorage.setItem(REF_LS, JSON.stringify({
+        left: w.offsetLeft, top: w.offsetTop,
+        width: w.offsetWidth, height: w.offsetHeight
+      }));
+    } catch (e) { /* ignore */ }
+  }
+
+  function restoreRefRect() {
+    var w = refWindowEl();
+    if (!w) return;
+    var st = null;
+    try { st = JSON.parse(localStorage.getItem(REF_LS) || 'null'); } catch (e) { st = null; }
+    if (!st) return;
+    var stage = $('#stage').getBoundingClientRect();
+    // 别把窗口恢复到看不见的地方
+    if (st.width >= 160) w.style.width = st.width + 'px';
+    if (st.height >= 120) w.style.height = st.height + 'px';
+    if (typeof st.left === 'number' && st.left > -20 && st.left < stage.width - 40) w.style.left = st.left + 'px';
+    if (typeof st.top === 'number' && st.top > -10 && st.top < stage.height - 40) w.style.top = st.top + 'px';
+    w.style.right = 'auto';
+  }
+
+  function bindRefWindow() {
+    var w = refWindowEl();
+    if (!w) return;
+
+    // 拖标题栏移动
+    var drag = null;
+    $('#refHead').addEventListener('pointerdown', function (e) {
+      if (e.target.tagName === 'BUTTON') return;
+      var r = w.getBoundingClientRect();
+      drag = { dx: e.clientX - r.left, dy: e.clientY - r.top, id: e.pointerId };
+      $('#refHead').setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    $('#refHead').addEventListener('pointermove', function (e) {
+      if (!drag || e.pointerId !== drag.id) return;
+      var stage = $('#stage').getBoundingClientRect();
+      var x = Math.max(-w.offsetWidth + 60, Math.min(stage.width - 60, e.clientX - stage.left - drag.dx));
+      var y = Math.max(0, Math.min(stage.height - 30, e.clientY - stage.top - drag.dy));
+      w.style.left = x + 'px';
+      w.style.top = y + 'px';
+      w.style.right = 'auto';
+    });
+    $('#refHead').addEventListener('pointerup', function (e) {
+      if (!drag) return;
+      drag = null;
+      void e;
+      saveRefRect();
+    });
+
+    $('#refAlphaDown').addEventListener('click', function () { setRefAlpha(-0.1); });
+    $('#refAlphaUp').addEventListener('click', function () { setRefAlpha(0.1); });
+    $('#refFit').addEventListener('click', function () {
+      w.style.width = '320px';
+      w.style.height = '260px';
+      saveRefRect();
+    });
+    $('#refClose').addEventListener('click', clearReferenceImage);
+    // 缩放（CSS resize）之后记一下尺寸
+    if (global.ResizeObserver) {
+      new global.ResizeObserver(function () { saveRefRect(); }).observe(w);
+    }
+  }
+
+  function pickReferenceImage() {
+    if (S.ref && S.ref.dataUrl) {
+      var act = confirm('已经有一张参考图了。\n\n确定 = 换一张\n取消 = 保持原样');
+      if (!act) return;
+    }
+    var input = $('#refFileInput');
+    if (!input) return;
+    input.value = '';
+    input.click();
+  }
+
+  function clearReferenceImage() {
+    var w = refWindowEl();
+    if (w) w.classList.add('hidden');
+    S.ref = null;
+    var img = $('#refImg');
+    if (img) img.removeAttribute('src');
+    toast('已关闭参考图');
+  }
+
+  /** 打开一张参考图（独立浮窗，只有自己看得见） */
+  function loadReferenceImage(file) {
+    if (!file) return;
+    var fr = new FileReader();
+    fr.onload = function () {
+      var url = fr.result;
+      var img = $('#refImg');
+      if (!img) return;
+      img.onload = function () {
+        var w = refWindowEl();
+        w.classList.remove('hidden');
+        restoreRefRect();
+        $('#refName').textContent = file.name;
+        img.style.opacity = String(S.refAlpha || 1);
+        // 按图片比例给个合适的初始尺寸（只在第一次或换图时调）
+        var st = null;
+        try { st = JSON.parse(localStorage.getItem(REF_LS) || 'null'); } catch (e) { st = null; }
+        if (!st && img.naturalWidth && img.naturalHeight) {
+          var k = Math.min(320 / img.naturalWidth, 260 / img.naturalHeight, 1);
+          w.style.width = Math.max(160, Math.round(img.naturalWidth * k) + 16) + 'px';
+          w.style.height = Math.max(140, Math.round(img.naturalHeight * k) + 62) + 'px';
+        }
+        S.ref = { name: file.name, dataUrl: url };
+        toast('参考图已打开（独立浮窗，不会同步给别人）', 'ok', 4000);
+      };
+      img.onerror = function () { toast('这张图读不出来', 'err'); };
+      img.src = url;
+    };
+    fr.readAsDataURL(file);
+  }
+
+  function setRefAlpha(d) {
+    S.refAlpha = Math.max(0.1, Math.min(1, (S.refAlpha || 1) + d));
+    var img = $('#refImg');
+    if (img) img.style.opacity = String(S.refAlpha);
+    toast('参考图不透明度 ' + Math.round(S.refAlpha * 100) + '%');
+  }
+
+  /* ================================================================
+   * 侧栏收拉（聊天 / 成员 / 笔迹）
+   * ================================================================ */
+
+  function setSideCollapsed(collapsed) {
+    var el = $('#sidePanel');
+    var rail = $('#sideRail');
+    if (!el) return;
+    el.classList.toggle('hidden', !!collapsed);
+    if (rail) rail.classList.toggle('hidden', !collapsed);
+    S.sideCollapsed = !!collapsed;
+    try { localStorage.setItem('chahu.side', collapsed ? '0' : '1'); } catch (e) { /* ignore */ }
+    engine.resize();
+  }
+
+  function toggleSide() {
+    setSideCollapsed(!S.sideCollapsed);
+  }
+
   global.ChaApp = {
     engine: engine, net: net, state: S, undo: undo, redo: redo, toast: toast,
     // 笔刷导入（给测试用，也让控制台里能手动导一支试试）
@@ -5325,8 +5460,10 @@
     openAbout: openAbout, checkUpdate: checkUpdate, cmpVer: cmpVer,
     openToneDialog: openToneDialog, updateTonePreview: updateTonePreview, closeToneDialog: closeToneDialog,
     openLevelsDialog: openLevelsDialog, closeLevelsDialog: closeLevelsDialog, levelsOpts: levelsOpts, levelsAuto: levelsAuto,
+    openBlurDialog: openBlurDialog, closeBlurDialog: closeBlurDialog, blurRadius: blurRadius,
     openExportDialog: openExportDialog, exportAs: exportAs, syncExportNote: syncExportNote,
     armRuler: armRuler, clearRuler: clearRuler, toggleRulerVisible: toggleRulerVisible, commitRuler: commitRuler,
+    toggleQuickBarSteadier: toggleQuickBarSteadier,
     openTextDialog: openTextDialog, commitText: commitText, placeTextAt: placeTextAt, textOpts: textOpts,
     bindQuickBar: bindQuickBar, updateQuickBar: updateQuickBar,
     loadReferenceImage: loadReferenceImage, clearReferenceImage: clearReferenceImage

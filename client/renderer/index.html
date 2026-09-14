@@ -401,11 +401,12 @@
   </section>
 
   <!-- ==================== 右：聊天 / 成员 / 笔迹 ==================== -->
-  <aside class="panel right">
+  <aside class="panel right" id="sidePanel">
     <div class="tabs">
       <button class="tab active" data-tab="chat">聊天</button>
       <button class="tab" data-tab="members">成员 <b id="memberCount">0</b></button>
       <button class="tab" data-tab="history">笔迹 <b id="strokeCount">0</b></button>
+      <button class="icon-btn side-collapse" id="btnSideCollapse" title="收起侧栏（F4）">»</button>
     </div>
 
     <div class="tab-body" data-body="chat">
@@ -447,6 +448,9 @@
       <div class="history-list" id="historyList"></div>
     </div>
   </aside>
+
+  <!-- 侧栏收起之后留一条窄条，点一下再拉出来（F4 也一样） -->
+  <button class="side-rail hidden" id="sideRail" title="拉出聊天 / 成员 / 笔迹侧栏（F4）">«</button>
 </main>
 
 <!-- ============ 底栏 ============ -->
@@ -767,6 +771,49 @@
         <span class="spacer"></span>
         <button class="btn tiny ghost" id="btnLevelsZero">取消</button>
         <button class="btn tiny primary" id="btnLevelsOk">确定</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 参考图（独立浮窗，只有自己看得见） ============ -->
+<div class="float-win hidden" id="refWindow">
+  <div class="fw-head" id="refHead">
+    <b>参考图</b>
+    <span class="fw-name" id="refName">—</span>
+    <span class="spacer"></span>
+    <button class="mini" id="refAlphaDown" title="调淡">－</button>
+    <button class="mini" id="refAlphaUp" title="调深">＋</button>
+    <button class="mini" id="refFit" title="适应窗口大小">适应</button>
+    <button class="icon-btn" id="refClose" title="关闭参考图">×</button>
+  </div>
+  <div class="fw-body" id="refBody">
+    <img id="refImg" alt="参考图" />
+  </div>
+  <div class="fw-foot">
+    <span class="hint-mini" id="refHint">拖动标题栏移动 · 拖右下角缩放 · 只有你自己看得见</span>
+  </div>
+</div>
+
+<!-- ============ 高斯模糊 ============ -->
+<div class="modal-mask hidden" id="blurMask">
+  <div class="modal tone">
+    <div class="modal-head">
+      <h3>高斯模糊</h3>
+      <button class="icon-btn" id="btnBlurCancel">×</button>
+    </div>
+    <div class="modal-body">
+      <p class="hint" id="blurNote">—</p>
+      <div class="tone-row">
+        <label>半径</label>
+        <input type="range" id="blurRadius" min="0" max="60" step="0.5" value="6" />
+        <b id="blurRadiusVal">6.0</b>
+      </div>
+      <div class="imp-actions">
+        <button class="btn tiny ghost" id="btnBlurReset">重置</button>
+        <span class="spacer"></span>
+        <button class="btn tiny ghost" id="btnBlurZero">取消</button>
+        <button class="btn tiny primary" id="btnBlurOk">确定</button>
       </div>
     </div>
   </div>
