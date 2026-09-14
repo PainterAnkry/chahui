@@ -3953,6 +3953,11 @@
     bindViewBar();
     bindWheel();
     bindPanelDnD();
+    bindQuickBar();
+    $('#btnAboutClose').addEventListener('click', function () { $('#aboutMask').classList.add('hidden'); });
+    $('#btnCheckUpdate').addEventListener('click', checkUpdate);
+    $$('.about-tabs .tab').forEach(function (t) { t.addEventListener('click', function () { showAboutTab(t.dataset.atab); }); });
+    $('#refFileInput').addEventListener('change', function () { loadReferenceImage(this.files[0]); });
     bindTransformPanel();
     engine.attach($('#view'), $('#overlay'));
 
@@ -4410,6 +4415,302 @@
     global.ChaMenu.openKeyDialog();
   }
 
+  /* ================================================================
+   * 画布上沿的快捷小菜单（照 SAI2 顶部那一条）
+   * ================================================================ */
+
+  var QB_COLLAPSED = 'chahu.quickbar.collapsed';
+
+  function bindQuickBar() {
+    var bar = $('#quickBar');
+    if (!bar) return;
+
+    function setCollapsed(on) {
+      bar.classList.toggle('collapsed', !!on);
+      $('#qbToggle').textContent = on ? '▸' : '▾';
+      $('#qbToggle').title = on ? '拉开快捷菜单' : '收起快捷菜单';
+      try { localStorage.setItem(QB_COLLAPSED, on ? '1' : '0'); } catch (e) { /* ignore */ }
+    }
+    setCollapsed(lsGet(QB_COLLAPSED, '0') === '1');
+    $('#qbToggle').addEventListener('click', function () {
+      setCollapsed(!bar.classList.contains('collapsed'));
+    });
+
+    var on = function (id, fn) { var el = $(id); if (el) el.addEventListener('click', fn); };
+    on('#qbUndo', function () { undo(); });
+    on('#qbRedo', function () { redo(); });
+    on('#qbZoomIn', function () { engine.setZoom(engine.scale * 1.25); });
+    on('#qbZoomOut', function () { engine.setZoom(engine.scale / 1.25); });
+    on('#qbZoomFit', function () { engine.fitView(); });
+    on('#qbZoom100', function () { engine.setZoom(1); });
+    on('#qbRotL', function () { engine.rotateBy(-15); });
+    on('#qbRotR', function () { engine.rotateBy(15); });
+    on('#qbRotReset', function () { engine.setRotation(0); updateQuickBar(); });
+    on('#qbFlip', function () { engine.flipView(); });
+    on('#qbSteadierUp', function () { nudgeSteadier(1); });
+    on('#qbSteadierDown', function () { nudgeSteadier(-1); });
+    on('#qbRuler', function () {
+      var order = ['none', 'v', 'h', 'quad'];
+      var next = order[(order.indexOf(S.sym) + 1) % order.length];
+      setSymmetry(next);
+    });
+    on('#qbRef', function () { pickReferenceImage(); });
+
+    var vm = $('#qbViewMode');
+    if (vm) {
+      vm.addEventListener('change', function () {
+        var v = vm.value;
+        var wantFlip = (v === 'flipH');
+        if (!!engine.flipX !== wantFlip) engine.flipView();
+        engine.viewGray = (v === 'gray');
+        engine.invalidate();
+        updateQuickBar();
+        toast({ normal: '视图：正常', gray: '视图：灰度预览', flipH: '视图：水平翻转' }[v] || v);
+      });
+    }
+    engine.on('viewport', function () { updateQuickBar(); });
+    updateQuickBar();
+  }
+
+  /** 快捷条上那些数字要跟着视图变 */
+  function updateQuickBar() {
+    var z = $('#qbZoomText');
+    if (z) z.textContent = Math.round((engine.scale || 1) * 100) + '%';
+    var r = $('#qbRotText');
+    if (r) r.textContent = ((engine.rot || 0) * 180 / Math.PI).toFixed(1) + '°';
+    var f = $('#qbFlip');
+    if (f) f.classList.toggle('active', !!engine.flipX);
+    var vm = $('#qbViewMode');
+    if (vm && !vm.dataset.busy) vm.value = engine.flipX ? 'flipH' : 'normal';
+    var s = $('#qbSteadierText');
+    if (s) s.textContent = String(Math.round(Number(S.brush.steadier) || 0));
+  }
+
+  /* ================================================================
+   * 参考图：只放在本机当描图参考，**不上传、别人看不到**
+   * ================================================================ */
+
+  function pickReferenceImage() {
+    if (S.ref && S.ref.img) {
+      var act = confirm('已经有一张参考图了。\n\n确定 = 换一张\n取消 = 移除参考图');
+      if (!act) { clearReferenceImage(); return; }
+    }
+    var input = $('#refFileInput');
+    if (!input) return;
+    input.value = '';
+    input.click();
+  }
+
+  function clearReferenceImage() {
+    if (S.ref && S.ref.canvas) S.ref.canvas.remove();
+    S.ref = null;
+    var b = $('#refBadge');
+    if (b) b.remove();
+    toast('已移除参考图');
+  }
+
+  function loadReferenceImage(file) {
+    if (!file) return;
+    var fr = new FileReader();
+    fr.onload = function () {
+      var img = new Image();
+      img.onload = function () {
+        if (S.ref && S.ref.canvas) S.ref.canvas.remove();
+        var cv = document.createElement('canvas');
+        cv.width = engine.width;
+        cv.height = engine.height;
+        var cx = cv.getContext('2d');
+        // 按「装得下」缩放，居中放置
+        var k = Math.min(engine.width / img.width, engine.height / img.height, 1);
+        var w = img.width * k, h = img.height * k;
+        cx.globalAlpha = 0.55;
+        cx.drawImage(img, (engine.width - w) / 2, (engine.height - h) / 2, w, h);
+        cv.className = 'ref-canvas';
+        cv.style.position = 'absolute';
+        cv.style.pointerEvents = 'none';
+        cv.style.opacity = String(S.refAlpha || 0.55);
+        $('#canvasWrap').appendChild(cv);
+        S.ref = { canvas: cv, name: file.name, img: img };
+        layoutReference();
+        var b = $('#refBadge');
+        if (!b) {
+          b = document.createElement('div');
+          b.className = 'ref-badge';
+          b.id = 'refBadge';
+          $('#stage').appendChild(b);
+        }
+        b.innerHTML = '参考图 <b>' + esc(file.name) + '</b>（只有你自己看得见）' +
+          ' <button class="mini" id="refAlphaDown">调淡</button>' +
+          ' <button class="mini" id="refAlphaUp">调深</button>' +
+          ' <button class="mini" id="refRemove">移除</button>';
+        $('#refAlphaDown').onclick = function () { setRefAlpha(-0.1); };
+        $('#refAlphaUp').onclick = function () { setRefAlpha(0.1); };
+        $('#refRemove').onclick = clearReferenceImage;
+        toast('参考图已放上（本机可见，不会同步给别人）', 'ok', 4000);
+      };
+      img.onerror = function () { toast('这张图读不出来', 'err'); };
+      img.src = fr.result;
+    };
+    fr.readAsDataURL(file);
+  }
+
+  function setRefAlpha(d) {
+    S.refAlpha = Math.max(0.1, Math.min(1, (S.refAlpha || 0.55) + d));
+    if (S.ref && S.ref.canvas) S.ref.canvas.style.opacity = String(S.refAlpha);
+  }
+
+  /** 参考图要跟着画布的平移缩放一起动，否则它不会贴在纸上 */
+  function layoutReference() {
+    if (!S.ref || !S.ref.canvas) return;
+    var wrap = $('#canvasWrap');
+    var r = wrap.getBoundingClientRect();
+    var s = engine.scale || 1;
+    var cv = S.ref.canvas;
+    cv.style.left = (engine.tx || 0) + 'px';
+    cv.style.top = (engine.ty || 0) + 'px';
+    cv.style.width = (engine.width * s) + 'px';
+    cv.style.height = (engine.height * s) + 'px';
+    void r;
+  }
+
+  /* ================================================================
+   * 关于：用户准则 / 风险须知 / 更新检测
+   * ================================================================ */
+
+  var REPO = 'PainterAnkry/chahui';
+  var ABOUT_TABS = {
+    terms: [
+      '<h4>一句话</h4>',
+      '<p>茶绘是给你和朋友一起画画用的工具。别拿它做会让别人难受的事。</p>',
+      '<h4>你可以</h4>',
+      '<ul>',
+      '<li>自己开房间、随便画、把链接发给朋友一起画。</li>',
+      '<li>画任何你有权画的内容，商用与否由你自己负责。</li>',
+      '<li>把茶绘的源码拿去改、拿去分发（MIT 许可，见「致谢与许可」）。</li>',
+      '</ul>',
+      '<h4>请不要</h4>',
+      '<ul>',
+      '<li><span class="warn">上传或绘制违法违规内容</span>，包括但不限于未成年人相关、暴力恐怖、侵犯他人隐私的内容。</li>',
+      '<li>在没拿到授权的情况下，把别人的画作、照片、素材传进房间一起改。</li>',
+      '<li>拿它当图床、当网盘，或者塞入与绘画无关的大量数据。</li>',
+      '<li>对服务端做压力测试、扫描、入侵，或者想办法绕过房间密码。</li>',
+      '</ul>',
+      '<h4>房间是你自己开的</h4>',
+      '<p>房主有责任管理自己房间里的人和内容。公开房间所有人都能进，重要内容请用密码房间。</p>'
+    ].join(''),
+    risk: [
+      '<h4>请先读完这一页</h4>',
+      '<p>茶绘是一个小项目，<span class="warn">请把它当成「和熟人一起画画的便利工具」，而不是可靠的存储服务</span>。</p>',
+      '<h4>你画的画可能会丢</h4>',
+      '<ul>',
+      '<li>房间数据存在服务端，<span class="warn">没有云端备份</span>。服务端崩了、磁盘坏了、房间太久没人管被自动回收了，内容就没了。</li>',
+      '<li>空房间（没人在线 + 一笔没画）会被自动清理；有内容的房间闲置太久也会被回收。</li>',
+      '<li><b>重要的画请随时「导出 PNG」存到你自己电脑上。</b></li>',
+      '</ul>',
+      '<h4>联机不是加密的</h4>',
+      '<ul>',
+      '<li>默认走明文 <code>ws://</code> / <code>http://</code>。同一网络里的其他人、或者中间的路由，理论上能看到你在画什么、聊什么。</li>',
+      '<li>房间密码只是「进房门槛」，<span class="warn">不是加密</span>，别用它保护敏感内容。</li>',
+      '<li>用 <code>npm run expose</code> 把服务端穿到公网时，任何拿到链接的人都能访问 —— 不画了就把它关掉。</li>',
+      '</ul>',
+      '<h4>协作是「所有人一起改」</h4>',
+      '<ul>',
+      '<li>同一个房间里，任何人都能改任何图层。没有权限分级，也没有「锁定别人的图层」。</li>',
+      '<li>别人可以撤销自己画的，也可以清空图层；房主可以把整个房间解散。</li>',
+      '<li>要一起画一幅正式作品，建议先说好分工，或者各自开房间。</li>',
+      '</ul>',
+      '<h4>导入的笔刷与字体</h4>',
+      '<ul>',
+      '<li>导入的 <code>.abr</code> / <code>.sut</code> 笔刷版权归原作者，请确认你有权使用；茶绘不会、也无法帮你判断。</li>',
+      '<li>导入只读取笔尖形状与间距，不会修改原文件。</li>',
+      '</ul>',
+      '<h4>免责</h4>',
+      '<p>本项目以 MIT 许可开源，<b>按「现状」提供，不附带任何担保</b>。因使用它造成的作品丢失、数据泄露或其他损失，作者不承担责任。</p>'
+    ].join(''),
+    credits: [
+      '<h4>许可</h4>',
+      '<p>本项目以 <b>MIT 许可</b> 开源：可以自由使用、修改、分发，保留版权声明即可。完整文本见仓库里的 <code>LICENSE</code>。</p>',
+      '<h4>参考与致谢</h4>',
+      '<ul>',
+      '<li>界面与笔刷体系参照 <b>PaintTool SAI Ver.2</b> 的公开操作习惯 —— 只是「用着像」，与 SAI 官方无任何关系。</li>',
+      '<li><code>.abr</code> 的二进制布局参考了 <a href="https://github.com/Agamnentzar/ag-psd">ag-psd</a> 的实现，并用一批真实笔刷文件校准过。</li>',
+      '<li><code>.sut</code>（CSP）的「内嵌 PNG 笔尖」思路参考了 <a href="https://github.com/Leon-Schoenbrunn/CSP2PC">CSP2PC</a>。</li>',
+      '<li>公网穿透用 <a href="https://github.com/cloudflare/cloudflared">cloudflared</a> 的快速隧道。</li>',
+      '</ul>',
+      '<h4>第三方</h4>',
+      '<ul>',
+      '<li>Electron（桌面端外壳）、ws（WebSocket 服务端）—— 各自遵循其原许可。</li>',
+      '</ul>'
+    ].join('')
+  };
+
+  function openAbout() {
+    var mask = $('#aboutMask');
+    if (!mask) return;
+    var v = (global.chahuDesktop && global.chahuDesktop.isDesktop && global.chahuDesktop.getInfo)
+      ? null : null;
+    $('#aboutVer').textContent = global.CHAHU_CONFIG && global.CHAHU_CONFIG.appVersion
+      ? global.CHAHU_CONFIG.appVersion : '—';
+    showAboutTab('terms');
+    mask.classList.remove('hidden');
+    void v;
+    checkUpdate();
+  }
+
+  function showAboutTab(name) {
+    $$('.about-tabs .tab').forEach(function (t) {
+      t.classList.toggle('active', t.dataset.atab === name);
+    });
+    $('#aboutBody').innerHTML = ABOUT_TABS[name] || '';
+  }
+
+  /**
+   * 更新检测：读 GitHub 的最新 release 和当前版本比。
+   * 只为「提示有新版」，不自动下载、不自动安装。
+   */
+  function checkUpdate() {
+    var box = $('#aboutUpdate');
+    var msg = $('#aboutUpdateMsg');
+    var cur = (global.CHAHU_CONFIG && global.CHAHU_CONFIG.appVersion) || '0.0.0';
+    box.classList.remove('has-new');
+    msg.textContent = '正在检查更新…';
+    var ac = global.AbortController ? new global.AbortController() : null;
+    var timer = setTimeout(function () { if (ac) ac.abort(); }, 8000);
+    fetch('https://api.github.com/repos/' + REPO + '/releases/latest',
+      { headers: { Accept: 'application/vnd.github+json' }, signal: ac ? ac.signal : undefined })
+      .then(function (r) { clearTimeout(timer);
+        if (!r.ok) throw new Error('GitHub 返回 ' + r.status);
+        return r.json();
+      })
+      .then(function (rel) {
+        var tag = String(rel.tag_name || '').replace(/^v/, '');
+        if (!tag) throw new Error('没有读到版本号');
+        if (cmpVer(tag, cur) > 0) {
+          box.classList.add('has-new');
+          msg.innerHTML = '有新版本 <b>v' + esc(tag) + '</b> 可用（当前 v' + esc(cur) + '）' +
+            ' <a href="' + esc(rel.html_url || '') + '" target="_blank" rel="noreferrer">去下载</a>';
+        } else {
+          msg.textContent = '已经是最新版（v' + cur + '）';
+        }
+      })
+      .catch(function (e) {
+        clearTimeout(timer);
+        msg.textContent = '检查更新失败（' + (e && e.name === 'AbortError' ? '超时' : (e && e.message)) +
+          '）—— 可能没联网，或访问 GitHub 受限。也可以直接去 ' +
+          '<a href="https://github.com/' + REPO + '/releases" target="_blank" rel="noreferrer">Releases 页面</a> 看。';
+      });
+  }
+
+  function cmpVer(a, b) {
+    var pa = String(a).split('.').map(Number);
+    var pb = String(b).split('.').map(Number);
+    for (var i = 0; i < 3; i++) {
+      var x = pa[i] || 0, y = pb[i] || 0;
+      if (x !== y) return x - y;
+    }
+    return 0;
+  }
+
   global.ChaApp = {
     engine: engine, net: net, state: S, undo: undo, redo: redo, toast: toast,
     // 笔刷导入（给测试用，也让控制台里能手动导一支试试）
@@ -4448,6 +4749,9 @@
     growSelection: growSelection, shrinkSelection: shrinkSelection,
     setUiScale: setUiScale, setCursorMode: setCursorMode,
     toggleLeftPanel: toggleLeftPanel, toggleFullscreen: toggleFullscreen,
-    openSettings: openSettings
+    openSettings: openSettings,
+    openAbout: openAbout, checkUpdate: checkUpdate, cmpVer: cmpVer,
+    bindQuickBar: bindQuickBar, updateQuickBar: updateQuickBar,
+    loadReferenceImage: loadReferenceImage, clearReferenceImage: clearReferenceImage
   };
 })(window);

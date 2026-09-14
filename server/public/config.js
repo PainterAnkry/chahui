@@ -8,7 +8,11 @@ window.CHAHU_CONFIG = {
   publicServer: '',
   localServer: 'ws://localhost:8437/ws',
   defaultName: '',
-  appName: '茶绘'
+  appName: '茶绘',
+  // 版本号：关于页显示 + 和 GitHub 的最新 release 比对
+  appVersion: '1.3.6',
+  // 开源仓库（更新检测用）
+  repo: 'PainterAnkry/chahui'
 };
 
 window.CHAHU = window.CHAHU || {};

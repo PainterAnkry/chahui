@@ -297,7 +297,45 @@
 
   <!-- ==================== 中：画布 ==================== -->
   <section class="stage" id="stage">
-    <div class="canvas-wrap" id="canvasWrap">
+  <!-- 画布上沿的快捷小菜单（对照 SAI2 顶部那条）。可以整条收起/拉开。 -->
+  <div class="quickbar" id="quickBar">
+    <button class="qb-toggle" id="qbToggle" title="收起 / 拉开快捷菜单">▾</button>
+    <div class="qb-body" id="qbBody">
+      <button class="qb-btn" id="qbUndo" title="撤销 (Ctrl+Z)">↶</button>
+      <button class="qb-btn" id="qbRedo" title="重做 (Ctrl+Y)">↷</button>
+      <span class="qb-sep"></span>
+      <span class="qb-label">视图</span>
+      <select class="qb-select" id="qbViewMode" title="画布显示方式">
+        <option value="normal">正常</option>
+        <option value="gray">灰度</option>
+        <option value="flipH">水平翻转</option>
+      </select>
+      <span class="qb-sep"></span>
+      <span class="qb-label">缩放</span>
+      <span class="qb-num" id="qbZoomText">100%</span>
+      <button class="qb-btn" id="qbZoomOut" title="缩小 (-)">−</button>
+      <button class="qb-btn" id="qbZoomIn" title="放大 (=)">＋</button>
+      <button class="qb-btn" id="qbZoomFit" title="适应窗口 (0)">▣</button>
+      <button class="qb-btn" id="qbZoom100" title="实际大小 (1)">1:1</button>
+      <span class="qb-sep"></span>
+      <span class="qb-label">旋转</span>
+      <span class="qb-num" id="qbRotText">0.0°</span>
+      <button class="qb-btn" id="qbRotL" title="向左旋转 (,)">↺</button>
+      <button class="qb-btn" id="qbRotR" title="向右旋转 (.)">↻</button>
+      <button class="qb-btn" id="qbRotReset" title="角度归零">⌂</button>
+      <button class="qb-btn" id="qbFlip" title="水平翻转视图 (H)">⇄</button>
+      <span class="qb-sep"></span>
+      <span class="qb-label">手抖修正</span>
+      <button class="qb-btn" id="qbSteadierDown" title="减小抖动修正">−</button>
+      <span class="qb-num" id="qbSteadierText">0</span>
+      <button class="qb-btn" id="qbSteadierUp" title="增大抖动修正">＋</button>
+      <span class="qb-sep"></span>
+      <button class="qb-btn" id="qbRuler" title="对称尺（尺子）">✎</button>
+      <button class="qb-btn" id="qbRef" title="参考图（只有自己看得见）">🖼</button>
+    </div>
+  </div>
+
+  <div class="canvas-wrap" id="canvasWrap">
       <canvas id="view"></canvas>
       <canvas id="overlay"></canvas>
       <div class="cursors" id="cursors"></div>
@@ -548,6 +586,30 @@
         <span class="spacer"></span>
         <button class="btn tiny primary" id="btnKeyOk">完成</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 关于 / 用户准则 / 风险须知 / 更新检测 ============ -->
+<input type="file" id="refFileInput" accept="image/*" class="hidden-file" />
+<div class="modal-mask hidden" id="aboutMask">
+  <div class="modal about">
+    <div class="modal-head">
+      <h3>关于茶绘</h3>
+      <button class="icon-btn" id="btnAboutClose">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="about-update" id="aboutUpdate">
+        <b>版本 <span id="aboutVer">—</span></b>
+        <span class="hint" id="aboutUpdateMsg">正在检查更新…</span>
+        <button class="btn tiny ghost" id="btnCheckUpdate">重新检查</button>
+      </div>
+      <div class="about-tabs">
+        <button class="tab active" data-atab="terms">用户准则</button>
+        <button class="tab" data-atab="risk">风险须知</button>
+        <button class="tab" data-atab="credits">致谢与许可</button>
+      </div>
+      <div class="about-body" id="aboutBody"></div>
     </div>
   </div>
 </div>

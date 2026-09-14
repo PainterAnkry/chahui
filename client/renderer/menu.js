@@ -241,7 +241,7 @@
         def('view', 'view.flip', '水平翻转', {
           mnemonic: 'V', key: 'H',
           run: function () { A().flipView(); },
-          check: function () { var e = A().engine; return !!(e && e.flipped); }
+          check: function () { var e = A().engine; return !!(e && e.flipX); }
         }),
         SEP,
         def('view', 'view.zoom100', '100% 大小', { key: 'Ctrl+Alt+0', run: function () { A().zoom100(); } }),
@@ -321,7 +321,8 @@
         def('other', 'other.info', '房间信息', { mnemonic: 'I', run: function () { A().showRoomInfo(); } }),
         def('other', 'other.share', '复制分享链接', { mnemonic: 'C', run: function () { A().doShare(); } }),
         SEP,
-        def('other', 'other.about', '关于茶绘', { mnemonic: 'B', run: function () { showAbout(); } }),
+        def('other', 'other.about', '关于茶绘 / 用户准则 / 风险须知', { mnemonic: 'B', run: function () { A().openAbout(); } }),
+        def('other', 'other.update', '检查更新', { mnemonic: 'U', run: function () { A().openAbout(); A().checkUpdate(); } }),
         def('other', 'other.sysid', '系统 ID', { mnemonic: 'S', disabled: true })
       ]
     }
