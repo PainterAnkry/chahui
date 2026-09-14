@@ -333,12 +333,8 @@
     var leftScroll = $('#leftPanelScroll');
     if (!leftScroll) return;
     var resetBtn = $('#btnPanelReset');
-    if (resetBtn) resetBtn.onclick = function () {
-      lsSet('chahu.panelOrder', JSON.stringify(PANEL_DEFAULT_ORDER));
-      lsSet('chahu.panelSides', JSON.stringify({}));
-      applyPanelOrder();
-      toast('已恢复默认布局（小节都回到左栏）');
-    };
+    // 和菜单里「窗口 → 恢复默认面板布局」走同一段逻辑，免得两处行为不一致
+    if (resetBtn) resetBtn.onclick = function () { resetPanels(); };
 
     var dragging = null, pointerId = null, autoTimer = null, autoDir = 0, dropBox = null;
 

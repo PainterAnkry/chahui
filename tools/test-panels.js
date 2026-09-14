@@ -159,7 +159,8 @@ async function join(page) {
   ok('右栏仍有内容所以展开着', st.rightHidden === false);
 
   console.log('\n【六】恢复默认面板布局');
-  await page.evaluate(() => window.ChaApp.resetPanels());
+  // 走左栏把手上的 ↺（和菜单「窗口 → 恢复默认面板布局」同一段逻辑）
+  await page.evaluate(() => document.getElementById('btnPanelReset').click());
   await page.waitForTimeout(300);
   st = await page.evaluate(() => ({
     left: [...document.querySelectorAll('#leftPanelScroll [data-section]')].map(s => s.dataset.section),
