@@ -64,6 +64,8 @@
     toolEdit: false,
     imported: [],             // 导入的笔刷（PS .abr / CSP .sut），存 localStorage
     antsOn: true,             // 是否显示选区蚂蚁线（菜单里可勾）
+    text: { fontFamily: 'sans', fontSize: 48, lineHeight: 1.35 },   // 文字工具的上次设置
+    textAt: null,             // 文字要放在画布的哪个位置
     leftPanelOpen: true,      // 左侧整列面板是否显示
     gridOn: false,
     uiScale: 1,
@@ -1809,7 +1811,15 @@
       // 三道里漏掉任何一道，笔尖就传不到别的客户端，别人看到的会是一支圆头笔。
       spacing: b.spacing,
       tip: b.tip,
-      mix: b.mix
+      mix: b.mix,
+      // 文字笔迹（这几项由 S.text 提供，见 placeText）
+      text: P.normalizeText((extra && extra.text) || ''),
+      fontFamily: P.normalizeFontFamily((extra && extra.fontFamily) || S.text.fontFamily),
+      fontSize: Number((extra && extra.fontSize) || S.text.fontSize),
+      bold: !!(extra && extra.bold),
+      italic: !!(extra && extra.italic),
+      align: (extra && extra.align) || 'left',
+      lineHeight: Number((extra && extra.lineHeight) || S.text.lineHeight),
     };
     if (extra) Object.assign(base, extra);
     return base;
@@ -1978,6 +1988,14 @@
     var view = $('#view');
 
     view.addEventListener('pointerdown', function (e) {
+      /* ---- 文字工具：点一下选位置 ---- */
+      if (S.tool === 'text') {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        var txsp = stagePoint(e);
+        placeTextAt(engine.screenToDoc(txsp.x, txsp.y));
+        return;
+      }
       /* ---- 尺子定义中：这一下拖拽用来摆尺子，不画画 ---- */
       if (S.rulerArm) {
         if (e.button !== 0) return;
@@ -3877,6 +3895,12 @@
     });
     $('#btnToneOk').addEventListener('click', function () { closeToneDialog(true); });
 
+    // 文字
+    buildTextFamilies();
+    $('#btnTextOk').addEventListener('click', commitText);
+    $('#btnTextCancel').addEventListener('click', function () { $('#textMask').classList.add('hidden'); });
+    $('#btnTextZero').addEventListener('click', function () { $('#textMask').classList.add('hidden'); });
+
     // 导出
     $('#exportFormat').addEventListener('change', syncExportNote);
     $('#exportQuality').addEventListener('input', function () { $('#exportQualityVal').textContent = this.value; });
@@ -5021,6 +5045,110 @@
   }
 
 
+  /* ================================================================
+   * 文字工具 / 文字图层
+   *
+   * 文字不是新的图层类型，而是**一种特殊笔迹**（tool: 'text'）——
+   * 这样它天然跟着笔迹历史走：能同步、能撤销、能回放，不用另造一套机制。
+   * 放文字时自动新建一个图层（图层名就是文字内容），也就是「文字图层」。
+   * ================================================================ */
+
+  function buildTextFamilies() {
+    var sel = $('#textFamily');
+    if (!sel || sel.options.length) return;
+    [['sans', '黑体 / 无衬线'], ['serif', '衬线'], ['mono', '等宽'],
+      ['hei', '微软雅黑'], ['song', '宋体'], ['kai', '楷体']].forEach(function (p) {
+      var o = document.createElement('option');
+      o.value = p[0];
+      o.textContent = p[1];
+      sel.appendChild(o);
+    });
+    sel.value = 'sans';
+  }
+
+  function textOpts() {
+    return {
+      text: P.normalizeText($('#textInput').value),
+      fontFamily: $('#textFamily').value,
+      fontSize: Number($('#textSize').value) || 48,
+      bold: $('#textBold').checked,
+      italic: $('#textItalic').checked,
+      align: $('#textAlign').value,
+      lineHeight: 1.35
+    };
+  }
+
+  /** 点画布上的位置 → 记下来，等用户在对话框里点「放到画布上」 */
+  function placeTextAt(dp) {
+    S.textAt = { x: dp.x, y: dp.y };
+    buildTextFamilies();
+    $('#textNote') && ($('#textNote').textContent = '');
+    $('#textMask').classList.remove('hidden');
+    setTimeout(function () { $('#textInput').focus(); }, 60);
+    var el = document.querySelector('#textMask .hint');
+    if (el) {
+      el.textContent = '将放在 (' + Math.round(dp.x) + ', ' + Math.round(dp.y) + ')。' +
+        '文字会新建一个图层，并作为一种笔迹同步 —— 别人也看得到、也能一起撤。';
+    }
+  }
+
+  /**
+   * 真正落笔：新建一个图层，然后把文字作为一条 text 笔迹发出去。
+   * 走的是普通笔迹通道，所以跨端一致 / 撤销 / 回放全都是现成的。
+   */
+  function commitText() {
+    var o = textOpts();
+    if (!o.text.trim()) { toast('还没有输入文字', 'err'); return; }
+    if (!S.joined) { toast('先进入一个房间', 'err'); return; }
+    var at = S.textAt || { x: engine.width / 2, y: engine.height / 2 };
+    $('#textMask').classList.add('hidden');
+
+    // 每次都建新图层 —— 用户要的就是「文字图层」：一个文件里放几段文字，
+    // 每段各自一层，挪动 / 隐藏 / 删掉互不影响。
+    var cur = engine.activeLayer();
+    var needLayer = true;
+    var layerId = cur ? cur.id : null;
+    if (needLayer) {
+      layerId = 'L_' + Math.random().toString(36).slice(2, 12);
+      net.send(P.C2S.LAYER_ADD, { name: o.text.split('\n')[0].slice(0, 12) || '文字', id: layerId });
+    }
+
+    var doIt = function () {
+      var info = strokeInfo('t_' + Date.now(), { id: layerId }, false, {
+        text: o.text, fontFamily: o.fontFamily, fontSize: o.fontSize,
+        bold: o.bold, italic: o.italic, align: o.align, lineHeight: o.lineHeight
+      });
+      info.tool = 'text';
+      info.size = o.fontSize;
+      var st = engine.beginStroke(info);
+      // 注意：newStroke 里 points 是写死的 []，info.points 会被丢掉 ——
+      // 锚点必须用 addPoints 摆进去，否则这一笔没有点、文字画不出来。
+      engine.addPoints(st.id, [[Math.round(at.x), Math.round(at.y), 1]]);
+      engine.endStroke(st.id, ++engine.seq);
+      net.send(P.C2S.STROKE_BEGIN, info);
+      net.send(P.C2S.STROKE_END, { id: st.id });
+      // 走的是普通笔迹通道，所以撤销栈这里也要照 normal 那样记一条 ——
+      // 漏了它，文字就成了「画上去撤不掉」的东西。
+      S.myUndo.push(st.id);
+      S.myRedo.length = 0;
+      pushOp({ type: 'stroke', id: st.id });
+      renderHistory();
+      toast('文字已放到画布上', 'ok', 3000);
+    };
+    if (needLayer) setTimeout(doIt, 260);      // 等图层建好
+    else doIt();
+  }
+
+  function openTextDialog() {
+    if (!S.joined) { toast('先进入一个房间', 'err'); return; }
+    buildTextFamilies();
+    S.textAt = null;
+    $('#textMask').classList.remove('hidden');
+    var el = document.querySelector('#textMask .hint');
+    if (el) el.textContent = '点画布上的位置决定它出现在哪；不点就放在画布正中。点「放到画布上」即可。';
+    setTimeout(function () { $('#textInput').focus(); }, 60);
+  }
+
   global.ChaApp = {
     engine: engine, net: net, state: S, undo: undo, redo: redo, toast: toast,
     // 笔刷导入（给测试用，也让控制台里能手动导一支试试）
@@ -5064,6 +5192,7 @@
     openToneDialog: openToneDialog, updateTonePreview: updateTonePreview, closeToneDialog: closeToneDialog,
     openExportDialog: openExportDialog, exportAs: exportAs, syncExportNote: syncExportNote,
     armRuler: armRuler, clearRuler: clearRuler, toggleRulerVisible: toggleRulerVisible, commitRuler: commitRuler,
+    openTextDialog: openTextDialog, commitText: commitText, placeTextAt: placeTextAt, textOpts: textOpts,
     bindQuickBar: bindQuickBar, updateQuickBar: updateQuickBar,
     loadReferenceImage: loadReferenceImage, clearReferenceImage: clearReferenceImage
   };

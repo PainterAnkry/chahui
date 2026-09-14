@@ -209,6 +209,13 @@ function buildStroke(msg, member, layer) {
     spacing: br.spacing,
     tip: br.tip,
     mix: br.mix,
+    text: P.normalizeText(br.text),
+    fontFamily: P.normalizeFontFamily(br.fontFamily),
+    fontSize: Math.max(6, Math.min(400, Number(br.fontSize) || 32)),
+    bold: !!br.bold,
+    italic: !!br.italic,
+    align: ['left', 'center', 'right'].indexOf(br.align) >= 0 ? br.align : 'left',
+    lineHeight: Math.max(0.8, Math.min(3, Number(br.lineHeight) || 1.35)),
     seed: br.seed || P.newSeed(),
     points: [],
     ts: Date.now()

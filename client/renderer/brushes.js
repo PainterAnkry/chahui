@@ -39,6 +39,7 @@
   var ICONS = {
     // 导入的笔刷（PS / CSP）用「下载箭头 + 笔」表示
     imported: '<path d="M12 3v10"/><path d="M8 9.5l4 4 4-4"/><path d="M5 17.5h14"/>',
+    text: '<path d="M5 6h14"/><path d="M12 6v13"/><path d="M9 19h6"/>',
     pencil: 'M4 20l1-4L16 5a2.1 2.1 0 0 1 3 3L8 19zM13.5 7.5l3 3',
     airbrush: '<path d="M8 20h7a1 1 0 0 0 1-1V9a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1z"/><path d="M10 8V6h3.5v2"/><path d="M17 4.5h.01M19.5 6.5h.01M21 9.5h.01M19 13h.01"/>',
     brush: 'M6.5 19.5c0-2 .8-3.6 2.2-5l7-7 3.3 3.3-7 7c-1.4 1.4-3 2.2-5 2.2z"/><path d="M15 6.5l3.3 3.3"/><path d="M6.5 19.5l1-3.2 2.7 2.7z"/>',
@@ -188,6 +189,11 @@
       })
     },
     {
+      id: 'text', name: '文字', tool: 'text', icon: 'text', type: 'paint',
+      tip: '点画布选位置，输入文字后放到新图层上；会同步给别人，也能一起撤销',
+      params: params({ brush: 'text', size: 48, opacity: 1, hardness: 1 })
+    },
+    {
       id: 'select', name: '选区笔', tool: 'select', icon: 'select', type: 'paint',
       tip: '涂到哪里就选到哪里；可以涂好几笔累积，Alt 涂是减掉（Ctrl+D 取消选区）',
       params: params({ brush: 'select', size: 20, opacity: 1, hardness: 1, minSize: 0.6, pressSize: 0.5 })
@@ -289,7 +295,7 @@
     brush: '画笔', eraser: '橡皮', blur: '模糊', smudge: '涂抹',
     fill: '油漆桶', gradient: '渐变', select: '选区笔', selectErase: '选区擦',
     marquee: '框选', lasso: '套索', wand: '魔棒',
-    line: '直线', rect: '矩形', ellipse: '椭圆', picker: '吸管'
+    line: '直线', rect: '矩形', ellipse: '椭圆', picker: '吸管', text: '文字'
   };
 
   // 纸张质感（颗粒 / 纸纹）

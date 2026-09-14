@@ -135,7 +135,10 @@
   var TOOLS = [
     'brush', 'eraser', 'blur', 'smudge', 'fill', 'gradient',
     'select', 'selectErase', 'marquee', 'lasso', 'wand',
-    'line', 'rect', 'ellipse', 'picker'
+    'line', 'rect', 'ellipse', 'picker',
+    // 文字：作为一种笔迹走既有通道（同步 / 撤销 / 回放都是现成的）
+    // 漏了这一行，newStroke 会把 tool 归一化成 brush，文字就画不出来了
+    'text'
   ];
 
   // 图层 / 画笔混合模式（画布端映射见 engine.js 的 BLEND_OPS）
@@ -244,6 +247,23 @@
     return out;
   }
 
+  /**
+   * 文字笔迹的字段。文字**不是**新的图层类型，而是一种特殊笔迹 ——
+   * 这样它天然跟着笔迹历史走：能同步、能撤销、能回放，不用另造一套机制。
+   * 三种字体族只放行常见的几个，避免有人塞一个别人机器上没有的字体，
+   * 那会让两端渲染得不一样。
+   */
+  var TEXT_MAX = 2000;
+  var FONT_FAMILIES = ['sans', 'serif', 'mono', 'kai', 'hei', 'song'];
+  function normalizeText(v) {
+    if (typeof v !== 'string') return '';
+    // 去掉控制字符（换行留着）
+    return v.replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, '').slice(0, TEXT_MAX);
+  }
+  function normalizeFontFamily(v) {
+    return FONT_FAMILIES.indexOf(v) >= 0 ? v : 'sans';
+  }
+
   // 随机种子：散布 / 颗粒等需要「所有客户端结果一致」的随机性由它驱动
   function newSeed() { return Math.floor(Math.random() * 2147483646); }
 
@@ -278,6 +298,10 @@
     PAPERS: PAPERS,
     FX: FX,
     BRUSH_DEFAULTS: BRUSH_DEFAULTS,
+    TEXT_MAX: TEXT_MAX,
+    FONT_FAMILIES: FONT_FAMILIES,
+    normalizeText: normalizeText,
+    normalizeFontFamily: normalizeFontFamily,
     STICKER_MAX: STICKER_MAX,
     STICKER_RAW_MAX: STICKER_RAW_MAX,
     userColor: userColor,

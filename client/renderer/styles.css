@@ -1231,6 +1231,25 @@ input[type=range]::-webkit-slider-thumb {
 .tone-row input[type=range] { flex: 1; min-width: 0; }
 .tone-row b { width: 40px; flex: none; text-align: right; font-family: var(--mono); font-size: 11.5px; }
 
+.modal.text-modal textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 7px 9px;
+  border: 1px solid #cfd7e3;
+  border-radius: var(--radius-sm);
+  resize: vertical;
+  margin-bottom: 8px;
+}
+.modal.text-modal .tone-row input[type=number],
+.modal.text-modal .tone-row select {
+  font: inherit; font-size: 12px; height: 24px;
+  border: 1px solid #d5dce6; border-radius: 4px; background: #fff; color: var(--text);
+  padding: 0 5px;
+}
+
 /* ---------------- 菜单栏 ---------------- */
 .menu-bar {
   display: flex;

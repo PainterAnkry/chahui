@@ -140,6 +140,7 @@
     {
       id: 'layer', name: '图层', mnemonic: 'L', items: [
         def('layer', 'layer.add', '新建图层', { mnemonic: 'N', key: 'Ctrl+Shift+N', run: function () { A().addLayer(); } }),
+        def('layer', 'layer.text', '添加文字图层…', { mnemonic: 'T', key: 'Ctrl+Shift+T', run: function () { A().openTextDialog(); } }),
         def('layer', 'layer.dup', '复制图层', { mnemonic: 'D', run: function () { A().dupLayer(); } }),
         def('layer', 'layer.del', '删除图层', { mnemonic: 'E', run: function () { A().delLayer(); } }),
         SEP,

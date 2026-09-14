@@ -69,6 +69,47 @@
   // 哪些工具吃尺子（形状 / 选区 / 油漆桶不吃 —— 它们本来就有确定的几何）
   var RULER_TOOLS = { brush: 1, eraser: 1, blur: 1, smudge: 1 };
 
+  function isText(stroke) { return stroke.tool === 'text'; }
+
+  var FONT_STACK = {
+    sans: 'system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif',
+    serif: 'Georgia, "Times New Roman", "SimSun", serif',
+    mono: 'Consolas, "Cascadia Mono", "Courier New", monospace',
+    kai: '"KaiTi", "STKaiti", "Kaiti SC", serif',
+    hei: '"Microsoft YaHei", "PingFang SC", "Heiti SC", sans-serif',
+    song: '"SimSun", "Songti SC", serif'
+  };
+
+  /** 文字的 CSS font 串。字体族只认白名单，两端才画得一样 */
+  function fontOf(stroke) {
+    var fam = FONT_STACK[stroke.fontFamily] || FONT_STACK.sans;
+    var style = (stroke.italic ? 'italic ' : '') + (stroke.bold ? '700 ' : '400 ');
+    return style + Math.max(6, stroke.fontSize || 32) + 'px ' + fam;
+  }
+
+  /** 把一段文字画进 ctx（锚点在 points[0]，多行按 lineHeight 排） */
+  function paintText(ctx, stroke) {
+    if (!stroke.text) return;
+    var a = stroke.points && stroke.points[0];
+    if (!a) return;
+    var size = Math.max(6, stroke.fontSize || 32);
+    var lh = size * (stroke.lineHeight || 1.35);
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = qa(stroke.opacity == null ? 1 : stroke.opacity);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.filter = 'none';
+    ctx.font = fontOf(stroke);
+    ctx.textAlign = stroke.align || 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = stroke.color || '#000000';
+    var lines = String(stroke.text).split('\n');
+    for (var i = 0; i < lines.length; i++) {
+      ctx.fillText(lines[i], a[0], a[1] + i * lh);
+    }
+    ctx.restore();
+  }
+
   function isEraser(stroke) { return stroke.tool === 'eraser'; }
   function isBlur(stroke) { return stroke.tool === 'blur'; }
   function isSmudge(stroke) { return stroke.tool === 'smudge'; }
@@ -475,6 +516,7 @@
   function paintStrokeShape(ctx, stroke, pts, fromIndex, opts) {
     opts = opts || {};
     if (!pts || !pts.length) return;
+    if (isText(stroke)) return;          // 文字不走笔刷栅格化
     var W = opts.width || ctx.canvas.width;
     var H = opts.height || ctx.canvas.height;
     var st = stroke;
@@ -976,6 +1018,14 @@
       spacing: br.spacing,
       tip: br.tip,
       mix: br.mix,
+      // 文字笔迹（第四道白名单见 app.strokeInfo / server.buildStroke）
+      text: P.normalizeText(info.text),
+      fontFamily: P.normalizeFontFamily(info.fontFamily),
+      fontSize: Math.max(6, Math.min(400, Number(info.fontSize) || 32)),
+      bold: !!info.bold,
+      italic: !!info.italic,
+      align: ['left', 'center', 'right'].indexOf(info.align) >= 0 ? info.align : 'left',
+      lineHeight: Math.max(0.8, Math.min(3, Number(info.lineHeight) || 1.35)),
       seed: br.seed || P.newSeed(),
       points: [],
       ts: info.ts || Date.now(),
@@ -1162,6 +1212,12 @@
 
   /** 把「覆盖率蒙版」按笔刷属性叠加进目标（含保护不透明度、水彩边缘） */
   CanvasEngine.prototype.stampStroke = function (ctx, layer, stroke, scratchCanvas) {
+    // 文字：直接画进图层，不走覆盖率蒙版那套
+    if (isText(stroke)) {
+      paintText(ctx, stroke);
+      return;
+    }
+
     var src = scratchCanvas;
     var lock = null;
     var byAlphaLock = !!(layer && layer.alphaLock && !isEraser(stroke) && !isSelectTool(stroke));
@@ -1992,6 +2048,7 @@
     this.pending.forEach(function (e) {
       if (e.layer !== layer) return;
       var s = e.stroke;
+      if (isText(s)) { self.stampStroke(tmpCtx, layer, s, e.scratch); return; }
       if (isShape(s) || isFill(s)) return;   // 形状走 overlay，油漆桶已直接落到图层
       if (isBlur(s)) {
         applyBlurMaskedTo(tmpCtx, tmpCanvas, e.scratch, s, self.width, self.height,

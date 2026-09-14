@@ -690,6 +690,43 @@
   </div>
 </div>
 
+<!-- ============ 文字 ============ -->
+<div class="modal-mask hidden" id="textMask">
+  <div class="modal tone text-modal">
+    <div class="modal-head">
+      <h3>添加文字图层</h3>
+      <button class="icon-btn" id="btnTextCancel">×</button>
+    </div>
+    <div class="modal-body">
+      <textarea id="textInput" rows="3" placeholder="在这里输入文字（回车换行）"></textarea>
+      <div class="tone-row">
+        <label>字体</label>
+        <select id="textFamily" style="flex:1"></select>
+        <label style="width:auto">字号</label>
+        <input type="number" id="textSize" value="48" min="6" max="400" style="width:70px" />
+      </div>
+      <div class="tone-row">
+        <label>样式</label>
+        <label class="tp-mode"><input type="checkbox" id="textBold" /><span>粗体</span></label>
+        <label class="tp-mode"><input type="checkbox" id="textItalic" /><span>斜体</span></label>
+        <label style="width:auto">对齐</label>
+        <select id="textAlign">
+          <option value="left">左</option>
+          <option value="center">中</option>
+          <option value="right">右</option>
+        </select>
+      </div>
+      <p class="hint">文字会放到一个**新图层**上，并且作为一种笔迹同步 —— 别人也能看到、
+        房主撤销时能一起撤掉。点画布上的位置决定它出现在哪。</p>
+      <div class="imp-actions">
+        <span class="spacer"></span>
+        <button class="btn tiny ghost" id="btnTextZero">取消</button>
+        <button class="btn tiny primary" id="btnTextOk">放到画布上</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="protocol.js"></script><script src="config.js"></script>
 <script src="brushes.js"></script>
 <script src="brush-import.js"></script>
