@@ -3777,6 +3777,18 @@
       engine.drawOverlay();
       toast(this.checked ? '网格变换：开（拖控制点做局部变形，Alt 带动周围）' : '网格变换：关');
     });
+    // 色调调整
+    ['#toneBright', '#toneContrast', '#toneHue', '#toneSat'].forEach(function (id) {
+      $(id).addEventListener('input', function () { toneSyncLabels(); updateTonePreview(); });
+    });
+    $('#btnToneReset').addEventListener('click', function () {
+      ['#toneBright', '#toneContrast', '#toneHue', '#toneSat'].forEach(function (id) { $(id).value = 0; });
+      toneSyncLabels(); updateTonePreview();
+    });
+    $('#btnToneOk').addEventListener('click', function () { closeToneDialog(true); });
+    $('#btnToneCancel').addEventListener('click', function () { closeToneDialog(false); });
+    $('#btnToneZero').addEventListener('click', function () { closeToneDialog(false); });
+
     $('#tpMeshN').addEventListener('change', function () {
       if (engine.transform && $('#tpMesh').checked) {
         engine.transform.setMesh(true, Number(this.value));
@@ -4745,6 +4757,91 @@
     return 0;
   }
 
+  /* ================================================================
+   * 色调调整（滤镜）
+   *
+   * 预览走的是 engine.layerOverride：把当前图层换成「滤镜后」的那份像素，
+   * 其余图层照常合成 —— 所以**画布上看到的就是最终结果**，不是另画一张小图糊弄。
+   * 确定时才把结果作为一次像素操作发给服务端（和别人同步、也能撤销）。
+   * ================================================================ */
+
+  function toneOpts() {
+    return {
+      brightness: Number($('#toneBright').value),
+      contrast: Number($('#toneContrast').value),
+      hue: Number($('#toneHue').value),
+      saturation: Number($('#toneSat').value)
+    };
+  }
+
+  function toneSyncLabels() {
+    var o = toneOpts();
+    $('#toneBrightVal').textContent = o.brightness;
+    $('#toneContrastVal').textContent = o.contrast;
+    $('#toneHueVal').textContent = o.hue;
+    $('#toneSatVal').textContent = o.saturation;
+  }
+
+  function openToneDialog() {
+    if (!S.joined) { toast('先进入一个房间', 'err'); return; }
+    var layer = engine.activeLayer();
+    if (!layer) return;
+    if (engine.transform) { toast('先按 Enter 确定当前的变换'); return; }
+    if (!layer.baseImage && !layer.strokes.length) { toast('「' + layer.name + '」上还没有内容', 'err'); return; }
+    S.toneLayerId = layer.id;
+    ['#toneBright', '#toneContrast', '#toneHue', '#toneSat'].forEach(function (id) { $(id).value = 0; });
+    toneSyncLabels();
+    $('#toneNote').textContent = '作用于图层「' + layer.name + '」。画布上就是最终效果，直接拖滑块看。';
+    updateTonePreview();
+    $('#toneMask').classList.remove('hidden');
+  }
+
+  /** 把当前滑块的结果做成图层覆盖，交给引擎去合成 */
+  function updateTonePreview() {
+    if (!S.toneLayerId) return;
+    var layer = engine.getLayer(S.toneLayerId);
+    if (!layer) return;
+    var o = toneOpts();
+    if (global.ChaFilters.isIdentity(o)) {
+      engine.layerOverride = null;
+    } else {
+      var raw = engine.renderLayerRaw(S.toneLayerId);      // 该图层现在的样子（含未提交笔迹）
+      engine.layerOverride = {
+        layerId: S.toneLayerId,
+        canvas: global.ChaFilters.toneCanvas(raw, o)
+      };
+    }
+    engine.invalidate();
+  }
+
+  function closeToneDialog(apply) {
+    var id = S.toneLayerId;
+    S.toneLayerId = null;
+    engine.layerOverride = null;
+    engine.invalidate();
+    $('#toneMask').classList.add('hidden');
+    if (!apply || !id) return;
+    var o = toneOpts();
+    if (global.ChaFilters.isIdentity(o)) { toast('没有改动'); return; }
+    var layer = engine.getLayer(id);
+    if (!layer) return;
+    // 重新算一遍（预览那份是同一套代码，但这里要的是「确定时」的滑块值）
+    var filtered = global.ChaFilters.toneCanvas(engine.renderLayerRaw(id), o);
+    net.send(P.C2S.LAYER_PIXELS, {
+      layerId: id,
+      png: filtered.toDataURL('image/png'),
+      upToSeq: engine.seq,
+      label: '色调调整'
+    });
+    pushOp({
+      type: 'pixels', layerId: id,
+      label: '色调调整',
+      before: null, after: null
+    });
+    toast('已应用：亮度 ' + o.brightness + '｜对比度 ' + o.contrast +
+      '｜色相 ' + o.hue + '｜饱和度 ' + o.saturation, 'ok', 3800);
+  }
+
   global.ChaApp = {
     engine: engine, net: net, state: S, undo: undo, redo: redo, toast: toast,
     // 笔刷导入（给测试用，也让控制台里能手动导一支试试）
@@ -4785,6 +4882,7 @@
     toggleLeftPanel: toggleLeftPanel, toggleFullscreen: toggleFullscreen,
     openSettings: openSettings,
     openAbout: openAbout, checkUpdate: checkUpdate, cmpVer: cmpVer,
+    openToneDialog: openToneDialog, updateTonePreview: updateTonePreview, closeToneDialog: closeToneDialog,
     bindQuickBar: bindQuickBar, updateQuickBar: updateQuickBar,
     loadReferenceImage: loadReferenceImage, clearReferenceImage: clearReferenceImage
   };

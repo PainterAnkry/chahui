@@ -624,9 +624,49 @@
   </div>
 </div>
 
+<!-- ============ 色调调整（滤镜） ============ -->
+<div class="modal-mask hidden" id="toneMask">
+  <div class="modal tone">
+    <div class="modal-head">
+      <h3 id="toneTitle">色调调整</h3>
+      <button class="icon-btn" id="btnToneCancel">×</button>
+    </div>
+    <div class="modal-body">
+      <p class="hint" id="toneNote">作用于当前图层。画布上就是最终效果，直接拖滑块看。</p>
+      <div class="tone-row">
+        <label>亮度</label>
+        <input type="range" id="toneBright" min="-100" max="100" value="0" />
+        <b id="toneBrightVal">0</b>
+      </div>
+      <div class="tone-row">
+        <label>对比度</label>
+        <input type="range" id="toneContrast" min="-100" max="100" value="0" />
+        <b id="toneContrastVal">0</b>
+      </div>
+      <div class="tone-row">
+        <label>色相</label>
+        <input type="range" id="toneHue" min="-180" max="180" value="0" />
+        <b id="toneHueVal">0</b>
+      </div>
+      <div class="tone-row">
+        <label>饱和度</label>
+        <input type="range" id="toneSat" min="-100" max="100" value="0" />
+        <b id="toneSatVal">0</b>
+      </div>
+      <div class="imp-actions">
+        <button class="btn tiny ghost" id="btnToneReset">重置</button>
+        <span class="spacer"></span>
+        <button class="btn tiny ghost" id="btnToneZero">取消</button>
+        <button class="btn tiny primary" id="btnToneOk">确定</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="protocol.js"></script><script src="config.js"></script>
 <script src="brushes.js"></script>
 <script src="brush-import.js"></script>
+<script src="filters.js"></script>
 <script src="menu.js"></script>
 <script src="engine.js"></script>
 <script src="transform.js"></script>

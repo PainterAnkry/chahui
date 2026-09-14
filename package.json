@@ -1,6 +1,6 @@
 {
   "name": "chahui",
-  "version": "1.3.7",
+  "version": "1.3.8",
   "private": true,
   "description": "茶绘 · 多人实时协作绘画聊天室（桌面端 + 公网服务端，SAI2 风格笔刷体系）",
   "scripts": {
@@ -33,7 +33,8 @@
     "test:wheel": "node tools/test-wheel.js",
     "test:feel": "node tools/test-brush-feel.js",
     "test:shell": "node tools/test-shell.js",
-    "test:mesh": "node tools/test-mesh.js"
+    "test:mesh": "node tools/test-mesh.js",
+    "test:filters": "node tools/test-filters.js"
   },
   "license": "MIT",
   "repository": {

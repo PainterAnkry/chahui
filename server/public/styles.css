@@ -1225,6 +1225,12 @@ input[type=range]::-webkit-slider-thumb {
 .about-body li { margin: 2px 0; }
 .about-body .warn { color: #b4552f; font-weight: 600; }
 
+.modal.tone { width: 460px; max-width: 94vw; }
+.tone-row { display: flex; align-items: center; gap: 9px; margin: 7px 0; font-size: 12.5px; }
+.tone-row label { width: 54px; flex: none; color: var(--text-dim); }
+.tone-row input[type=range] { flex: 1; min-width: 0; }
+.tone-row b { width: 40px; flex: none; text-align: right; font-family: var(--mono); font-size: 11.5px; }
+
 /* ---------------- 菜单栏 ---------------- */
 .menu-bar {
   display: flex;

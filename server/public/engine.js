@@ -1957,6 +1957,20 @@
     var self = this;
     clearCtx(tmpCtx, this.width, this.height);
     tmpCtx.setTransform(1, 0, 0, 1, 0, 0);
+    // 图层覆盖：滤镜预览用。设了就整层用它替代（那份像素里已经含未提交的笔迹），
+    // 于是预览是**真的**在最终画面上预览，而不是另画一张小图糊弄。
+    var ov = this.layerOverride;
+    if (ov && ov.layerId === layer.id && ov.canvas) {
+      tmpCtx.drawImage(ov.canvas, 0, 0);
+      tmpCtx.setTransform(1, 0, 0, 1, 0, 0);
+      tmpCtx.globalAlpha = 1; tmpCtx.globalCompositeOperation = 'source-over'; tmpCtx.filter = 'none';
+      dstCtx.globalAlpha = layer.opacity;
+      dstCtx.globalCompositeOperation = blendOp(layer.blend);
+      dstCtx.drawImage(tmpCanvas, 0, 0);
+      dstCtx.globalAlpha = 1;
+      dstCtx.globalCompositeOperation = 'source-over';
+      return;
+    }
     tmpCtx.drawImage(layer.canvas, 0, 0);
     this.pending.forEach(function (e) {
       if (e.layer !== layer) return;
@@ -2041,6 +2055,18 @@
       var l = this.layers[i];
       if (opts.onlyLayer && opts.onlyLayer !== l.id) continue;
       if (!l.visible && !opts.onlyLayer) continue;
+      // 图层覆盖（滤镜预览）这里也要认，否则会出现「画布上是预览效果、
+      // 导出 / 导航器却还是原图」，两边对不上。
+      // rawLayer（复制 / 合并用）要的是图层自身的真实像素，所以不套预览。
+      var ovd = this.layerOverride;
+      if (ovd && ovd.layerId === l.id && ovd.canvas && !opts.rawLayer) {
+        out.ctx.globalAlpha = l.opacity;
+        out.ctx.globalCompositeOperation = blendOp(l.blend);
+        out.ctx.drawImage(ovd.canvas, 0, 0);
+        out.ctx.globalAlpha = 1;
+        out.ctx.globalCompositeOperation = 'source-over';
+        continue;
+      }
       if (includeActive && this.hasPendingOn(l)) {
         this.composeLayer(out.ctx, tmp.ctx, tmp.canvas, l);
       } else if (opts.rawLayer) {

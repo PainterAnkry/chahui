@@ -203,8 +203,8 @@
       id: 'filter', name: '滤镜', mnemonic: 'T', items: [
         def('filter', 'filter.tone', '色调调整', {
           mnemonic: 'A', sub: [
-            { label: '色相 / 饱和度（暂未实现）', disabled: true },
-            { label: '亮度 / 对比度（暂未实现）', disabled: true },
+            sub('filter', 'filter.tone.hs', '色相 / 饱和度…', { run: function () { A().openToneDialog(); } }),
+            sub('filter', 'filter.tone.bc', '亮度 / 对比度…', { run: function () { A().openToneDialog(); } }),
             { label: '色阶（暂未实现）', disabled: true }
           ]
         }),
