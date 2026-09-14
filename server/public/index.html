@@ -359,6 +359,16 @@
       <label class="tp-mode"><input type="radio" name="tpMode" value="scale" /><span>缩放</span></label>
       <label class="tp-mode"><input type="radio" name="tpMode" value="distort" /><span>扭曲</span></label>
       <label class="tp-mode"><input type="radio" name="tpMode" value="rotate" /><span>旋转</span></label>
+      <label class="tp-mode">
+        <input type="checkbox" id="tpMesh" /><span>网格变换</span>
+        <select class="tp-mesh-n" id="tpMeshN" title="网格密度">
+          <option value="2">2×2</option>
+          <option value="3" selected>3×3</option>
+          <option value="4">4×4</option>
+          <option value="6">6×6</option>
+        </select>
+      </label>
+      <p class="tp-hint" id="tpMeshHint">拖网格上的控制点做局部变形；按住 Alt 拖会带上周围一格。</p>
       <div class="tp-btns">
         <button class="tp-btn" id="tpApply">确定</button>
         <button class="tp-btn" id="tpCancel">中止</button>

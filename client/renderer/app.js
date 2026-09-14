@@ -1984,7 +1984,8 @@
         e.preventDefault();
         var tsp = stagePoint(e);
         var tdp = engine.screenToDoc(tsp.x, tsp.y);
-        var hit = engine.transform.hitTest(tdp, 10);
+        global.__softMeshDrag = !!e.altKey;
+      var hit = engine.transform.hitTest(tdp, 10);
         if (!hit) return;
         view.setPointerCapture(e.pointerId);
         engine.transform.dragStart(hit, tdp);
@@ -2071,6 +2072,7 @@
     function up() {
       if (engine.transform) {
         if (S.transformDragging) { engine.transform.dragEnd(); S.transformDragging = false; }
+    global.__softMeshDrag = false;
         return;
       }
       if (S.pan) {
@@ -3768,6 +3770,20 @@
     $('#brushFileInput').addEventListener('change', function () { handleBrushFiles(this.files); });
     $('#btnImportCancelX').addEventListener('click', function () { $('#importMask').classList.add('hidden'); });
 
+    // 网格变换开关 + 密度
+    $('#tpMesh').addEventListener('change', function () {
+      if (!engine.transform) return;
+      engine.transform.setMesh(this.checked, Number($('#tpMeshN').value));
+      engine.drawOverlay();
+      toast(this.checked ? '网格变换：开（拖控制点做局部变形，Alt 带动周围）' : '网格变换：关');
+    });
+    $('#tpMeshN').addEventListener('change', function () {
+      if (engine.transform && $('#tpMesh').checked) {
+        engine.transform.setMesh(true, Number(this.value));
+        engine.drawOverlay();
+      }
+    });
+
     // 菜单栏 + 快捷键设置
     if (global.ChaMenu) {
       global.ChaMenu.buildMenuBar();
@@ -4144,6 +4160,24 @@
     commitSelSnapshot();
     toast('已全选');
   }
+  /** 菜单里的「网格变换」：进变换 + 打开网格；已经在网格里就关掉 */
+  function toggleMeshTransform() {
+    if (!engine.transform) {
+      startTransform();
+      if (!engine.transform) return;
+      $('#tpMesh').checked = true;
+      engine.transform.setMesh(true, Number($('#tpMeshN').value));
+      engine.drawOverlay();
+      toast('网格变换：拖控制点做局部变形（Alt 带动周围）', 'ok', 4200);
+      return;
+    }
+    var on = !engine.transform.mesh;
+    $('#tpMesh').checked = on;
+    engine.transform.setMesh(on, Number($('#tpMeshN').value));
+    engine.drawOverlay();
+    toast(on ? '网格变换：开' : '网格变换：关');
+  }
+
   function toggleTransform() {
     if (engine.transform) commitTransform(); else startTransform();
   }
@@ -4729,7 +4763,7 @@
     openCanvasDialog: openCanvasDialog, bake: bake,
     flipImage: flipImage, rotateImage: rotateImage, cropToSelection: cropToSelection,
     selectAll: selectAll, selectNone: selectNone, selectInvert: selectInvert,
-    selectFromLayer: selectFromLayer, toggleTransform: toggleTransform,
+    selectFromLayer: selectFromLayer, toggleTransform: toggleTransform, toggleMeshTransform: toggleMeshTransform,
     commitTransform: commitTransform, cancelTransform: cancelTransform,
     toggleGrid: toggleGrid, setSymmetry: setSymmetry, nudgeSteadier: nudgeSteadier,
     setPaper: setPaper, setFx: setFx,

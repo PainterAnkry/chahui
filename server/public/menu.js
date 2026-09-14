@@ -173,6 +173,7 @@
         def('select', 'select.all', '全选', { mnemonic: 'A', key: '', run: function () { A().selectAll(); } }),
         SEP,
         def('select', 'select.fromLayer', '按图层不透明区域建立选区', { mnemonic: 'F', run: function () { A().selectFromLayer(); } }),
+        def('select', 'select.mesh', '网格变换', { mnemonic: 'M', run: function () { A().toggleMeshTransform(); } }),
         def('select', 'select.transform', '自由变换', { mnemonic: 'T', key: 'Ctrl+T', run: function () { A().toggleTransform(); } }),
         def('select', 'select.apply', '变换：确定', { key: 'Enter', run: function () { A().commitTransform(); } }),
         def('select', 'select.abort', '变换：中止', { key: 'Escape', run: function () { A().cancelTransform(); } })

@@ -71,14 +71,16 @@
   /**
    * 把 src 的 [sx,sy,sw,sh] 区域按 quad 画到 ctx 上（ctx 已处于文档坐标系）。
    */
-  function drawQuad(ctx, src, sx, sy, sw, sh, quad, cells) {
+  function drawQuad(ctx, src, sx, sy, sw, sh, quad, cells, pointAt) {
     if (sw <= 0 || sh <= 0) return;
+    // pointAt 给了就用它算目标点（网格变换走这条），否则按四边形双线性插值
+    var at = pointAt || function (u, v) { return bilerp(quad, u, v); };
     ctx.save();
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
     ctx.setTransform(ctx.getTransform());   // 保留调用方设好的文档变换
 
-    if (isAffine(quad)) {
+    if (!pointAt && isAffine(quad)) {
       // 快路径：整个源矩形一次仿射搞定
       var s = [pt(sx, sy), pt(sx + sw, sy), pt(sx + sw, sy + sh)];
       var d = [quad[0], quad[1], quad[2]];
@@ -107,13 +109,37 @@
         var s10 = pt(sx + sw * u1, sy + sh * v0);
         var s11 = pt(sx + sw * u1, sy + sh * v1);
         var s01 = pt(sx + sw * u0, sy + sh * v1);
-        var d00 = bilerp(quad, u0, v0), d10 = bilerp(quad, u1, v0);
-        var d11 = bilerp(quad, u1, v1), d01 = bilerp(quad, u0, v1);
+        var d00 = at(u0, v0), d10 = at(u1, v0);
+        var d11 = at(u1, v1), d01 = at(u0, v1);
         tri(ctx, src, [s00, s10, s11], [d00, d10, d11]);
         tri(ctx, src, [s00, s11, s01], [d00, d11, d01]);
       }
     }
     ctx.restore();
+  }
+
+  /**
+   * 网格变换：把 (u,v) 映射到「N×N 网格」里的点。
+   * 先在所属格子里做双线性插值 —— 这正是逐格双三角形渲染的逆运算，
+   * 所以拖某个控制点之后的画面和网格线完全对得上。
+   */
+  function meshAt(mesh, u, v) {
+    var N = mesh.length - 1;
+    var fu = Math.min(N - 1e-9, Math.max(0, u * N));
+    var fv = Math.min(N - 1e-9, Math.max(0, v * N));
+    var i = Math.floor(fu), j = Math.floor(fv);
+    var tu = fu - i, tv = fv - j;
+    var p00 = mesh[j][i], p10 = mesh[j][i + 1], p01 = mesh[j + 1][i], p11 = mesh[j + 1][i + 1];
+    var topX = p00.x + (p10.x - p00.x) * tu, topY = p00.y + (p10.y - p00.y) * tu;
+    var botX = p01.x + (p11.x - p01.x) * tu, botY = p01.y + (p11.y - p01.y) * tu;
+    return pt(topX + (botX - topX) * tv, topY + (botY - topY) * tv);
+  }
+
+  function meshCenter(mesh) {
+    var N = mesh.length - 1;
+    var x = 0, y = 0, n = 0;
+    for (var j = 0; j <= N; j++) for (var i = 0; i <= N; i++) { x += mesh[j][i].x; y += mesh[j][i].y; n++; }
+    return pt(x / n, y / n);
   }
 
   /* ============================================================ 会话 */
@@ -138,6 +164,9 @@
       pt(this.rect.x, this.rect.y + this.rect.h)
     ];
     this.drag = null;
+    // 网格变换：null = 关闭；开启时是 (meshN+1)×(meshN+1) 个控制点
+    this.mesh = null;
+    this.meshN = 3;
   }
 
   /** 透视滑块作用到四边形上（绕着上下边的中轴收放上边） */
@@ -151,6 +180,41 @@
       pt(topCx + (q[1].x - topCx) * k, q[1].y),
       q[2], q[3]
     ];
+  };
+
+  /**
+   * 开关网格变换。开启时按当前四边形摊出一张 (n+1)×(n+1) 的网格，
+   * 之后拖哪个控制点就只动那一个 —— 这就是 SAI2 的「网格变换」。
+   */
+  Session.prototype.setMesh = function (on, n) {
+    if (!on) { this.mesh = null; return; }
+    this.meshN = Math.max(1, Math.min(10, Math.round(n || this.meshN || 3)));
+    var q = this.effectiveQuad();
+    var N = this.meshN, rows = [];
+    for (var j = 0; j <= N; j++) {
+      var row = [];
+      for (var i = 0; i <= N; i++) row.push(bilerp(q, i / N, j / N));
+      rows.push(row);
+    }
+    this.mesh = rows;
+  };
+
+  /** 渲染用的 (u,v) → 点映射；没开网格就返回 null，交给 drawQuad 走四边形路径 */
+  Session.prototype.effectivePointAt = function () {
+    var m = this.mesh;
+    if (!m) return null;
+    return function (u, v) { return meshAt(m, u, v); };
+  };
+
+  /** 网格控制点在文档坐标下的位置（扁平数组，供命中测试与绘制） */
+  Session.prototype.meshNodes = function () {
+    var m = this.mesh;
+    if (!m) return [];
+    var N = m.length - 1, out = [];
+    for (var j = 0; j <= N; j++) {
+      for (var i = 0; i <= N; i++) out.push({ i: i, j: j, p: m[j][i] });
+    }
+    return out;
   };
 
   /** 手柄位置（文档坐标）：4 角 + 4 边中点 + 旋转柄 */
@@ -174,6 +238,22 @@
   /** 命中测试；半径用屏幕像素给出，按缩放换算到文档坐标 */
   Session.prototype.hitTest = function (p, screenPx) {
     var r = (screenPx || 9) / Math.max(this.engine.scale, 0.02);
+    // 网格变换开着的时候，控制点优先于四角 / 边中点手柄
+    if (this.mesh) {
+      var nodes = this.meshNodes();
+      var best = null, bestD = r;
+      for (var m = 0; m < nodes.length; m++) {
+        var d = Math.hypot(p.x - nodes[m].p.x, p.y - nodes[m].p.y);
+        if (d <= bestD) { bestD = d; best = nodes[m]; }
+      }
+      if (best) return 'mesh:' + best.j + ':' + best.i;
+      // 网格模式下仍然允许整体拖动
+      if (meshAt(this.mesh, 0.5, 0.5)) {
+        var inMesh = pointInQuad(p, [this.mesh[0][0], this.mesh[0][this.meshN], this.mesh[this.meshN][this.meshN], this.mesh[this.meshN][0]]);
+        if (inMesh) return 'move';
+      }
+      return null;
+    }
     var h = this.handles();
     var keys = ['nw', 'ne', 'se', 'sw', 'n', 'e', 's', 'w', 'rotate'];
     for (var i = 0; i < keys.length; i++) {
@@ -206,6 +286,12 @@
     if (handle === 'rotate' || this.mode === 'rotate') {
       this.drag.ang0 = Math.atan2(p.y - this.drag.center0.y, p.x - this.drag.center0.x);
     }
+    if (this.mesh) {
+      this.drag.soft = !!global.__softMeshDrag;
+      this.drag.mesh0 = this.mesh.map(function (row) {
+        return row.map(function (q) { return pt(q.x, q.y); });
+      });
+    }
   };
 
   Session.prototype.dragMove = function (p, shift) {
@@ -213,6 +299,37 @@
     if (!d) return;
     var q = d.quad0.map(function (x) { return pt(x.x, x.y); });
     var c = d.center0;
+
+    // 网格控制点：只动被抓的那一个；按住 Alt 连周围一起柔和地带动
+    if (this.mesh && d.mesh0) {
+      var mm = /^mesh:(\d+):(\d+)$/.exec(d.handle);
+      if (mm) {
+        var jj = +mm[1], ii = +mm[2];
+        var dx = p.x - d.start.x, dy = p.y - d.start.y;
+        var N = this.meshN;
+        this.mesh = d.mesh0.map(function (row, j) {
+          return row.map(function (node, i) {
+            var k = 1;
+            if (global.CtrlShape) { /* 占位，见下 */ }
+            if (d.soft) {
+              // 距离越远带得越少：0 环 = 1，1 环 = 0.5，2 环 = 0.2，更远不动
+              var dd = Math.max(Math.abs(i - ii), Math.abs(j - jj));
+              k = dd === 0 ? 1 : dd === 1 ? 0.5 : dd === 2 ? 0.2 : 0;
+            } else if (i !== ii || j !== jj) {
+              k = 0;
+            }
+            void N;
+            return k === 0 ? pt(node.x, node.y) : pt(node.x + dx * k, node.y + dy * k);
+          });
+        });
+        // 网格一动，四个角也跟着走，这样「确定」之后的外框和画面一致
+        this.quad = [
+          this.mesh[0][0], this.mesh[0][this.meshN],
+          this.mesh[this.meshN][this.meshN], this.mesh[this.meshN][0]
+        ];
+        return;
+      }
+    }
 
     if (d.handle === 'rotate' || this.mode === 'rotate') {
       var ang = Math.atan2(p.y - c.y, p.x - c.x) - d.ang0;
@@ -225,6 +342,15 @@
 
     if (d.handle === 'move') {
       var dx = p.x - d.start.x, dy = p.y - d.start.y;
+      if (this.mesh) {
+        var ddx = dx, ddy = dy;
+        this.mesh = d.mesh0.map(function (row) {
+          return row.map(function (node) { return pt(node.x + ddx, node.y + ddy); });
+        });
+        this.quad = [this.mesh[0][0], this.mesh[0][this.meshN],
+          this.mesh[this.meshN][this.meshN], this.mesh[this.meshN][0]];
+        return;
+      }
       for (var k = 0; k < 4; k++) q[k] = pt(q[k].x + dx, q[k].y + dy);
       this.quad = q;
       return;
@@ -296,9 +422,11 @@
    */
   Session.prototype.flip = function (axis) {
     var cq = quadCenter(this.quad);
-    this.quad = this.quad.map(function (p) {
+    var f = function (p) {
       return axis === 'h' ? pt(2 * cq.x - p.x, p.y) : pt(p.x, 2 * cq.y - p.y);
-    });
+    };
+    this.quad = this.quad.map(f);
+    if (this.mesh) this.mesh = this.mesh.map(function (row) { return row.map(f); });
     // 镜像会把四个角的绕向反过来，命中测试要能认出来（见 pointInQuad）
     this.mirrored = !this.mirrored;
   };
@@ -311,13 +439,16 @@
    */
   Session.prototype.rotate90 = function (dir) {
     var nc = quadCenter(this.quad);
-    this.quad = this.quad.map(function (p) { return rotatePt(p, nc, dir * Math.PI / 2); });
+    var f = function (p) { return rotatePt(p, nc, dir * Math.PI / 2); };
+    this.quad = this.quad.map(f);
+    if (this.mesh) this.mesh = this.mesh.map(function (row) { return row.map(f); });
     this.rotation += dir * Math.PI / 2;
   };
 
   /** 把变换结果画到 ctx（ctx 已处于文档坐标系） */
   Session.prototype.render = function (ctx) {
-    drawQuad(ctx, this.buf, 0, 0, this.buf.width, this.buf.height, this.effectiveQuad(), this.cells);
+    drawQuad(ctx, this.buf, 0, 0, this.buf.width, this.buf.height,
+      this.effectiveQuad(), this.cells, this.effectivePointAt());
   };
 
   /** 覆盖层：画面预览 + 外框 + 手柄 */
@@ -350,6 +481,37 @@
     ctx.globalAlpha = 0.35;
     ctx.stroke();
     ctx.globalAlpha = 1;
+
+    // 网格变换：把网格线和控制点画出来（SAI2 里也是一格一格的）
+    if (this.mesh) {
+      var N = this.meshN;
+      ctx.strokeStyle = 'rgba(40,110,255,.55)';
+      ctx.lineWidth = 0.9 / s;
+      ctx.beginPath();
+      for (var gj = 0; gj <= N; gj++) {
+        ctx.moveTo(this.mesh[gj][0].x, this.mesh[gj][0].y);
+        for (var gi = 1; gi <= N; gi++) ctx.lineTo(this.mesh[gj][gi].x, this.mesh[gj][gi].y);
+      }
+      for (var gi2 = 0; gi2 <= N; gi2++) {
+        ctx.moveTo(this.mesh[0][gi2].x, this.mesh[0][gi2].y);
+        for (var gj2 = 1; gj2 <= N; gj2++) ctx.lineTo(this.mesh[gj2][gi2].x, this.mesh[gj2][gi2].y);
+      }
+      ctx.stroke();
+      var nodes = this.meshNodes();
+      var ns = 5 / s;
+      for (var ni = 0; ni < nodes.length; ni++) {
+        var np = nodes[ni].p;
+        ctx.beginPath();
+        ctx.arc(np.x, np.y, ns, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(30,60,140,.95)';
+        ctx.lineWidth = 1 / s;
+        ctx.stroke();
+      }
+      ctx.restore();
+      return;
+    }
 
     // 手柄
     var h = this.handles();
@@ -395,6 +557,8 @@
 
   global.ChaTransform = {
     Session: Session,
+    meshAt: meshAt,
+    meshCenter: meshCenter,
     drawQuad: drawQuad,
     quadCenter: quadCenter,
     pointInQuad: pointInQuad

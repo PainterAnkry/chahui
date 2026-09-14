@@ -1025,6 +1025,19 @@ input[type=range]::-webkit-slider-thumb {
 }
 .tp-mode:hover { background: #e9eef6; }
 .tp-mode input { margin: 0; }
+.tp-mesh-n {
+  margin-left: auto;
+  font: inherit; font-size: 11px;
+  height: 20px; border-radius: 4px;
+  border: 1px solid #d5dce6; background: #fff; color: var(--text);
+}
+.tp-hint {
+  margin: 4px 0 0;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
 .tp-btns { display: flex; gap: 5px; margin: 5px 0 4px; }
 .tp-btn {
   flex: 1;
