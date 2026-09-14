@@ -254,65 +254,135 @@
     return valid;
   }
 
+  var PANEL_SIDES = { left: 'left', right: 'right' };
+
+  /** 每个小节现在住在哪一边（左栏 / 右栏），存本地 */
+  function loadPanelSides() {
+    var raw = null;
+    try { raw = JSON.parse(lsGet('chahu.panelSides', 'null')); } catch (e) { raw = null; }
+    var out = {};
+    if (raw && typeof raw === 'object') {
+      Object.keys(raw).forEach(function (k) {
+        if (PANEL_DEFAULT_ORDER.indexOf(k) >= 0 && PANEL_SIDES[raw[k]]) out[k] = raw[k];
+      });
+    }
+    return out;
+  }
+
+  function panelContainers() {
+    return [$('#leftPanelScroll'), $('#rightPanelScroll')].filter(Boolean);
+  }
+
+  /** 右栏里那个装小节的容器：空着的时候就收起来，别白占地方 */
+  function updateRightScroll() {
+    var rs = $('#rightPanelScroll');
+    if (!rs) return;
+    var n = rs.querySelectorAll('[data-section]').length;
+    rs.classList.toggle('empty', n === 0);
+  }
+
+  /**
+   * 按记住的顺序与归属摆放小节。
+   * 归属可以是左边也可以是右边 —— 这就是「把一个小节拖到另一边去」的实现基础。
+   */
   function applyPanelOrder() {
-    var scroll = $('#leftPanelScroll');
-    if (!scroll) return;
+    var left = $('#leftPanelScroll');
+    var right = $('#rightPanelScroll');
+    if (!left || !right) return;
     var order = loadPanelOrder();
-    var frag = document.createDocumentFragment();
+    var sides = loadPanelSides();
+    var fragL = document.createDocumentFragment();
+    var fragR = document.createDocumentFragment();
     order.forEach(function (id) {
-      var sec = scroll.querySelector('[data-section="' + id + '"]');
-      if (sec) frag.appendChild(sec);
+      var sec = document.querySelector('[data-section="' + id + '"]');
+      if (!sec) return;
+      (sides[id] === 'right' ? fragR : fragL).appendChild(sec);
     });
-    scroll.appendChild(frag);
+    left.appendChild(fragL);
+    right.appendChild(fragR);
+    updateRightScroll();
   }
 
   function savePanelOrder() {
-    var scroll = $('#leftPanelScroll');
-    if (!scroll) return;
-    var ids = Array.prototype.slice.call(scroll.querySelectorAll('[data-section]'))
-      .map(function (s) { return s.getAttribute('data-section'); });
+    var left = $('#leftPanelScroll');
+    var right = $('#rightPanelScroll');
+    var ids = [];
+    var sides = {};
+    function take(box, side) {
+      if (!box) return;
+      Array.prototype.forEach.call(box.querySelectorAll('[data-section]'), function (s) {
+        var id = s.getAttribute('data-section');
+        ids.push(id);
+        sides[id] = side;
+      });
+    }
+    take(left, 'left');
+    take(right, 'right');
     lsSet('chahu.panelOrder', JSON.stringify(ids));
+    lsSet('chahu.panelSides', JSON.stringify(sides));
+    updateRightScroll();
   }
 
+  /**
+   * 小节拖动排序 —— **可以在左右两栏之间拖**。
+   *
+   * 以前只认左栏那一个容器，所以小节只能在左栏里上下挪；现在两个容器都是投放目标，
+   * 拖到右栏（包括空着的右栏）就能把它搬过去，松手时按落点决定插在哪一段前面 / 后面。
+   */
   function bindPanelDnD() {
-    var scroll = $('#leftPanelScroll');
-    if (!scroll) return;
+    var leftScroll = $('#leftPanelScroll');
+    if (!leftScroll) return;
     var resetBtn = $('#btnPanelReset');
     if (resetBtn) resetBtn.onclick = function () {
       lsSet('chahu.panelOrder', JSON.stringify(PANEL_DEFAULT_ORDER));
+      lsSet('chahu.panelSides', JSON.stringify({}));
       applyPanelOrder();
-      toast('已恢复默认顺序');
+      toast('已恢复默认布局（小节都回到左栏）');
     };
 
-    var dragging = null, pointerId = null, autoTimer = null, autoDir = 0;
+    var dragging = null, pointerId = null, autoTimer = null, autoDir = 0, dropBox = null;
 
     function clearMarks() {
-      Array.prototype.forEach.call(scroll.querySelectorAll('[data-section]'), function (s) {
-        s.classList.remove('section-drop-before', 'section-drop-after');
+      panelContainers().forEach(function (box) {
+        box.classList.remove('panel-drop-target');
+        Array.prototype.forEach.call(box.querySelectorAll('[data-section]'), function (s) {
+          s.classList.remove('section-drop-before', 'section-drop-after');
+        });
       });
+      dropBox = null;
     }
     function stopAuto() {
       if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
       autoDir = 0;
     }
-    function nearest(target) {
-      while (target && target !== scroll) {
+    function nearestSection(target) {
+      while (target && target.nodeType === 1) {
         if (target.getAttribute && target.getAttribute('data-section')) return target;
         target = target.parentNode;
       }
       return null;
     }
+    /** 落点所在的容器（用于判断是不是拖到了另一栏） */
+    function containerOf(el) {
+      var boxes = panelContainers();
+      while (el && el.nodeType === 1) {
+        if (boxes.indexOf(el) >= 0) return el;
+        el = el.parentNode;
+      }
+      return null;
+    }
     function hitTest(x, y) {
       var el = document.elementFromPoint(x, y);
-      return nearest(el);
+      var sec = nearestSection(el);
+      return { section: sec, box: sec ? containerOf(sec) : containerOf(el) };
     }
     function runAuto() {
-      if (!autoDir) { stopAuto(); return; }
-      scroll.scrollTop += autoDir * 14;
+      if (!autoDir || !dropBox) { stopAuto(); return; }
+      dropBox.scrollTop += autoDir * 14;
     }
-    // 拖到面板上下边缘时自动滚动，长列表也能一路拖到底
     function updateAuto(y) {
-      var r = scroll.getBoundingClientRect();
+      var box = dropBox || leftScroll;
+      var r = box.getBoundingClientRect();
       var dir = 0;
       if (y < r.top + 28) dir = -1;
       else if (y > r.bottom - 28) dir = 1;
@@ -322,12 +392,11 @@
       if (dir) autoTimer = setInterval(runAuto, 16);
     }
 
-    // 整个小节标题栏都是把手（不再只有那个小小的 ⋮⋮），
-    // 但标题里的按钮（＋新建 / 编辑）仍然照常点击。
-    scroll.addEventListener('pointerdown', function (e) {
+    // 整个小节标题栏都是把手；标题里的按钮照常可点
+    function onDown(e) {
       if (e.button !== 0) return;
       var t = e.target;
-      if (t && t.closest && t.closest('button, input, select, a')) return;
+      if (t && t.closest && t.closest('button, input, select, a, textarea')) return;
       var h4 = t && t.closest ? t.closest('h4') : null;
       var grip = t && t.closest ? t.closest('.section-grip') : null;
       if (!h4 && !grip) return;
@@ -337,43 +406,79 @@
       dragging = sec;
       pointerId = e.pointerId;
       sec.classList.add('section-dragging');
-      try { scroll.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
-      document.body.style.cursor = 'grabbing';
-    });
+      // 指针捕获挂在 document 上：拖到另一栏的时候事件还得继续来
+      try { document.documentElement.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+      document.body.classList.add('panel-dragging');
+    }
 
-    scroll.addEventListener('pointermove', function (e) {
+    function onMove(e) {
       if (!dragging || e.pointerId !== pointerId) return;
+      var hit = hitTest(e.clientX, e.clientY);
+      dropBox = hit.box || dropBox;
       updateAuto(e.clientY);
-      var target = hitTest(e.clientX, e.clientY);
-      clearMarks();
-      if (!target || target === dragging) return;
-      var r = target.getBoundingClientRect();
-      var before = (e.clientY - r.top) < r.height / 2;
-      target.classList.add(before ? 'section-drop-before' : 'section-drop-after');
-    });
+      clearMarksKeepBox();
+      if (hit.section && hit.section !== dragging) {
+        var r = hit.section.getBoundingClientRect();
+        var before = (e.clientY - r.top) < r.height / 2;
+        hit.section.classList.add(before ? 'section-drop-before' : 'section-drop-after');
+        dropBox = containerOf(hit.section);
+      } else if (hit.box && !hit.box.querySelector('[data-section]')) {
+        // 空容器：整个容器亮起来，表示「放进来就行」
+        hit.box.classList.add('panel-drop-target');
+        dropBox = hit.box;
+      }
+    }
+
+    function clearMarksKeepBox() {
+      panelContainers().forEach(function (box) {
+        box.classList.remove('panel-drop-target');
+        Array.prototype.forEach.call(box.querySelectorAll('[data-section]'), function (s) {
+          s.classList.remove('section-drop-before', 'section-drop-after');
+        });
+      });
+    }
 
     function finish(e) {
       if (!dragging || (e && e.pointerId != null && e.pointerId !== pointerId)) return;
-      var target = e ? hitTest(e.clientX, e.clientY) : null;
-      if (target && target !== dragging) {
-        var r = target.getBoundingClientRect();
+      var hit = e ? hitTest(e.clientX, e.clientY) : null;
+      var moved = false;
+      if (hit && hit.section && hit.section !== dragging) {
+        var box = containerOf(hit.section);
+        var r = hit.section.getBoundingClientRect();
         var before = (e.clientY - r.top) < r.height / 2;
-        if (before) scroll.insertBefore(dragging, target);
-        else scroll.insertBefore(dragging, target.nextSibling);
+        if (box) {
+          if (before) box.insertBefore(dragging, hit.section);
+          else box.insertBefore(dragging, hit.section.nextSibling);
+          moved = true;
+        }
+      } else if (hit && hit.box && !hit.box.querySelector('[data-section]')) {
+        // 丢进空容器
+        hit.box.appendChild(dragging);
+        moved = true;
+      }
+      if (moved) {
+        var toRight = containerOf(dragging) === $('#rightPanelScroll');
         savePanelOrder();
+        renderToolGrid && renderToolGrid();
+        engine.resize();
+        var name = { nav: '导航器', tools: '工具栏', brushes: '笔刷栏', brush: '画笔', fx: '效果', color: '颜色', layers: '图层' };
+        var id = dragging.getAttribute('data-section');
+        toast('「' + (name[id] || id) + '」已移到' + (toRight ? '右侧栏' : '左栏'));
       }
       dragging.classList.remove('section-dragging');
       clearMarks();
       stopAuto();
       dragging = null;
-      document.body.style.cursor = '';
+      document.body.classList.remove('panel-dragging');
     }
-    scroll.addEventListener('pointerup', finish);
-    scroll.addEventListener('pointercancel', finish);
-    // 指针跑出面板外松手也要收尾，否则会一直黏着
-    document.addEventListener('pointerup', function (e) {
-      if (dragging) finish(e);
+
+    // 两个容器都要能起手（右栏里的小节也要能再拖回去）
+    panelContainers().forEach(function (box) {
+      box.addEventListener('pointerdown', onDown);
     });
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', finish);
+    document.addEventListener('pointercancel', finish);
     window.addEventListener('blur', function () { if (dragging) finish(null); });
   }
 
@@ -1056,6 +1161,115 @@
     });
   }
 
+  /* ── RGB / HSV 滑块 ──
+     六根滑条 + 六个数字框都以 S.color 为唯一真相：
+     拖滑条 / 输入数字 → setColor()；setColor() 反过来再刷新它们。
+     用一个 syncing 标志挡住回环，避免拖动时死循环。
+
+     ⚠ 灰阶的坑：黑 / 白 / 灰在 HSV 里推不出色相（S=0 时色相无意义），
+     纯黑连饱和度也推不出来（V=0 时 S 也无意义）。所以 setColor 里对
+     这两种情况**保留** S.hue / S.sv 里记住的值，滑条也照这份值显示 ——
+     否则「V 拖到 0 变黑，再拖回来」会变成白色，颜色就丢了。 */
+  var syncingColor = false;
+
+  /** 从 RGB 推 HSV，推不出来的分量沿用 S 里记住的 */
+  function hsvOfColor(hex) {
+    var rg = global.CanvasEngine.hexToRgb(hex);
+    var hsv = rgbToHsv(rg.r, rg.g, rg.b);
+    return {
+      rgb: rg,
+      h: hsv.s > 0.0001 ? hsv.h : S.hue,
+      s: hsv.v > 0.0001 ? hsv.s : S.sv.s,
+      v: hsv.v
+    };
+  }
+
+  function refreshColorSliders() {
+    var c = hsvOfColor(S.color);
+    var vals = {
+      r: c.rgb.r, g: c.rgb.g, b: c.rgb.b,
+      h: Math.round(c.h), s: Math.round(c.s * 100), v: Math.round(c.v * 100)
+    };
+    syncingColor = true;
+    Object.keys(vals).forEach(function (k) {
+      var sl = $('#sl' + k.toUpperCase());
+      var nm = $('#num' + k.toUpperCase());
+      if (sl) sl.value = vals[k];
+      if (nm) nm.value = vals[k];
+    });
+    syncingColor = false;
+  }
+
+  function bindColorSliders() {
+    if (!$('#colorModes')) return;
+
+    // 顶部这排开关：每块各自显示 / 隐藏，状态记在 localStorage 里。
+    var CM_KEY = 'chahu.colorBlocks';
+    var shown = null;
+    try { shown = JSON.parse(lsGet(CM_KEY, 'null')); } catch (e) { shown = null; }
+    if (!shown || typeof shown !== 'object') shown = { wheel: true, rgb: false, hsv: false, swatch: true };
+
+    function applyBlocks() {
+      document.querySelectorAll('.cm-block[data-cm-block]').forEach(function (b) {
+        var k = b.getAttribute('data-cm-block');
+        b.classList.toggle('off', !shown[k]);
+      });
+      document.querySelectorAll('#colorModes .cm-btn').forEach(function (b) {
+        b.classList.toggle('on', !!shown[b.getAttribute('data-cm')]);
+      });
+    }
+    document.querySelectorAll('#colorModes .cm-btn').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var k = b.getAttribute('data-cm');
+        shown[k] = !shown[k];
+        lsSet(CM_KEY, JSON.stringify(shown));
+        applyBlocks();
+        // 面板高度变了，把两侧滚动区重新算一遍
+        if (typeof updateRightScroll === 'function') updateRightScroll();
+      });
+    });
+    applyBlocks();
+
+    var CH = {
+      r: { max: 255, at: 1 }, g: { max: 255, at: 1 }, b: { max: 255, at: 1 },
+      h: { max: 360, at: 0 }, s: { max: 100, at: 0 }, v: { max: 100, at: 0 }
+    };
+    function onInput(k, raw) {
+      if (syncingColor) return;
+      var n = parseFloat(raw);
+      if (!isFinite(n)) return;
+      var cfg = CH[k];
+      n = clamp(n, 0, cfg.max);
+      if (cfg.at) {
+        var c = hsvOfColor(S.color);
+        var rgb = { r: c.rgb.r, g: c.rgb.g, b: c.rgb.b };
+        rgb[k] = Math.round(n);
+        setColor(hexOf(rgb.r, rgb.g, rgb.b), false);
+        return;
+      }
+      // HSV 这一路：先把当前值（含「推不出来就沿用」的规则）取出来，再改被拖的那一个分量
+      var cur = hsvOfColor(S.color);
+      var h = cur.h, s = cur.s, v = cur.v;
+      if (k === 'h') h = n;
+      else if (k === 's') s = n / 100;
+      else v = n / 100;
+      S.hue = h;
+      S.sv = { s: s, v: v };
+      applyHsv();
+      drawWheel();
+    }
+    ['r', 'g', 'b', 'h', 's', 'v'].forEach(function (k) {
+      var sl = $('#sl' + k.toUpperCase());
+      var nm = $('#num' + k.toUpperCase());
+      if (sl) sl.addEventListener('input', function () { onInput(k, sl.value); });
+      if (nm) {
+        nm.addEventListener('input', function () { onInput(k, nm.value); });
+        nm.addEventListener('change', function () { onInput(k, nm.value); });
+      }
+    });
+    refreshColorSliders();
+  }
+
   function setColor(hex, remember) {
     S.color = hex;
     $('#colorPreview').style.background = hex;
@@ -1063,12 +1277,14 @@
     try { $('#colorInput').value = hex; } catch (e) { /* ignore */ }
     var rg = global.CanvasEngine.hexToRgb(hex);
     var hsv = rgbToHsv(rg.r, rg.g, rg.b);
-    // 灰阶颜色（黑 / 白 / 灰）算不出色相，rgbToHsv 会回 0。
-    // 这时候**保留原来的色相**，否则在色轮上拖色相环会「没有任何反应」：
-    // 环上选色 → applyHsv 用当前 S/V 合成 → 若当前 S=0 合成出来还是灰 →
-    // setColor 又把 hue 打回 0 —— 用户看到的就是「点环没用 / 位置识别不对」。
+    // 灰阶颜色（黑 / 白 / 灰）算不出色相，rgbToHsv 会回 0；纯黑连饱和度也推不出来。
+    // 这两种情况**保留原来的色相 / 饱和度**，否则：
+    //  · 在色轮上拖色相环 → applyHsv 用当前 S/V 合成 → 若当前 S=0 合成出来还是灰 →
+    //    setColor 又把 hue 打回 0 —— 用户看到的就是「点环没用」；
+    //  · 把 V 拖到 0 变黑再拖回来 → S 被打回 0 → 变成白色，原来的颜色就没了。
     if (hsv.s > 0.0001) S.hue = hsv.h;
-    S.sv = { s: hsv.s, v: hsv.v };
+    S.sv = { s: hsv.v > 0.0001 ? hsv.s : S.sv.s, v: hsv.v };
+    refreshColorSliders();
     if (remember !== false) pushRecent(hex);
   }
 
@@ -4127,6 +4343,7 @@
     bindCanvas();
     bindViewBar();
     bindWheel();
+    bindColorSliders();
     bindPanelDnD();
     bindQuickBar();
     bindRefWindow();
@@ -4395,7 +4612,11 @@
   function rotateView(deg, reset) { if (reset) engine.setRotation(0); else engine.rotateBy(deg); }
 
 
-  function sectionEl(id) { return document.querySelector('#leftPanelScroll [data-section="' + id + '"]'); }
+  // 小节现在可能被拖到右侧面板里，所以查找必须跨两个容器。
+  function sectionEl(id) {
+    return document.querySelector('#leftPanelScroll [data-section="' + id + '"]') ||
+           document.querySelector('#rightPanelScroll [data-section="' + id + '"]');
+  }
 
   function toggleSection(id) {
     var el = sectionEl(id);
@@ -4411,9 +4632,21 @@
   function resetPanels() {
     try {
       localStorage.removeItem('chahu.sections');
-      localStorage.removeItem('chahu.panels');
+      localStorage.removeItem('chahu.panelOrder');
+      localStorage.removeItem('chahu.panelSides');
     } catch (e) { /* ignore */ }
-    $('#leftPanelScroll [data-section]').forEach(function (s) { s.classList.remove('hidden'); });
+    // 把所有小节搬回左栏（默认布局），再清掉隐藏状态。
+    var left = $('#leftPanelScroll');
+    if (left) {
+      document.querySelectorAll('#rightPanelScroll [data-section]').forEach(function (s) {
+        s.classList.remove('hidden');
+        left.appendChild(s);
+      });
+      document.querySelectorAll('#leftPanelScroll [data-section]').forEach(function (s) {
+        s.classList.remove('hidden');
+      });
+    }
+    if (typeof updateRightScroll === 'function') updateRightScroll();
     if (typeof applyPanelOrder === 'function') applyPanelOrder();
     engine.resize();
     toast('面板布局已恢复默认', 'ok');

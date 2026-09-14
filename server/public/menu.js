@@ -213,10 +213,6 @@
             sub('ruler', 'ruler.sym.h', '水平镜像', { run: function () { A().setSymmetry('h'); } }),
             sub('ruler', 'ruler.sym.quad', '四向镜像', { run: function () { A().setSymmetry('quad'); } })
           ]
-        }),
-        SEP,
-        def('ruler', 'ruler.steadier', '手抖修正（在画布上沿的快捷条里调）', {
-          run: function () { A().toggleQuickBarSteadier(); }
         })
       ]
     },
@@ -291,6 +287,9 @@
             sub('window', 'window.secColor', '颜色', { run: function () { A().toggleSection('color'); } }),
             sub('window', 'window.secLayers', '图层', { run: function () { A().toggleSection('layers'); } })
           ]
+        }),
+        def('window', 'window.panelReset', '恢复默认面板布局', {
+          run: function () { A().resetPanels(); }
         }),
         def('window', 'window.detach', '分离操作面板', {
           mnemonic: 'P', sub: [{ label: '（网页版不支持分离窗口）', disabled: true }]

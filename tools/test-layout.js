@@ -2,7 +2,8 @@
  * 布局 / 侧栏 / 参考图浮窗 / 高斯模糊 / 菜单 回归。
  *
  * 守着这几条：
- *   · 工具面板挪到了画布右边，聊天侧栏在最右；侧栏能收拉，收起后画布会变宽
+ *   · 布局回到默认：左栏（各种小节）| 画布 | 右栏（聊天/成员/笔迹）；
+ *     侧栏能收拉，收起后画布会变宽
  *   · 参考图是**独立浮窗**（可拖、可缩放、可关），不再是盖在画布上的一层；
  *     而且始终**不上传**（不进笔迹 / 不进图层）
  *   · 高斯模糊：预览是真的（画布上就糊了），确定时作为一次像素操作发出去
@@ -34,17 +35,19 @@ function ok(name, cond, extra) {
   await page.evaluate(() => document.querySelector('#entryMask').classList.add('hidden'));
   await sleep(400);
 
-  console.log('\n=== 布局：画布在左，工具面板和聊天侧栏都在右 ===');
+  console.log('\n=== 布局：左栏（小节）| 画布 | 右栏（聊天等），三栏按默认摆放 ===');
   const lay = await page.evaluate(() => {
     const g = s => document.querySelector(s).getBoundingClientRect();
     const stage = g('.workspace > .stage'), left = g('.panel.left'), right = g('.panel.right');
     return { stage: Math.round(stage.left), tools: Math.round(left.left), chat: Math.round(right.left),
-      stageW: Math.round(stage.width) };
+      stageW: Math.round(stage.width), leftW: Math.round(left.width), rightW: Math.round(right.width) };
   });
   console.log('  ' + JSON.stringify(lay));
-  ok('画布在最左边', lay.stage < lay.tools, 'stage=' + lay.stage);
-  ok('工具面板在画布右边', lay.tools > lay.stage && lay.tools < lay.chat, 'tools=' + lay.tools);
-  ok('聊天侧栏在最右', lay.chat > lay.tools, 'chat=' + lay.chat);
+  ok('左栏在最左', lay.tools < lay.stage, 'left=' + lay.tools);
+  ok('画布在中间', lay.stage > lay.tools && lay.stage < lay.chat, 'stage=' + lay.stage);
+  ok('右栏在最右', lay.chat > lay.stage, 'chat=' + lay.chat);
+  ok('画布真的占了中间那块宽度', lay.stageW > lay.leftW && lay.stageW > lay.rightW,
+    'stage=' + lay.stageW + ' left=' + lay.leftW + ' right=' + lay.rightW);
 
   console.log('\n=== 侧栏收拉 ===');
   await page.evaluate(() => document.querySelector('#btnSideCollapse').click());
@@ -198,8 +201,8 @@ function ok(name, cond, extra) {
   });
   console.log('  尺子: ' + JSON.stringify(menu.ruler));
   console.log('  其他: ' + JSON.stringify(menu.other));
-  ok('尺子菜单里没有「抖动修正 ±」', !menu.ruler.some(l => /抖动修正/.test(l)), menu.ruler.join(' / '));
-  ok('尺子菜单里留了一句指路（手抖修正去哪调）', menu.ruler.some(l => /手抖修正/.test(l)));
+  ok('尺子菜单里没有「抖动修正」（已按反馈整条去掉）',
+    !menu.ruler.some(l => /抖动修正|手抖修正/.test(l)), menu.ruler.join(' / '));
   ok('「其他」里显示当前版本', menu.other.some(l => /^版本 \d+\.\d+\.\d+/.test(l)), menu.other.join(' / '));
   ok('不再有「系统 ID」', !menu.other.some(l => /系统 ID/.test(l)));
   const nothingGreyInFilter = await page.evaluate(() => {

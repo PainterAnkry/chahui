@@ -139,9 +139,11 @@ button, input, select, textarea { font: inherit; color: inherit; }
   gap: 0;
   min-height: 0;
 }
-/* 画布在左，工具面板和聊天侧栏都在右 —— 靠 order 调视觉顺序，不动 DOM */
-.workspace > .stage { order: 1; flex: 1; min-width: 0; }
-.workspace > .panel.left { order: 2; flex: none; width: var(--left-w); }
+/* 默认布局：左栏（各种小节）| 画布 | 右栏（聊天 / 成员 / 笔迹）。
+   用 order 而不是固定 grid 列，是为了隐藏某一栏时画布能自动铺满。
+   注意：小节可以从小节标题栏拖到对面那一栏去（见 bindPanelDnD）。 */
+.workspace > .panel.left { order: 1; flex: none; width: var(--left-w); }
+.workspace > .stage { order: 2; flex: 1; min-width: 0; }
 .workspace > .panel.right { order: 3; flex: none; width: var(--right-w); }
 
 .panel {
@@ -150,9 +152,37 @@ button, input, select, textarea { font: inherit; color: inherit; }
   flex-direction: column;
   min-height: 0;
 }
-.panel.left { border-left: 1px solid var(--line); }    /* 现在是右边那一栏，边框换到左边 */
+.panel.left { border-right: 1px solid var(--line); }
 .panel.right { border-left: 1px solid var(--line); }
 .panel-scroll { overflow-y: auto; overflow-x: hidden; padding: 8px; flex: 1; }
+/* 右栏里装「拖过来的小节」的那一条：没内容就整条收掉，不占地方 */
+.right-sections {
+  flex: none;
+  max-height: 55%;
+  padding: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.right-sections.empty { display: none; }
+/* 正在拖小节的时候，空的右栏也得露面 —— 否则没有落点可以放进来。
+   注意 elementFromPoint 命中不了 display:none 的元素，这一条是拖拽能跨栏的必要条件。 */
+body.panel-dragging .right-sections.empty {
+  display: block;
+  min-height: 76px;
+  border: 1px dashed var(--accent);
+  border-radius: var(--radius-sm);
+  margin: 8px 8px 0;
+  padding: 8px;
+  background: var(--accent-soft);
+}
+body.panel-dragging .right-sections.empty::after {
+  content: '拖到这里';
+  display: block;
+  font-size: 11px;
+  color: var(--fg-dim);
+  text-align: center;
+  padding-top: 22px;
+  pointer-events: none;
+}
 
 .group {
   background: var(--panel-2);
@@ -448,6 +478,90 @@ input[type=range]::-webkit-slider-thumb {
   transition: transform .1s;
 }
 .palette i:hover { transform: scale(1.18); z-index: 2; }
+
+/* 颜色栏顶部那排开关 + 各块滑块 */
+.color-modes {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 3px;
+  margin-bottom: 7px;
+}
+.cm-btn {
+  height: 21px; padding: 0;
+  font-size: 11px; line-height: 1;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--bg-2, rgba(0,0,0,.04));
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.cm-btn:hover { border-color: var(--accent); color: var(--fg); }
+.cm-btn.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.cm-block { margin-bottom: 7px; }
+.cm-block.off { display: none; }
+.cm-block[data-cm-block="wheel"] { margin-bottom: 9px; }
+
+.cslider {
+  display: grid;
+  grid-template-columns: 12px 1fr 42px;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 3px;
+}
+.cslider > label {
+  font-size: 10px; font-weight: 600;
+  color: var(--fg-dim);
+  text-align: center;
+  user-select: none;
+}
+.cslider input[type=range] {
+  width: 100%; height: 12px; margin: 0;
+  -webkit-appearance: none; appearance: none;
+  background: transparent; cursor: pointer;
+}
+.cslider input[type=range]::-webkit-slider-runnable-track {
+  height: 5px; border-radius: 3px; background: var(--line);
+}
+.cslider input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 11px; height: 11px; margin-top: -3px;
+  border-radius: 50%;
+  background: #fff;
+  border: 1px solid var(--line);
+  box-shadow: 0 1px 2px rgba(0,0,0,.3);
+}
+/* 每根滑条的轨道按通道上色，一眼能看出拖的是哪一个 */
+.cslider[data-ch="r"] input[type=range]::-webkit-slider-runnable-track {
+  background: linear-gradient(90deg, #000, #f00);
+}
+.cslider[data-ch="g"] input[type=range]::-webkit-slider-runnable-track {
+  background: linear-gradient(90deg, #000, #0f0);
+}
+.cslider[data-ch="b"] input[type=range]::-webkit-slider-runnable-track {
+  background: linear-gradient(90deg, #000, #00f);
+}
+.cslider[data-ch="h"] input[type=range]::-webkit-slider-runnable-track {
+  background: linear-gradient(90deg,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00);
+}
+.cslider[data-ch="s"] input[type=range]::-webkit-slider-runnable-track {
+  background: linear-gradient(90deg, #888, #f00);
+}
+.cslider[data-ch="v"] input[type=range]::-webkit-slider-runnable-track {
+  background: linear-gradient(90deg, #000, #f00);
+}
+.cslider input[type=number] {
+  width: 42px; padding: 2px 3px;
+  font-size: 11px;
+  font-family: var(--mono);
+  text-align: center;
+}
+.cslider input[type=number]::-webkit-inner-spin-button { display: none; }
 
 /* ============================== 图层 ============================== */
 
@@ -1069,6 +1183,15 @@ input[type=range]::-webkit-slider-thumb {
 .tp-wide:hover { border-color: var(--accent); color: var(--accent); }
 .tp-tip { margin: 2px 0 0; font-size: 10px; color: #9aa2ae; line-height: 1.5; }
 .stage.tp-active .canvas-wrap { cursor: default; }
+
+/* 拖到对面那一栏时空容器高亮 */
+.panel-drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: -4px;
+  background: var(--accent-soft);
+}
+body.panel-dragging { cursor: grabbing; }
+body.panel-dragging * { cursor: grabbing !important; }
 
 .section-dragging {  opacity: .5;
   outline: 1px dashed var(--accent);

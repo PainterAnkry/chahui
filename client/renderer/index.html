@@ -240,7 +240,7 @@
       <!-- ── 颜色 ── -->
       <section class="group" data-section="color">
         <h4><span class="section-grip" title="拖动调整顺序">⋮⋮</span>颜色</h4>
-        <div class="wheel-wrap"><canvas id="colorWheel" width="180" height="180"></canvas></div>
+
         <div class="color-current">
           <label class="swatch-lg" id="colorPreview" style="background:#2b2b2b">
             <input type="color" id="colorInput" value="#2b2b2b" />
@@ -251,7 +251,58 @@
             <button class="btn tiny ghost full" id="btnSwap" title="交换前景/背景色（X）">前景 / 背景色互换</button>
           </div>
         </div>
-        <div class="palette" id="palette"></div>
+
+        <!-- 顶部这排按钮：点一下就把对应的那一块收起 / 展开 -->
+        <div class="color-modes" id="colorModes">
+          <button class="cm-btn" data-cm="wheel" title="显示 / 隐藏色轮">色轮</button>
+          <button class="cm-btn" data-cm="rgb" title="显示 / 隐藏 RGB 滑块">RGB</button>
+          <button class="cm-btn" data-cm="hsv" title="显示 / 隐藏 HSV 滑块">HSV</button>
+          <button class="cm-btn" data-cm="swatch" title="显示 / 隐藏色板">色板</button>
+        </div>
+
+        <div class="cm-block" data-cm-block="wheel">
+          <div class="wheel-wrap"><canvas id="colorWheel" width="180" height="180"></canvas></div>
+        </div>
+
+        <div class="cm-block" data-cm-block="rgb">
+          <div class="cslider" data-ch="r">
+            <label>R</label>
+            <input type="range" id="slR" min="0" max="255" value="43" />
+            <input type="number" id="numR" min="0" max="255" value="43" />
+          </div>
+          <div class="cslider" data-ch="g">
+            <label>G</label>
+            <input type="range" id="slG" min="0" max="255" value="43" />
+            <input type="number" id="numG" min="0" max="255" value="43" />
+          </div>
+          <div class="cslider" data-ch="b">
+            <label>B</label>
+            <input type="range" id="slB" min="0" max="255" value="43" />
+            <input type="number" id="numB" min="0" max="255" value="43" />
+          </div>
+        </div>
+
+        <div class="cm-block" data-cm-block="hsv">
+          <div class="cslider" data-ch="h">
+            <label>H</label>
+            <input type="range" id="slH" min="0" max="360" value="0" />
+            <input type="number" id="numH" min="0" max="360" value="0" />
+          </div>
+          <div class="cslider" data-ch="s">
+            <label>S</label>
+            <input type="range" id="slS" min="0" max="100" value="0" />
+            <input type="number" id="numS" min="0" max="100" value="0" />
+          </div>
+          <div class="cslider" data-ch="v">
+            <label>V</label>
+            <input type="range" id="slV" min="0" max="100" value="17" />
+            <input type="number" id="numV" min="0" max="100" value="17" />
+          </div>
+        </div>
+
+        <div class="cm-block" data-cm-block="swatch">
+          <div class="palette" id="palette"></div>
+        </div>
       </section>
 
       <!-- ── 图层 ── -->
@@ -402,6 +453,8 @@
 
   <!-- ==================== 右：聊天 / 成员 / 笔迹 ==================== -->
   <aside class="panel right" id="sidePanel">
+    <!-- 从左边拖过来的小节住这里；空着的时候自动收起来 -->
+    <div class="panel-scroll right-sections empty" id="rightPanelScroll"></div>
     <div class="tabs">
       <button class="tab active" data-tab="chat">聊天</button>
       <button class="tab" data-tab="members">成员 <b id="memberCount">0</b></button>
