@@ -66,6 +66,9 @@
   };
   function blendOp(name) { return BLEND_OPS[name] || 'source-over'; }
 
+  // 哪些工具吃尺子（形状 / 选区 / 油漆桶不吃 —— 它们本来就有确定的几何）
+  var RULER_TOOLS = { brush: 1, eraser: 1, blur: 1, smudge: 1 };
+
   function isEraser(stroke) { return stroke.tool === 'eraser'; }
   function isBlur(stroke) { return stroke.tool === 'blur'; }
   function isSmudge(stroke) { return stroke.tool === 'smudge'; }
@@ -737,6 +740,10 @@
     this.view = null; this.viewCtx = null;
     this.overlay = null; this.overlayCtx = null;
     this.previewStroke = null;
+    // 尺子：{ type, p0, p1, spacing }；只吸附**本地**取的点
+    this.ruler = null;
+    this.rulerPreview = null;
+    this.showRuler = true;
     this.selectPreview = null;
     this.transform = null;
     this.viewportW = 0; this.viewportH = 0;
@@ -992,10 +999,20 @@
     var e = this.pending.get(strokeId);
     if (!e || !pts || !pts.length) return;
     var fromIndex = e.stroke.points.length;
+    // 尺子吸附：**只对本地笔迹**做，而且就在存点这一刻做 ——
+    // 于是笔迹里存的就是吸附后的点、上传的也是吸附后的点，
+    // 别人原样重放即可。远端来的点绝不再吸（否则我换个尺子就把别人的线掰弯了）。
+    var snapR = (e.local && this.ruler && this.ruler.type && RULER_TOOLS[e.stroke.tool])
+      ? this.ruler : null;
     for (var i = 0; i < pts.length; i++) {
       var p = pts[i];
       if (!p) continue;
-      e.stroke.points.push([+p[0], +p[1], p.length > 2 ? +p[2] : 0.5]);
+      var px = +p[0], py = +p[1];
+      if (snapR && global.ChaRuler) {
+        var sp = global.ChaRuler.snap(snapR, px, py);
+        px = sp.x; py = sp.y;
+      }
+      e.stroke.points.push([px, py, p.length > 2 ? +p[2] : 0.5]);
     }
     var stroke = e.stroke;
     if (isTwoPoint(stroke)) {
@@ -2357,6 +2374,14 @@
     // 图像变换：浮层预览 + 变换框 + 手柄
     if (this.transform) {
       this.transform.drawOverlay(c);
+    }
+
+    // 尺子（含正在拖拽时的橡皮筋预览）
+    if (this.rulerPreview && global.ChaRuler) {
+      global.ChaRuler.draw(c, global.ChaRuler.make(this.rulerPreview.type, this.rulerPreview.p0, this.rulerPreview.p1), W, H, this.scale);
+    }
+    if (this.ruler && this.ruler.type && global.ChaRuler && this.showRuler !== false) {
+      global.ChaRuler.draw(c, this.ruler, W, H, this.scale);
     }
 
     // 框选 / 套索的实时框

@@ -192,13 +192,27 @@
           check: function () { var s = A().state; return !!(s && s.gridOn); }
         }),
         SEP,
-        def('ruler', 'ruler.symV', '直线尺（垂直镜像）', { mnemonic: 'S', run: function () { A().setSymmetry('v'); } }),
-        def('ruler', 'ruler.sym4', '椭圆尺（四向镜像）', { mnemonic: 'E', run: function () { A().setSymmetry('quad'); } }),
-        def('ruler', 'ruler.symH', '平行线（水平镜像）', { mnemonic: 'P', run: function () { A().setSymmetry('h'); } }),
-        off('ruler', '同心圆', 'C'),
-        off('ruler', '集中线', 'V'),
+        def('ruler', 'ruler.line', '直线尺', { mnemonic: 'S', run: function () { A().armRuler('line'); } }),
+        def('ruler', 'ruler.ellipse', '椭圆尺', { mnemonic: 'E', run: function () { A().armRuler('ellipse'); } }),
+        def('ruler', 'ruler.parallel', '平行线尺', { mnemonic: 'P', run: function () { A().armRuler('parallel'); } }),
+        def('ruler', 'ruler.circle', '同心圆尺', { mnemonic: 'C', run: function () { A().armRuler('circle'); } }),
+        def('ruler', 'ruler.radial', '集中线尺', { mnemonic: 'V', run: function () { A().armRuler('radial'); } }),
         SEP,
-        def('ruler', 'ruler.reset', '重置尺子', { mnemonic: 'R', run: function () { A().setSymmetry('none'); } }),
+        def('ruler', 'ruler.show', '显示尺子', {
+          mnemonic: 'W',
+          run: function () { A().toggleRulerVisible(); },
+          check: function () { var s = A().state; return !!(s && s.rulerOn); }
+        }),
+        def('ruler', 'ruler.reset', '重置尺子', { mnemonic: 'R', run: function () { A().clearRuler(); } }),
+        SEP,
+        def('ruler', 'ruler.symmetry', '对称尺', {
+          mnemonic: 'Y', sub: [
+            sub('ruler', 'ruler.sym.none', '关闭', { run: function () { A().setSymmetry('none'); } }),
+            sub('ruler', 'ruler.sym.v', '垂直镜像', { run: function () { A().setSymmetry('v'); } }),
+            sub('ruler', 'ruler.sym.h', '水平镜像', { run: function () { A().setSymmetry('h'); } }),
+            sub('ruler', 'ruler.sym.quad', '四向镜像', { run: function () { A().setSymmetry('quad'); } })
+          ]
+        }),
         SEP,
         def('ruler', 'ruler.steadierUp', '抖动修正 +', { run: function () { A().nudgeSteadier(1); } }),
         def('ruler', 'ruler.steadierDown', '抖动修正 −', { run: function () { A().nudgeSteadier(-1); } })

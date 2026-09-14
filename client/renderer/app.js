@@ -1978,6 +1978,18 @@
     var view = $('#view');
 
     view.addEventListener('pointerdown', function (e) {
+      /* ---- 尺子定义中：这一下拖拽用来摆尺子，不画画 ---- */
+      if (S.rulerArm) {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        var rsp = stagePoint(e);
+        var rdp = engine.screenToDoc(rsp.x, rsp.y);
+        S.rulerArm.p0 = { x: rdp.x, y: rdp.y };
+        S.rulerArm.p1 = { x: rdp.x, y: rdp.y };
+        try { view.setPointerCapture(e.pointerId); } catch (err) { /* 没有真实指针就算了 */ }
+        S.rulerDragging = true;
+        return;
+      }
       /* ---- 变换模式：所有指针事件都交给变换框 ---- */
       if (engine.transform) {
         if (e.button !== 0) return;
@@ -2033,6 +2045,15 @@
       S.pointer.sx = sp.x;
       S.pointer.sy = sp.y;
       S.pointer.inside = true;
+      // 尺子定义中：拖出橡皮筋
+      if (S.rulerArm && S.rulerDragging) {
+        var rdp = engine.screenToDoc(sp.x, sp.y);
+        S.rulerArm.p1 = { x: rdp.x, y: rdp.y };
+        engine.rulerPreview = { type: S.rulerArm.type, p0: S.rulerArm.p0, p1: S.rulerArm.p1 };
+        engine.drawOverlay();
+        $('#cursorPos').textContent = Math.round(rdp.x) + ', ' + Math.round(rdp.y);
+        return;
+      }
       if (engine.transform) {
         var tdp = engine.screenToDoc(sp.x, sp.y);
         if (S.transformDragging) {
@@ -2070,6 +2091,20 @@
     });
 
     function up() {
+      // 尺子定义收尾：够长就摆上，太短就提示
+      if (S.rulerDragging) {
+        S.rulerDragging = false;
+        engine.rulerPreview = null;
+        var arm = S.rulerArm;
+        var rp0 = arm && arm.p0, rp1 = arm && arm.p1;
+        if (rp0 && rp1 && Math.hypot(rp1.x - rp0.x, rp1.y - rp0.y) > 2) {
+          commitRuler(arm.type, rp0, rp1);
+        } else {
+          toast('拖得太短了，尺子没摆上（再拖长一点）', 'err');
+          engine.drawOverlay();
+        }
+        return;
+      }
       if (engine.transform) {
         if (S.transformDragging) { engine.transform.dragEnd(); S.transformDragging = false; }
     global.__softMeshDrag = false;
@@ -4904,6 +4939,88 @@
       '｜色相 ' + o.hue + '｜饱和度 ' + o.saturation, 'ok', 3800);
   }
 
+  /* ================================================================
+   * 尺子（SAI2 的直线 / 椭圆 / 平行线 / 同心圆 / 集中线）
+   *
+   * 交互：从「尺子」菜单选一种 → 在画布上拖一下定义尺子 → 之后的笔画自动吸附。
+   * 定义尺子的那一次拖拽不会画东西（状态栏会提示），定义完自动回到画笔。
+   * ================================================================ */
+
+  /** 尺子相关的状态栏提示（不覆盖已有的 setStatus） */
+  function updateRulerStatus() {
+    if (engine.ruler && engine.ruler.type) {
+      var info = global.ChaRuler.typeOf(engine.ruler.type);
+      setStatus('尺子：' + info.name + '（间隔 ' + Math.round(engine.ruler.spacing) + 'px）');
+    } else {
+      setStatus('就绪');
+    }
+  }
+
+  function armRuler(type) {
+    var info = global.ChaRuler.typeOf(type);
+    if (!info) return;
+    S.rulerArm = { type: type, p0: null };
+    $('#view').style.cursor = 'crosshair';
+    setStatus('尺子·' + info.name + '：' + info.hint + '（Esc 取消）');
+    toast(info.name + '：在画布上拖一下定义尺子', 'ok', 3600);
+  }
+
+  function cancelRulerArm() {
+    if (!S.rulerArm) return;
+    S.rulerArm = null;
+    $('#view').style.cursor = '';
+    updateRulerStatus();
+  }
+
+  /** 定义完成 */
+  function commitRuler(type, a, b) {
+    engine.ruler = global.ChaRuler.make(type, a, b);
+    engine.showRuler = true;
+    S.rulerArm = null;
+    S.rulerOn = true;
+    try {
+      localStorage.setItem('chahu.ruler.on', '1');
+    } catch (e) { /* ignore */ }
+    $('#view').style.cursor = '';
+    engine.drawOverlay();
+    updateRulerStatus();
+    var info = global.ChaRuler.typeOf(type);
+    toast(info.name + ' 已就位，之后的笔画会自动吸附（尺子菜单里可重置）', 'ok', 4200);
+  }
+
+  function clearRuler() {
+    engine.ruler = null;
+    S.rulerArm = null;
+    S.rulerOn = false;
+    try { localStorage.setItem('chahu.ruler.on', '0'); } catch (e) { /* ignore */ }
+    engine.drawOverlay();
+    updateRulerStatus();
+    toast('已重置尺子');
+  }
+
+  function toggleRulerVisible(on) {
+    engine.showRuler = (on === undefined) ? (engine.showRuler === false) : !!on;
+    S.rulerOn = engine.showRuler;
+    try { localStorage.setItem('chahu.ruler.on', engine.showRuler ? '1' : '0'); } catch (e) { /* ignore */ }
+    engine.drawOverlay();
+    toast(engine.showRuler ? '显示尺子' : '隐藏尺子');
+  }
+
+  /** 尺子定义中：把拖拽的两个端点变成尺子 */
+  function rulerDragMove(dp) {
+    if (!S.rulerArm) return;
+    if (!S.rulerArm.p0) return;
+    // 实时画一条橡皮筋，让用户知道自己在拖什么
+    engine.rulerPreview = {
+      type: S.rulerArm.type,
+      p0: S.rulerArm.p0,
+      p1: { x: dp.x, y: dp.y }
+    };
+    engine.drawOverlay();
+    void dp;
+  }
+
+
   global.ChaApp = {
     engine: engine, net: net, state: S, undo: undo, redo: redo, toast: toast,
     // 笔刷导入（给测试用，也让控制台里能手动导一支试试）
@@ -4946,6 +5063,7 @@
     openAbout: openAbout, checkUpdate: checkUpdate, cmpVer: cmpVer,
     openToneDialog: openToneDialog, updateTonePreview: updateTonePreview, closeToneDialog: closeToneDialog,
     openExportDialog: openExportDialog, exportAs: exportAs, syncExportNote: syncExportNote,
+    armRuler: armRuler, clearRuler: clearRuler, toggleRulerVisible: toggleRulerVisible, commitRuler: commitRuler,
     bindQuickBar: bindQuickBar, updateQuickBar: updateQuickBar,
     loadReferenceImage: loadReferenceImage, clearReferenceImage: clearReferenceImage
   };
