@@ -652,6 +652,7 @@
     this.view = null; this.viewCtx = null;
     this.overlay = null; this.overlayCtx = null;
     this.previewStroke = null;
+    this.selectPreview = null;
     this.transform = null;
     this.viewportW = 0; this.viewportH = 0;
 
@@ -713,6 +714,7 @@
     this.replayMode = false;
     this.replayCanvas = null;
     this.previewStroke = null;
+    this.selectPreview = null;
     this.selection = null;
     this.scratchPool.length = 0;
     this.baseComposite = null;
@@ -916,7 +918,10 @@
     if (isFill(stroke) || isSmudge(stroke)) return;
     if (isSelectTool(stroke)) {
       // 框选 / 套索要边拖边看得见框，实时画在 overlay 上
-      if (isRegionSelect(stroke)) { this.previewStroke = stroke; this.drawOverlay(); }
+      // 框选 / 套索的实时框用**独立字段**。共用 previewStroke 会被下面的
+      // 「形状 / 渐变预览」当成形状来画 —— shapePath 的 else 分支是椭圆，
+      // 于是选区时画布上会冒出一个大椭圆（用户报的就是这个）。
+      if (isRegionSelect(stroke)) { this.selectPreview = stroke; this.drawOverlay(); }
       return;
     }
     // 关键：实时预览**整笔重画**，而不是只画新增的那一段。
@@ -938,6 +943,7 @@
     this.pending.delete(strokeId);
     var stroke = e.stroke;
     this.previewStroke = null;
+    this.selectPreview = null;
     if (stroke.points.length === 0) {
       this.releaseScratch(e.scratch);
       this.clearOverlay();
@@ -1006,6 +1012,7 @@
     this.pending.delete(strokeId);
     this.releaseScratch(e.scratch);
     this.previewStroke = null;
+    this.selectPreview = null;
     this.clearOverlay();
     this.baseDirty = true;
     this.invalidate();
@@ -2128,6 +2135,7 @@
 
   CanvasEngine.prototype.clearOverlay = function () {
     this.previewStroke = null;
+    this.selectPreview = null;
     if (!this.overlayCtx) return;
     var c = this.overlayCtx;
     c.setTransform(1, 0, 0, 1, 0, 0);
@@ -2147,10 +2155,8 @@
 
     var W = this.width, H = this.height;
 
-    // 画布边界
-    c.lineWidth = 1 / this.scale;
-    c.strokeStyle = 'rgba(0,0,0,.18)';
-    c.strokeRect(0, 0, W, H);
+    // 画布边界不再描一圈线：白纸和外面的棋盘格已经把边界说清楚了，
+    // 多这一圈框在画布上很碍眼（用户反馈）
 
     // 网格
     if (this.grid.on) {
@@ -2202,7 +2208,7 @@
     }
 
     // 框选 / 套索的实时框
-    var pv = this.previewStroke;
+    var pv = this.selectPreview;
     if (pv && isRegionSelect(pv) && pv.points.length > 1) {
       c.save();
       c.setLineDash([6 / this.scale, 4 / this.scale]);
@@ -2225,9 +2231,9 @@
       c.restore();
     }
 
-    // 形状 / 渐变预览
+    // 形状 / 渐变预览（只处理真正的形状与渐变 —— 选区预览走上面的 selectPreview）
     var s = this.previewStroke;
-    if (s && s.points.length > 1) {
+    if (s && (isShape(s) || isGradient(s)) && s.points.length > 1) {
       var copies = symmetryCopies(s, W, H);
       var p0 = s.points[0], p1 = s.points[s.points.length - 1];
       if (isGradient(s)) {

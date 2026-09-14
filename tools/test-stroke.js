@@ -24,7 +24,7 @@ function check(name, ok, extra) {
   const browser = await chromium.launch({ channel: 'chrome', headless: true });
   const page = await browser.newPage({ viewport: { width: 1400, height: 900 }, deviceScaleFactor: 1 });
   page.on('pageerror', e => console.log('[pageerror]', e.message));
-  await page.goto('http://localhost:8437/', { waitUntil: 'domcontentloaded' });
+  await page.goto((process.argv[2] || 'http://localhost:8437') + '/', { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('#entryMask:not(.hidden)');
   await page.fill('#nameInput', '一致性');
   await page.fill('#newRoomName', '画中与画后一致性');

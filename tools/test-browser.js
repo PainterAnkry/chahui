@@ -795,7 +795,36 @@ async function main() {
 
   await A.click('#btnSelInvert');
   await sleep(400);
-  ok('反选可用', (await A.evaluate(() => window.ChaApp.engine.hasSelection())) === true);
+  // 全选的「补集」是空 —— 这时不该再报「有选区」。
+  // （以前会把 active 留在 true 但蒙版是空的，用户会发现画笔什么都画不上）
+  ok('全选后反选 = 空选区，不残留「有选区」状态',
+    (await A.evaluate(() => window.ChaApp.engine.hasSelection())) === false);
+  await A.click('#btnSelNone');
+  await sleep(350);
+
+  // 做一个有意义的反选：先只选左半边，反选之后应该是右半边
+  await A.evaluate(() => {
+    const e = window.ChaApp.engine;
+    const s = e.ensureSelection();
+    s.ctx.setTransform(1, 0, 0, 1, 0, 0);
+    s.ctx.fillStyle = '#ffffff';
+    s.ctx.fillRect(0, 0, Math.floor(e.width / 2), e.height);
+    s.active = true;
+    e.refreshSelectionTint();
+    e.emit('selection', { active: true });
+  });
+  await sleep(300);
+  await A.click('#btnSelInvert');
+  await sleep(500);
+  const inv = await A.evaluate(() => {
+    const e = window.ChaApp.engine;
+    const d = e.selection.ctx.getImageData(0, 0, e.width, e.height).data;
+    let n = 0;
+    for (let i = 3; i < d.length; i += 4) if (d[i] > 8) n++;
+    return { active: e.hasSelection(), px: n, want: Math.floor(e.width / 2) * e.height };
+  });
+  ok('反选可用（左半边 → 右半边）',
+    inv.active === true && Math.abs(inv.px - inv.want) / inv.want < 0.02, JSON.stringify(inv));
   await A.click('#btnSelNone');
   await sleep(350);
   ok('可以取消选区', (await A.evaluate(() => window.ChaApp.engine.hasSelection())) === false);

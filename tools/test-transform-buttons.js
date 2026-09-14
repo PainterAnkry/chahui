@@ -26,7 +26,7 @@ const U0 = (MARK.x - SEL.x) / SEL.w, V0 = (MARK.y - SEL.y) / SEL.h;
   const page = await browser.newPage({ viewport: { width: 1400, height: 900 }, deviceScaleFactor: 1 });
   const errs = [];
   page.on('pageerror', e => errs.push(e.message));
-  await page.goto('http://localhost:8437/', { waitUntil: 'domcontentloaded' });
+  await page.goto((process.argv[2] || 'http://localhost:8437') + '/', { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('#entryMask:not(.hidden)');
   await page.fill('#nameInput', '变换');
   await page.fill('#newRoomName', '变换按钮验证');

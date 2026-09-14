@@ -226,6 +226,10 @@ npm run dist            # = 同步协议/服务端/前端 + electron-builder --w
   90° 旋转实际转了 180°）。有 `npm run test:transform` 按像素质心验证。
 - **`newStroke` 只挑它认识的字段**：往笔迹里加新参数时一定要在 `newStroke` 里显式带上，
   否则会被静默丢掉（选区加选用的 `add` / `subtract` 就这么丢过一次）。
+- **实时预览用独立字段**：选区预览如果和「形状/渐变预览」共用 `previewStroke`，
+  会被 `shapePath` 的 `else` 分支（椭圆）画出来 —— 选区时画布上会冒出一个大椭圆。
+  现在选区预览走 `selectPreview`。有 `npm run test:overlay` 守着。
+- **画布边界不描线**：白纸和外面的棋盘格已经把边界说清楚了，overlay 上再多一圈框只会碍眼。
 
 ---
 
@@ -239,6 +243,7 @@ npm run test:browser  # Chrome 双上下文端到端（含两端像素比对）
 npm run test:stroke   # 笔迹连续性回归
 npm run test:selection # 选区工具回归（光标 / 各工具结果 / 加选减选替换 / 全选反选）
 npm run test:transform # 变换按钮回归（水平垂直翻转、±90° 旋转的像素级验证）
+npm run test:overlay   # 覆盖层回归（画布上不该有多余的方框和大椭圆）
 npm run test:embed    # 桌面端内置服务器（起服务 / 托管网页版 / 建房 / 端口复用）
 npm run test:lan      # 「双击 exe → 局域网朋友用浏览器加入」整条链路（需先启动桌面端）
 npm run verify        # 第一轮反馈验收（光标 / 图层清除 / 面板排序 / 分辨率 / 房间清理）
