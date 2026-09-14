@@ -87,7 +87,7 @@ function ok(name, cond, extra) {
   await sleep(500);
   const dlg = await page.evaluate(() => ({
     open: !document.querySelector('#toneMask').classList.contains('hidden'),
-    rows: document.querySelectorAll('.tone-row').length,
+    rows: document.querySelectorAll('#toneMask .tone-row').length,   // 导出对话框也用 .tone-row，要限定范围
     note: document.querySelector('#toneNote').textContent
   }));
   console.log('  ' + JSON.stringify(dlg));

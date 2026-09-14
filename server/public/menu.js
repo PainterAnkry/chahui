@@ -65,11 +65,16 @@
           ]
         }),
         SEP,
-        def('file', 'file.export', '保存', { mnemonic: 'S', key: 'Ctrl+S', run: function () { A().doExport(); } }),
-        def('file', 'file.saveAs', '另存为', { mnemonic: 'A', key: 'Ctrl+Shift+S', run: function () { A().doExport(); } }),
+        def('file', 'file.export', '保存', { mnemonic: 'S', key: 'Ctrl+S', run: function () { A().exportAs('png'); } }),
+        def('file', 'file.saveAs', '另存为', { mnemonic: 'A', key: 'Ctrl+Shift+S', run: function () { A().openExportDialog(); } }),
         def('file', 'file.exportSub', '导出', {
           mnemonic: 'E', sub: [
-            sub('file', 'file.export.png', '导出 PNG', { run: function () { A().doExport(); } }),
+            sub('file', 'file.export.png', 'PNG（.png，带透明）', { run: function () { A().exportAs('png'); } }),
+            sub('file', 'file.export.jpg', 'JPEG（.jpg / .jpeg）', { run: function () { A().exportAs('jpeg'); } }),
+            sub('file', 'file.export.webp', 'WebP（.webp）', { run: function () { A().exportAs('webp'); } }),
+            sub('file', 'file.export.bmp', 'BMP（.bmp，24 位）', { run: function () { A().exportAs('bmp'); } }),
+            sub('file', 'file.export.tga', 'TGA（.tga，32 位）', { run: function () { A().exportAs('tga'); } }),
+            sub('file', 'file.export.more', '更多格式 / 画质…', { run: function () { A().openExportDialog(); } }),
             sub('file', 'file.export.webm', '导出录制视频（WebM）', { run: function () { A().toggleRecord(); } })
           ]
         }),

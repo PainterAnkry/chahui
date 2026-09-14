@@ -2900,6 +2900,61 @@
     download(stampName() + '.png', engine.exportPNG());
   }
 
+  /* ================================================================
+   * 导出：png / jpg / jpeg / webp / bmp / tga
+   * 编码见 export-formats.js；这里只管选格式、问画质、把结果落盘。
+   * ================================================================ */
+
+  function buildExportFormats() {
+    var sel = $('#exportFormat');
+    if (!sel || sel.options.length) return;
+    global.ChaExport.FORMATS.forEach(function (f) {
+      var o = document.createElement('option');
+      o.value = f.id;
+      o.textContent = f.name;
+      sel.appendChild(o);
+    });
+    sel.value = 'png';
+  }
+
+  function syncExportNote() {
+    buildExportFormats();
+    var f = global.ChaExport.byId($('#exportFormat').value);
+    $('#exportQualityRow').classList.toggle('hidden', !f.quality);
+    $('#exportQualityVal').textContent = $('#exportQuality').value;
+    $('#exportNote').textContent = f.alpha
+      ? '带透明通道：没画到的地方导出后是透明的。'
+      : '这个格式不支持透明：没画到的地方会被垫成白底。';
+    if (f.id === 'bmp' || f.id === 'tga') {
+      $('#exportNote').textContent = (f.alpha ? '带透明通道。' : '不支持透明，会垫白底。') +
+        ' BMP / TGA 是茶绘自己写的编码器（浏览器不提供）。';
+    }
+  }
+
+  function openExportDialog() {
+    if (!S.room) { toast('还没有进入房间'); return; }
+    buildExportFormats();
+    syncExportNote();
+    $('#exportMask').classList.remove('hidden');
+  }
+
+  /** 按当前选的格式导出；formatId 为空就用对话框里的选择 */
+  function exportAs(formatId) {
+    if (!S.room) { toast('还没有进入房间'); return; }
+    var f = global.ChaExport.byId(formatId || $('#exportFormat').value);
+    var q = Number($('#exportQuality').value) / 100;
+    var canvas = engine.renderDocument({}).canvas;
+    var data;
+    try {
+      data = global.ChaExport.encode(canvas, f.id, q);
+    } catch (e) {
+      toast('导出失败：' + e.message, 'err');
+      return;
+    }
+    download(stampName() + '.' + f.ext, data);
+    toast('已导出 ' + f.ext.toUpperCase() + '（' + canvas.width + ' × ' + canvas.height + '）', 'ok', 3200);
+  }
+
   /**
    * 分享链接的基地址。
    * 优先用局域网地址：桌面端内置服务器起来后，朋友要用你的内网 IP 才能打开，
@@ -3786,6 +3841,13 @@
       toneSyncLabels(); updateTonePreview();
     });
     $('#btnToneOk').addEventListener('click', function () { closeToneDialog(true); });
+
+    // 导出
+    $('#exportFormat').addEventListener('change', syncExportNote);
+    $('#exportQuality').addEventListener('input', function () { $('#exportQualityVal').textContent = this.value; });
+    $('#btnExportOk').addEventListener('click', function () { $('#exportMask').classList.add('hidden'); exportAs(); });
+    $('#btnExportCancel').addEventListener('click', function () { $('#exportMask').classList.add('hidden'); });
+    $('#btnExportZero').addEventListener('click', function () { $('#exportMask').classList.add('hidden'); });
     $('#btnToneCancel').addEventListener('click', function () { closeToneDialog(false); });
     $('#btnToneZero').addEventListener('click', function () { closeToneDialog(false); });
 
@@ -4883,6 +4945,7 @@
     openSettings: openSettings,
     openAbout: openAbout, checkUpdate: checkUpdate, cmpVer: cmpVer,
     openToneDialog: openToneDialog, updateTonePreview: updateTonePreview, closeToneDialog: closeToneDialog,
+    openExportDialog: openExportDialog, exportAs: exportAs, syncExportNote: syncExportNote,
     bindQuickBar: bindQuickBar, updateQuickBar: updateQuickBar,
     loadReferenceImage: loadReferenceImage, clearReferenceImage: clearReferenceImage
   };

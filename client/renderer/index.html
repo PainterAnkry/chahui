@@ -663,10 +663,38 @@
   </div>
 </div>
 
+<!-- ============ 导出 ============ -->
+<div class="modal-mask hidden" id="exportMask">
+  <div class="modal tone">
+    <div class="modal-head">
+      <h3>导出图片</h3>
+      <button class="icon-btn" id="btnExportCancel">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="tone-row">
+        <label>格式</label>
+        <select id="exportFormat" style="flex:1"></select>
+      </div>
+      <div class="tone-row" id="exportQualityRow">
+        <label>画质</label>
+        <input type="range" id="exportQuality" min="10" max="100" value="92" />
+        <b id="exportQualityVal">92</b>
+      </div>
+      <p class="hint" id="exportNote">—</p>
+      <div class="imp-actions">
+        <span class="spacer"></span>
+        <button class="btn tiny ghost" id="btnExportZero">取消</button>
+        <button class="btn tiny primary" id="btnExportOk">导出</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="protocol.js"></script><script src="config.js"></script>
 <script src="brushes.js"></script>
 <script src="brush-import.js"></script>
 <script src="filters.js"></script>
+<script src="export-formats.js"></script>
 <script src="menu.js"></script>
 <script src="engine.js"></script>
 <script src="transform.js"></script>
