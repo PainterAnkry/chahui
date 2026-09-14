@@ -55,6 +55,14 @@
   };
   Reader.prototype.skip = function (n) { this.bytes(n); };
   Reader.prototype.seek = function (p) { this.pos = p; };
+  /** Pascal 字符串：n 字节长度前缀 + 字符（n=1 时长度按字节，Photoshop 的 .abr 用这种） */
+  Reader.prototype.pascal = function (n) {
+    var len = n === 1 ? this.u8() : this.u16();
+    if (len > this.buf.length) throw new RangeError('字符串长度不合理：' + len);
+    var s = '';
+    for (var i = 0; i < len; i++) s += String.fromCharCode(this.buf[this.pos++]);
+    return s;
+  };
   /** Photoshop 的 unicode 字符串：u32 长度（UTF-16 码元数）+ UTF-16BE，末尾 NUL 丢掉 */
   Reader.prototype.unicode = function () {
     var len = this.u32();
@@ -164,40 +172,76 @@
       return { version: version, brushes: out };
     }
 
-    if (version !== 6 && version !== 7 && version !== 10) {
+    // ISBN 6/7/9/10 —— 这才是真正在用的格式（市面上绝大多数 .abr 都是这一类）
+    //
+    // 字段顺序是拿真实文件校准出来的，别凭印象改：
+    //   samp 块里，每一条 =
+    //     u32 条目长度（4 字节对齐）
+    //     Pascal 字符串（1 字节长度前缀）—— 内容通常是 GUID
+    //     **次版本 1 跳 10 字节，次版本 2 跳 264 字节**   ← 这一步漏了就会满盘皆错
+    //     i32 y · i32 x · i32 (y+h) · i32 (x+w)
+    //     u16 位深（8 或 16）· u8 压缩（0 原样 / 1 RLE）· 位图
+    //
+    // 我第一版参照的那份实现只跳了 8 字节、而且把字符串当 unicode 读，
+    // 结果在 17 个真实文件上一个都过不去 —— 所以现在有 tools/abr-corpus.js 拿真文件回归。
+    if (version !== 6 && version !== 7 && version !== 9 && version !== 10) {
       throw new Error('不支持的 .abr 版本 ' + version);
     }
+    var minor = r.u16();
+    if (minor !== 1 && minor !== 2) {
+      throw new Error('不支持的 .abr 次版本 ' + minor + '（只认 1 和 2）');
+    }
 
-    r.u16();                             // 次版本
-    var samp = null;
+    var found = false;
     while (r.left() >= 12) {
       if (r.ascii(4) !== '8BIM') break;
       var key = r.ascii(4);
-      var len = r.u32();
-      if (len > r.left()) break;
-      var start = r.pos;
-      if (key === 'samp') samp = buf.subarray(start, start + len);
-      r.seek(start + len + ((4 - (len % 4)) % 4));   // 4 字节对齐
-    }
-    if (!samp) throw new Error('这个 .abr 里没有采样笔尖（可能是纯「计算笔刷」文件）');
+      var size = r.u32();
+      if (size > r.left() + 4) break;
+      var end = r.pos + size;
 
-    var sr = new Reader(samp);
-    while (sr.left() >= 4) {
-      var entryLen = sr.u32();
-      if (entryLen === 0 || entryLen > sr.left()) break;
-      var eEnd = sr.pos + entryLen;
-      try {
-        var nm = sr.unicode();
-        var b2 = readSampled(sr);
-        b2.name = nm;
-        b2.spacing = 0.1;
-        out.push(b2);
-      } catch (e) { /* 跳过坏的条目 */ }
-      var pad = (4 - (eEnd % 4)) % 4;
-      sr.seek(Math.min(eEnd + pad, samp.length));
+      if (key === 'samp') {
+        found = true;
+        while (r.pos < end) {
+          var brushLength = r.u32();
+          while (brushLength & 3) brushLength++;        // 条目本身按 4 字节对齐
+          var brushEnd = r.pos + brushLength;
+          try {
+            var id = r.pascal(1);
+            r.skip(minor === 1 ? 10 : 264);
+            var top = r.i32(), left = r.i32();
+            var h = r.i32() - top;
+            var w = r.i32() - left;
+            if (w <= 0 || h <= 0 || w * h > 40000000) throw new Error('笔尖边界不合法 ' + w + '×' + h);
+            var depth = r.u16();
+            var comp = r.u8();
+            var gray = new Uint8Array(w * h);
+            if (depth === 8) {
+              if (comp === 0) gray.set(r.bytes(w * h));
+              else if (comp === 1) {
+                var lens = [];
+                for (var yy = 0; yy < h; yy++) lens.push(r.u16());
+                for (var y2 = 0; y2 < h; y2++) gray.set(packBits(r.bytes(lens[y2]), w), y2 * w);
+              } else throw new Error('不支持的压缩方式 ' + comp);
+            } else if (depth === 16) {
+              if (comp !== 0) throw new Error('16 位 + RLE 暂不支持');
+              for (var k2 = 0; k2 < gray.length; k2++) gray[k2] = r.u16() >> 8;
+            } else throw new Error('不支持的位深 ' + depth);
+
+            out.push({ name: id, w: w, h: h, gray: gray, spacing: 0.1 });
+          } catch (e) { /* 这一支坏了就跳过，别让整个文件打不开 */ }
+          r.seek(Math.min(brushEnd, buf.length));
+          if (brushEnd <= 0) break;
+        }
+      }
+
+      // 块整体按 4 字节对齐（对齐量按声明的长度算，不是按绝对偏移）
+      r.seek(Math.min(end + ((4 - (size % 4)) % 4), buf.length));
     }
-    if (!out.length) throw new Error('sample 块里没解析出可用的笔尖');
-    return { version: version, brushes: out };
+
+    if (!found) throw new Error('这个 .abr 里没有 samp 块（可能是纯「计算笔刷」文件）');
+    if (!out.length) throw new Error('samp 块里没解析出可用的笔尖');
+    return { version: version, minor: minor, brushes: out };
   }
 
   /* ============================================================ .sut */
@@ -237,8 +281,8 @@
 
   /* ============================================================ 笔尖打包 */
 
-  var TIP_SIZE = 32;      // 打包后的边长
-  var TIP_BITS = 4;       // 每像素 4 位 → 32×32 只要 512 字节，base64 约 683 字符
+  var TIP_SIZE = 48;      // 打包后的边长
+  var TIP_BITS = 4;       // 每像素 4 位 → 48×48 是 1152 字节，base64 约 1536 字符；\n                          // 32×32 对树皮 / 皮肤这类纹理笔刷太糊了
 
   /** 把任意尺寸的灰度笔尖按面积平均缩到 TIP_SIZE×TIP_SIZE，再量化成 4 位 */
   function packTip(gray, w, h) {

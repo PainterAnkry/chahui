@@ -3347,6 +3347,19 @@
         return;
       }
       if (typing) return;
+      // 菜单 / 快捷键先过一遍：键位是可以在「快捷键设置」里改的
+      if (global.ChaMenu) {
+        var hit = global.ChaMenu.matchEvent(e);
+        // 但「不带修饰键的单键」不能抢交互控件的输入：
+        // 焦点在按钮上时按 Enter / Space 是「按下这个按钮」，不是触发菜单里的「变换：确定」。
+        var ctl = /^(BUTTON|A|SELECT|SUMMARY)$/.test(e.target.tagName || '');
+        var bare = !/^(Ctrl|Alt)\+/.test(hit ? global.ChaMenu.keyOf(hit.id) : '');
+        if (hit && !(ctl && bare)) {
+          e.preventDefault();
+          try { hit.run(); } catch (err) { console.error(err); }
+          return;
+        }
+      }
       // 变换中：Enter 确定、Esc 中止，其余快捷键一律不响应，免得手滑把变换丢了
       if (engine.transform) {
         if (e.key === 'Enter') { e.preventDefault(); commitTransform(); return; }
@@ -3718,6 +3731,19 @@
     $('#brushFileInput').addEventListener('change', function () { handleBrushFiles(this.files); });
     $('#btnImportCancelX').addEventListener('click', function () { $('#importMask').classList.add('hidden'); });
 
+    // 菜单栏 + 快捷键设置
+    if (global.ChaMenu) {
+      global.ChaMenu.buildMenuBar();
+      $('#btnKeyClose').addEventListener('click', function () { $('#keyMask').classList.add('hidden'); });
+      $('#btnKeyOk').addEventListener('click', function () { $('#keyMask').classList.add('hidden'); });
+      $('#btnKeyReset').addEventListener('click', function () {
+        global.ChaMenu.resetKeys();
+        global.ChaMenu.buildMenuBar();
+        global.ChaMenu.openKeyDialog();
+        toast('快捷键已全部恢复默认', 'ok');
+      });
+    }
+
     $$('.tab').forEach(function (t) {
       t.addEventListener('click', function () {
         $$('.tab').forEach(function (x) { x.classList.toggle('active', x === t); });
@@ -3940,6 +3966,260 @@
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else boot();
 
+  /* ================================================================
+   * 菜单栏动作：menu.js 里的每一条都落到这里。
+   * 这里只写「薄包装」——真正干活的是上面已有的那些函数。
+   * ================================================================ */
+
+  function addLayer() {
+    if (!S.joined) { toast('先进入一个房间', 'err'); return; }
+    net.send(P.C2S.LAYER_ADD, { name: '图层 ' + (engine.layers.length + 1) });
+  }
+
+  function moveLayer(dir) {
+    if (!S.joined) return;
+    var i = engine.layers.findIndex(function (l) { return l.id === engine.activeLayerId; });
+    var j = i + dir;
+    if (i < 0 || j < 0 || j >= engine.layers.length) { toast('已经到头了'); return; }
+    net.send(P.C2S.LAYER_MOVE, { layerId: engine.activeLayerId, to: j });
+  }
+
+  function clearLayer() {
+    if (!S.joined) return;
+    if (!confirm('清空当前图层？这一步可以撤销。')) return;
+    net.send(P.C2S.LAYER_CLEAR, { layerId: engine.activeLayerId });
+  }
+
+  function leaveRoom() {
+    if (!S.joined) { toast('还没进房间'); return; }
+    if (!confirm('离开当前房间？')) return;
+    net.send(P.C2S.ROOM_LEAVE, {});
+    S.joined = false;
+    engine.strokes = [];
+    engine.byId = new Map();
+    engine.pending.clear();
+    engine.layers.forEach(function (l) { l.strokes = []; l.baseImage = null; l.baseSeq = 0; });
+    engine.invalidate();
+    openEntry(true);
+  }
+
+  /**
+   * 整幅图像翻转 / 旋转。
+   * 实现方式：把整幅文档当成一次「全选 + 变换」，交给已经验证过的变换管线去做 ——
+   * 这样跨端一致性和烘焙回传都直接复用，不用另写一套。
+   */
+  function flipImage(axis) {
+    if (!S.joined) { toast('先进入一个房间', 'err'); return; }
+    runWholeImageTransform(function () { engine.transform.flip(axis); },
+      axis === 'h' ? '已水平翻转' : '已垂直翻转');
+  }
+  function rotateImage(dir) {
+    if (!S.joined) { toast('先进入一个房间', 'err'); return; }
+    runWholeImageTransform(function () { engine.transform.rotate90(dir); },
+      dir > 0 ? '已顺时针旋转 90°' : '已逆时针旋转 90°');
+  }
+
+  /** 全选 → 开变换 → 做一件事 → 立刻确定。整幅画面作为一个整体被变换。 */
+  function runWholeImageTransform(mutate, okMsg) {
+    if (engine.transform) { toast('先按 Enter 确定（或 Esc 中止）当前的变换'); return; }
+    beginSelSnapshot();
+    engine.selectAll();
+    commitSelSnapshot();
+    startTransform();
+    if (!engine.transform) { toast('无法开始变换', 'err'); return; }
+    mutate();
+    commitTransform();
+    toast(okMsg, 'ok');
+  }
+
+  function cropToSelection() {
+    if (!S.joined) { toast('先进入一个房间', 'err'); return; }
+    if (!engine.hasSelection()) { toast('先用选区工具圈一块出来', 'err'); return; }
+    var bb = engine.selectionBBox();
+    if (!bb) { toast('选区是空的', 'err'); return; }
+    if (!confirm('裁剪到选区？画布会变成 ' + Math.round(bb.w) + ' × ' + Math.round(bb.h) + '，这一步可以撤销。')) return;
+    if (engine.transform) commitTransform();
+    // 先把整幅画面按选区偏移搬一次，再改画布尺寸
+    var W = engine.width, H = engine.height;
+    var tmp = document.createElement('canvas');
+    tmp.width = W; tmp.height = H;
+    var tc = tmp.getContext('2d');
+    engine.renderDocument({}).ctx = null;   // 只是取一下渲染管线，不用它的 ctx
+    var doc = engine.renderDocument({});
+    tc.drawImage(doc.canvas, 0, 0);
+    var out = document.createElement('canvas');
+    out.width = Math.max(1, Math.round(bb.w));
+    out.height = Math.max(1, Math.round(bb.h));
+    out.getContext('2d').drawImage(tmp, -Math.round(bb.x), -Math.round(bb.y));
+    applyCropped(out);
+  }
+
+  /** 把裁剪结果作为新的底图铺回去，然后改画布尺寸 */
+  function applyCropped(canvas) {
+    var b = engine.activeLayer();
+    var png = canvas.toDataURL('image/png');
+    // 走既有的「图像大小」那条路：改尺寸 + 缩放画面，服务端照单全收
+    scaleArtwork(canvas.width, canvas.height, function () {
+      b.baseImage = png;
+      b.baseSeq = engine.seq;
+      b.strokes = [];
+    });
+  }
+
+  function selectFromLayer() {
+    var b = engine.activeLayer();
+    if (!b) return;
+    var d = b.ctx.getImageData(0, 0, engine.width, engine.height);
+    beginSelSnapshot();
+    var s = engine.ensureSelection();
+    var sd = s.ctx.createImageData(engine.width, engine.height);
+    for (var i = 0; i < d.data.length; i += 4) {
+      sd.data[i] = 255; sd.data[i + 1] = 255; sd.data[i + 2] = 255;
+      sd.data[i + 3] = d.data[i + 3];
+    }
+    s.ctx.putImageData(sd, 0, 0);
+    s.active = true;
+    engine.refreshSelectionTint();
+    if (!s.bbox) s.active = false;
+    commitSelSnapshot();
+    toast(s.active ? '已按当前图层的不透明区域建立选区' : '这一层是空的', s.active ? 'ok' : 'err');
+  }
+
+  function selectNone() {
+    beginSelSnapshot();
+    engine.clearSelection();
+    commitSelSnapshot();
+    toast('已取消选区');
+  }
+  function selectInvert() {
+    beginSelSnapshot();
+    invertSelection();
+    commitSelSnapshot();
+  }
+  function selectAll() {
+    beginSelSnapshot();
+    engine.selectAll();
+    commitSelSnapshot();
+    toast('已全选');
+  }
+  function toggleTransform() {
+    if (engine.transform) commitTransform(); else startTransform();
+  }
+
+  function toggleGrid() {
+    engine.grid.on = !engine.grid.on;
+    S.gridOn = engine.grid.on;
+    try { localStorage.setItem('chahu.grid', engine.grid.on ? '1' : '0'); } catch (e) { /* ignore */ }
+    engine.drawOverlay();
+    toast(engine.grid.on ? '网格：开' : '网格：关');
+  }
+
+  function setSymmetry(mode) {
+    S.sym = mode;
+    engine.sym = mode;
+    if (typeof bindSymButtons === 'function') bindSymButtons();
+    var el = document.querySelector('#symSelect');
+    if (el) el.value = mode;
+    toast({ none: '对称尺：关闭', v: '对称尺：垂直镜像', h: '对称尺：水平镜像', quad: '对称尺：四向' }[mode] || mode);
+  }
+
+  function nudgeSteadier(d) {
+    var cur = Number(S.brush.steadier || 0);
+    var next = Math.max(0, Math.min(15, cur + d));
+    S.brush.steadier = next;
+    var el = document.querySelector('#steadierRange');
+    if (el) { el.value = next; el.dispatchEvent(new Event('input', { bubbles: true })); }
+    toast('抖动修正：' + next);
+  }
+
+  function setPaper(id) {
+    S.brush.paper = id;
+    var el = document.querySelector('#paperPicker');
+    if (el) {
+      var b = el.querySelector('[data-paper="' + id + '"]');
+      if (b) b.click();
+    }
+    toast('纸张质感：' + id);
+  }
+  function setFx(id) {
+    S.brush.fx = id;
+    var el = document.querySelector('#fxSelect');
+    if (el) { el.value = id; el.dispatchEvent(new Event('change', { bubbles: true })); }
+    toast('特殊效果：' + id);
+  }
+
+  function zoomBy(f) { engine.setZoom(engine.scale * f); }
+  function zoom100() { engine.setZoom(1); }
+  function zoomFit() { engine.fitView(); }
+  function flipView() { engine.flipView(); }
+  function rotateView(deg, reset) { if (reset) engine.setRotation(0); else engine.rotateBy(deg); }
+
+  function toggleSide() {
+    var el = document.querySelector('aside.panel.right');
+    if (!el) return;
+    var hidden = el.classList.toggle('hidden');
+    try { localStorage.setItem('chahu.side', hidden ? '0' : '1'); } catch (e) { /* ignore */ }
+    engine.resize();
+    toast(hidden ? '已隐藏侧栏' : '已显示侧栏');
+  }
+
+  function sectionEl(id) { return document.querySelector('#leftPanelScroll [data-section="' + id + '"]'); }
+
+  function toggleSection(id) {
+    var el = sectionEl(id);
+    if (!el) return;
+    var hidden = el.classList.toggle('hidden');
+    var st = {};
+    try { st = JSON.parse(localStorage.getItem('chahu.sections') || '{}') || {}; } catch (e) { st = {}; }
+    st[id] = hidden ? 0 : 1;
+    try { localStorage.setItem('chahu.sections', JSON.stringify(st)); } catch (e) { /* ignore */ }
+    engine.resize();
+  }
+
+  function resetPanels() {
+    try {
+      localStorage.removeItem('chahu.sections');
+      localStorage.removeItem('chahu.panels');
+    } catch (e) { /* ignore */ }
+    $('#leftPanelScroll [data-section]').forEach(function (s) { s.classList.remove('hidden'); });
+    if (typeof applyPanelOrder === 'function') applyPanelOrder();
+    engine.resize();
+    toast('面板布局已恢复默认', 'ok');
+  }
+
+  function showRoomInfo() {
+    if (!S.room) { toast('还没进入房间'); return; }
+    showInfo(shareLinkText());
+  }
+
+  function showStatus() {
+    var s = net.status || 'unknown';
+    toast('连接：' + s + '｜在线 ' + (S.members || []).length + ' 人｜笔迹 ' + engine.strokes.length + ' 笔');
+  }
+
+  function cycleCursor() {
+    var order = ['auto', 'ring', 'cross'];
+    var i = order.indexOf(S.cursorStyle);
+    S.cursorStyle = order[(i + 1) % order.length];
+    try { localStorage.setItem('chahu.cursor', S.cursorStyle); } catch (e) { /* ignore */ }
+    var el = document.querySelector('#cursorSelect');
+    if (el) el.value = S.cursorStyle;
+    updateBrushCursor();
+    toast('光标：' + { auto: '智能', ring: '始终圆环', cross: '始终十字准星' }[S.cursorStyle]);
+  }
+
+  function clearHistory() {
+    if (!S.joined) return;
+    if (!confirm('清空房间里所有人的笔画记录？画布上已画好的内容会保留（会先固化），这一步不可撤销。')) return;
+    net.send(P.C2S.ROOM_COMPRESS, {});
+    toast('已请求清空笔画历史', 'ok');
+  }
+
+  function shareLinkText() {
+    var base = shareBase();
+    return base && S.room ? base + '/?room=' + S.room.id : (S.room ? S.room.id : '');
+  }
+
   global.ChaApp = {
     engine: engine, net: net, state: S, undo: undo, redo: redo, toast: toast,
     // 笔刷导入（给测试用，也让控制台里能手动导一支试试）
@@ -3947,6 +4227,26 @@
     handleBrushFiles: handleBrushFiles,
     applyImported: applyImported,
     removeImported: removeImported,
-    tipThumb: tipThumb
+    tipThumb: tipThumb,
+
+    /* ---- 菜单栏 / 快捷键要用到的动作（菜单结构见 menu.js） ---- */
+    openEntry: openEntry, doExport: doExport, doShare: doShare, showInfo: showInfo,
+    toggleRecord: toggleRecord,
+    toggleReplay: function () { if (engine.replayMode) stopReplay(); else startReplay(); },
+    leaveRoom: leaveRoom,
+    addLayer: addLayer, moveLayer: moveLayer, clearLayer: clearLayer,
+    openCanvasDialog: openCanvasDialog, bake: bake,
+    flipImage: flipImage, rotateImage: rotateImage, cropToSelection: cropToSelection,
+    selectAll: selectAll, selectNone: selectNone, selectInvert: selectInvert,
+    selectFromLayer: selectFromLayer, toggleTransform: toggleTransform,
+    commitTransform: commitTransform, cancelTransform: cancelTransform,
+    toggleGrid: toggleGrid, setSymmetry: setSymmetry, nudgeSteadier: nudgeSteadier,
+    setPaper: setPaper, setFx: setFx,
+    zoomBy: zoomBy, zoom100: zoom100, zoomFit: zoomFit,
+    flipView: flipView, rotateView: rotateView,
+    toggleNav: toggleNav, toggleSide: toggleSide, toggleSection: toggleSection, resetPanels: resetPanels,
+    showRoomInfo: showRoomInfo, showStatus: showStatus,
+    clearHistory: clearHistory, cycleCursor: cycleCursor,
+    setTool: setTool
   };
 })(window);

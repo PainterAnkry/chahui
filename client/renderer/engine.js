@@ -293,7 +293,12 @@
     }
     if (cur) runs.push(cur);
 
-    ctx.lineCap = 'butt';
+    // 圆头端帽：一笔在「宽度 / 浓度变化处」会被拆成多段分别描边，
+    // 平头（butt）对接时，如果接头正好落在拐角上，外侧会缺一个楔形。
+    // 用圆头就没这个问题 —— 整笔首尾本来就另外补了半圆端帽，
+    // 所以换成圆头并不会让笔画两端变样，只是把内部接头填实。
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
     for (var k = 0; k < runs.length; k++) {
       var run = runs[k];
       ctx.globalAlpha = run.a;
@@ -1618,9 +1623,16 @@
    */
   function selComposite(stroke) {
     if (stroke.tool === 'selectErase') return 'destination-out';
-    if (stroke.add) return 'source-over';
     if (stroke.subtract) return 'destination-out';
-    return 'copy';                 // 替换：一次性工具直接用新蒙版盖掉旧的
+    if (stroke.add) return 'source-over';
+    // 选区笔默认是「加」：涂一笔加一块，多笔累积成一块选区。
+    //
+    // 以前这里不分工具一律返回 'copy'（替换），而替换是拿**当前这一笔的**scratch
+    // 去覆盖整张蒙版 —— 于是涂第二笔就把第一笔抹掉了，用户永远只能留下最后涂的那一笔，
+    // 看起来就是「选区断成一段一段的」。用户的原话：「选区笔的意思是用选区笔画的部分进行选区」。
+    if (!isRegionSelect(stroke)) return 'source-over';
+    // 一次性工具（框选 / 套索 / 魔棒）保持替换语义：拖一个新框就是新选区
+    return 'copy';
   }
 
   CanvasEngine.prototype.applySelectionStroke = function (stroke) {

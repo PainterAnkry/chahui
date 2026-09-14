@@ -55,15 +55,15 @@ function check(name, ok, extra) {
     }
     return {
       tip: tip, w: u.w, h: u.h, bytes: u.rgba.length, len: tip.length,
-      centre: u.rgba[(16 * u.w + 16) * 4 + 3],
+      centre: u.rgba[(24 * u.w + 24) * 4 + 3],
       corner: u.rgba[(1 * u.w + 1) * 4 + 3],
       hard: hard, soft: BI.hardnessOf(soft, w, h),
       bad: [BI.unpackTip('nope'), BI.unpackTip('32x32x8:AAAA'), BI.unpackTip('')]
     };
   });
   console.log('  打包结果:', pack.w + '×' + pack.h, '共', pack.len, '字符');
-  check('笔尖打包成 32×32 的 4 位小图', pack.w === 32 && pack.h === 32, pack.w + '×' + pack.h);
-  check('打包体积够小（≤ 900 字符，会跟着每一笔走）', pack.len <= 900, pack.len + ' 字符');
+  check('笔尖打包成 48×48 的 4 位小图', pack.w === 48 && pack.h === 48, pack.w + '×' + pack.h);
+  check('打包体积够小（≤ 1700 字符，会跟着每一笔走）', pack.len <= 1700, pack.len + ' 字符');
   check('解包后中心不透明、角落透明', pack.centre > 200 && pack.corner < 40, pack.centre + ' / ' + pack.corner);
   check('硬边的硬度推断 > 软边', pack.hard > pack.soft, pack.hard.toFixed(2) + ' > ' + pack.soft.toFixed(2));
   check('坏字符串一律解不出东西（不瞎猜）', pack.bad.every(v => v === null));
@@ -120,9 +120,14 @@ function check(name, ok, extra) {
     const rows = [];
     for (let y = 0; y < h; y++) rows.push([0x0F].concat(Array.from(gray.slice(y * w, y * w + w))));
     const lens = rows.map(() => u16(17));
+    // ★ 真实布局（拿 17 个真实 .abr 文件校准过，别照印象改）：
+    //   Pascal 名（1 字节长度前缀）→ 次版本 2 要跳 264 字节 → y,x,bottom,right → 位深 → 压缩 → 位图
+    const name = 'Named brush';
     const body = [].concat(
-      u32('Named brush'.length), Array.from('Named brush').flatMap(c => [0, c.charCodeAt(0)]),
-      u32(0), u32(0), u32(h), u32(w), u16(8), [1],
+      [name.length], Array.from(name).map(c => c.charCodeAt(0)),
+      new Array(264).fill(0),                       // 次版本 2 的未知区
+      u32(0), u32(0), u32(h), u32(w),               // y, x, y+h, x+w
+      u16(8), [1],                                  // 位深 8、PackBits
       lens.reduce((a, b) => a.concat(b), []),
       rows.reduce((a, b) => a.concat(b), [])
     );
@@ -132,15 +137,16 @@ function check(name, ok, extra) {
     const blocks = [].concat(
       [0x38, 0x42, 0x49, 0x4d], 'samp'.split('').map(c => c.charCodeAt(0)), u32(samp.length), Array.from(samp)
     );
-    const bytes = new Uint8Array([].concat(u16(6), u16(1), blocks));
+    const bytes = new Uint8Array([].concat(u16(6), u16(2), blocks));
     const r = window.ChaBrushImport.parseAbr(bytes.buffer);
     const b = r.brushes[0];
-    return { n: r.brushes.length, name: b && b.name, w: b && b.w,
+    return { n: r.brushes.length, name: b && b.name, w: b && b.w, minor: r.minor,
       top: b && b.gray[2 * w + 8], bottom: b && b.gray[14 * w + 8] };
   });
   console.log('  解析:', JSON.stringify(abr6));
   check('.abr v6：解析出 1 支笔', abr6.n === 1, String(abr6.n));
-  check('.abr v6：读到了名字', abr6.name === 'Named brush', String(abr6.name));
+  check('.abr v6：读到了 Pascal 名', abr6.name === 'Named brush', String(abr6.name));
+  check('.abr v6：次版本读成 2', abr6.minor === 2, String(abr6.minor));
   check('.abr v6：PackBits 解压正确（上亮下暗）', abr6.top === 200 && abr6.bottom === 20,
     abr6.top + ' / ' + abr6.bottom);
 

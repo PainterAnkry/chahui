@@ -167,6 +167,49 @@ function check(name, ok, extra) {
   s = await selInfo();
   check('取消选区', s.active === false, JSON.stringify(s));
 
+  /* ---------- 选区笔：多笔累积 + 选区擦 ---------- */
+  // 曾经的 bug：selComposite 对选区笔也返回 'copy'（替换），而替换是拿**当前这一笔**的
+  // scratch 覆盖整张蒙版 —— 涂第二笔就把第一笔抹掉，用户看到「选区断成一段一段」。
+  console.log('\n=== 选区笔多笔累积 / 选区擦 ===');
+  const setSize = (n) => page.evaluate((v) => {
+    const e = document.querySelector('#sizeRange'); e.value = v; e.dispatchEvent(new Event('input', { bubbles: true }));
+  }, n);
+  const band = async (y) => {
+    const a = await mk(300, y), b = await mk(700, y);
+    await page.mouse.move(a[0], a[1]);
+    await page.mouse.down();
+    for (let k = 1; k <= 12; k++) await page.mouse.move(a[0] + (b[0] - a[0]) * k / 12, a[1] + (b[1] - a[1]) * k / 12);
+    await page.mouse.up();
+    await sleep(600);
+    return selInfo();
+  };
+  await clearSel();
+  await page.click('#toolGrid .tool[data-item="select"], #brushGrid .tool[data-item="select"]');
+  await sleep(250);
+  await setSize(40);
+  await clearSel();
+  await sleep(250);
+  const b1 = await band(300);
+  const b2 = await band(500);
+  const b3 = await band(700);
+  console.log('  三笔分别涂完: ' + b1.px + ' → ' + b2.px + ' → ' + b3.px);
+  check('选区笔：第一笔涂出一块', b1.px > 8000, String(b1.px));
+  check('选区笔：第二笔是「加上去」而不是替换',
+    Math.abs(b2.px - b1.px * 2) / (b1.px * 2) < 0.12, b1.px + ' → ' + b2.px);
+  check('选区笔：第三笔继续累积（三块都还在）',
+    Math.abs(b3.px - b1.px * 3) / (b1.px * 3) < 0.12, b1.px + '×3 vs ' + b3.px);
+
+  // 选区擦要单独设一次大小：切工具会把大小重置回条目默认值（20）
+  await page.click('#toolGrid .tool[data-item="selectErase"], #brushGrid .tool[data-item="selectErase"]');
+  await sleep(250);
+  await setSize(40);
+  const eraseSize = await page.evaluate(() => window.ChaApp.state.brush.size);
+  check('选区擦沿用设定的笔尖大小', eraseSize === 40, String(eraseSize));
+  const b4 = await band(500);
+  console.log('  擦掉中间那笔后: ' + b4.px + '（期望 ≈ ' + (b3.px - b1.px) + '）');
+  check('选区擦：擦掉中间一笔，另外两笔不受影响',
+    Math.abs(b4.px - (b3.px - b1.px)) / (b3.px - b1.px) < 0.12, String(b4.px));
+
   /* ---------- 选区笔不占撤销栈、不虚增 seq ---------- */
   console.log('\n=== 选区笔不污染撤销栈 / seq ===');
   const before = await page.evaluate(() => ({ seq: window.ChaApp.engine.seq, undo: window.ChaApp.state.opUndo.length }));

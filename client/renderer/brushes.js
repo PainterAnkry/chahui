@@ -186,7 +186,7 @@
     },
     {
       id: 'select', name: '选区笔', tool: 'select', icon: 'select', type: 'paint',
-      tip: '圈出选区，之后的绘制与填色只在选区内生效',
+      tip: '涂到哪里就选到哪里；可以涂好几笔累积，Alt 涂是减掉（Ctrl+D 取消选区）',
       params: params({ brush: 'select', size: 20, opacity: 1, hardness: 1, minSize: 0.6, pressSize: 0.5 })
     },
     {

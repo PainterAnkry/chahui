@@ -139,6 +139,10 @@ function check(name, ok, extra) {
   const beforeMask = await maskPx();
   const toolNow = await page.evaluate(() => ({ tool: window.ChaApp.state.tool, brushId: window.ChaApp.state.brushId, sel: window.ChaApp.engine.hasSelection() }));
   console.log('  擦之前: maskPx=' + beforeMask + ' ' + JSON.stringify(toolNow));
+  // 蚂蚁线要在**还有选区的时候**看。
+  // 以前这条检查放在「擦掉选区」之后，靠的是擦不干净留下的残影 —— 一旦擦干净了就会误报。
+  const ants = await page.evaluate(() => !!window.ChaApp.engine._antsTimer);
+  check('选区蚂蚁线动画在跑', ants === true, String(ants));
   // 沿着选区自己那条线擦 —— 保证一定压到掩膜上（斜着擦很容易擦到旁边空白处，
   // 那样掩膜当然不变，会误判成「选取擦没用」）
   const e1 = await mk(700, 400), e2 = await mk(1000, 600);
@@ -151,9 +155,9 @@ function check(name, ok, extra) {
   console.log('  选区擦掩膜像素: ' + beforeMask + ' → ' + afterMask);
   check('选取擦真的擦掉了选区', afterMask < beforeMask * 0.9, `${beforeMask} → ${afterMask}`);
 
-  // 蚂蚁线
-  const ants = await page.evaluate(() => !!window.ChaApp.engine._antsTimer);
-  check('选区蚂蚁线动画在跑', ants === true, String(ants));
+  // 蚂蚁线（上面已经查过了，这里只确认取消选区后停下）
+  const antsAfterClear = await page.evaluate(() => !!window.ChaApp.engine._antsTimer);
+  check('擦空选区后蚂蚁线停下', antsAfterClear === false, String(antsAfterClear));
   await page.evaluate(() => document.querySelector('#btnSelNone').click());
   await sleep(400);
   console.log('  状态栏「有选区」点击可取消:', await page.evaluate(() => !!document.querySelector('#selHint')));

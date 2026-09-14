@@ -8,6 +8,8 @@
 <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
+<!-- ============ 菜单栏 ============ -->
+<nav class="menu-bar" id="menuBar"></nav>
 
 <!-- ============ 顶栏 ============ -->
 <header class="topbar">
@@ -530,9 +532,30 @@
   </div>
 </div>
 
+<!-- ============ 快捷键设置 ============ -->
+<div class="modal-mask hidden" id="keyMask">
+  <div class="modal keys">
+    <div class="modal-head">
+      <h3>快捷键设置</h3>
+      <button class="icon-btn" id="btnKeyClose">×</button>
+    </div>
+    <div class="modal-body">
+      <p class="hint">点某一行的输入框，然后按下你想要的组合键即可。改了立刻生效，下次打开还在。
+        与别的功能撞键时，会提示并把对方清空（再点「默认」可还原）。</p>
+      <div class="key-list" id="keyBody"></div>
+      <div class="imp-actions">
+        <button class="btn tiny ghost" id="btnKeyReset">全部恢复默认</button>
+        <span class="spacer"></span>
+        <button class="btn tiny primary" id="btnKeyOk">完成</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="protocol.js"></script><script src="config.js"></script>
 <script src="brushes.js"></script>
 <script src="brush-import.js"></script>
+<script src="menu.js"></script>
 <script src="engine.js"></script>
 <script src="transform.js"></script>
 <script src="net.js"></script>
