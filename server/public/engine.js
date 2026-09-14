@@ -386,6 +386,83 @@
     ctx.globalAlpha = 1;
   }
 
+  /* ---------------- 导入的笔尖位图（PS / CSP 笔刷） ---------------- */
+
+  var tipCache = new Map();      // tip 字符串 -> canvas（同步解包，拿到就能用）
+
+  /** 把打包好的 4 位灰度笔尖解成一张小 canvas；缓存住，一笔只解一次 */
+  function tipCanvas(tipStr) {
+    if (!tipStr) return null;
+    if (tipCache.has(tipStr)) return tipCache.get(tipStr);
+    var u = global.ChaBrushImport && global.ChaBrushImport.unpackTip(tipStr);
+    if (!u) { tipCache.set(tipStr, null); return null; }
+    var c = document.createElement('canvas');
+    c.width = u.w; c.height = u.h;
+    var cx = c.getContext('2d');
+    var img = cx.createImageData(u.w, u.h);
+    img.data.set(u.rgba);
+    cx.putImageData(img, 0, 0);
+    if (tipCache.size > 64) tipCache.clear();     // 别让试笔刷的过程把内存堆满
+    tipCache.set(tipStr, c);
+    return c;
+  }
+
+  /**
+   * 按笔尖位图落笔：沿路径按弧长等距盖章。
+   *
+   * 为什么不是「沿路径描一条线」：导入的笔刷（PS 的星形、CSP 的各种笔尖）
+   * 形状在笔尖本身，描线只能得到圆头。盖章点由「量化后的点」算弧长得到，
+   * 所以两端算出的落点完全一致。
+   */
+  function paintTipStroke(ctx, stroke, pts, fromIndex, m) {
+    var tip = tipCanvas(stroke.tip);
+    if (!tip) return false;                        // 还没解出来：交给调用方退化处理
+    strokeStyleSetup(ctx, stroke);
+    var n = pts.length;
+    if (!n) return true;
+    var spacing = Math.max(1, stroke.size * (stroke.spacing || 0.1));
+    var rnd = mulberry32(((stroke.seed >>> 0) ^ 0x85ebca6b) >>> 0);
+
+    // 整条路径累计弧长（每次都从头算，保证分批与整笔结果一致）
+    var start = fromIndex || 0;
+    var pos = mp(m, pts[0][0], pts[0][1]);
+    var s = 0, next = 0;
+    var i;
+    // 起点先盖一枚
+    stampTip(ctx, tip, stroke, pos, pts[0][2]);
+    next = spacing;
+    for (i = 1; i < n; i++) {
+      var a = mp(m, pts[i - 1][0], pts[i - 1][1]);
+      var b = mp(m, pts[i][0], pts[i][1]);
+      var seg = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (seg <= 0) continue;
+      while (next <= s + seg) {
+        var t = (next - s) / seg;
+        var x = a[0] + (b[0] - a[0]) * t;
+        var y = a[1] + (b[1] - a[1]) * t;
+        var pr = pts[i - 1][2] + (pts[i][2] - pts[i - 1][2]) * t;
+        if (stroke.scatter > 0) {
+          var ang = rnd() * Math.PI * 2;
+          var rad = Math.pow(rnd(), 0.6) * stroke.size * (0.15 + stroke.scatter * 0.85);
+          x += Math.cos(ang) * rad; y += Math.sin(ang) * rad;
+        } else if (rnd) { rnd(); rnd(); }
+        stampTip(ctx, tip, stroke, [x, y], pr);
+        next += spacing;
+      }
+      s += seg;
+      pos = b;
+    }
+    ctx.globalAlpha = 1;
+    void start; void pos;
+    return true;
+  }
+
+  function stampTip(ctx, tip, stroke, p, press) {
+    var d = widthAt(stroke, press);
+    ctx.globalAlpha = qa(alphaAt(stroke, press));
+    ctx.drawImage(tip, p[0] - d / 2, p[1] - d / 2, d, d);
+  }
+
   /** 把一笔完整画进「覆盖率蒙版」（单色，alpha 含笔压→浓度） */
   function paintStrokeShape(ctx, stroke, pts, fromIndex, opts) {
     opts = opts || {};
@@ -412,6 +489,9 @@
       var m = copies[ci];
       if (isShape(st)) { paintShapeCopy(ctx, st, pts, m); continue; }
       if (pureScatter) { paintScatter(ctx, st, pts, fromIndex, m); continue; }
+      // 带笔尖位图的（导入的 PS / CSP 笔刷）：盖章而不是描线。
+      // 位图还没解出来时 paintTipStroke 返回 false，这一帧退回圆头，不影响落点数据。
+      if (st.tip && paintTipStroke(ctx, st, pts, fromIndex, m)) continue;
       paintRuns(ctx, st, pts, fromIndex, m, opts);
       if (st.scatter > 0) paintScatter(ctx, st, pts, fromIndex, m);
     }
@@ -880,6 +960,9 @@
       // 漏掉的话 Shift / Alt 会被静默丢掉，加选退化成「替换」。
       add: !!info.add,
       subtract: !!info.subtract,
+      // 导入的 PS / CSP 笔刷：笔尖位图 + 落点间隔
+      spacing: br.spacing,
+      tip: br.tip,
       seed: br.seed || P.newSeed(),
       points: [],
       ts: info.ts || Date.now(),

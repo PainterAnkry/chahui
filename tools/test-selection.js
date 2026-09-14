@@ -12,8 +12,7 @@
 'use strict';
 const path = require('path');
 const fs = require('fs');
-const PW = 'C:/Users/Ankry/.workbuddy/binaries/node/workspace/node_modules/playwright-core';
-const { chromium } = require(PW);
+const { chromium } = require('./pw');
 const OUT = path.resolve(__dirname, '..', 'screenshots', 'probe');
 fs.mkdirSync(OUT, { recursive: true });
 const sleep = ms => new Promise(r => setTimeout(r, ms));

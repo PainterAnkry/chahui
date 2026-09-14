@@ -28,6 +28,41 @@ const MAX_LAYERS = parseInt(process.env.MAX_LAYERS || '16', 10);
 
 const store = new RoomStore(DATA_DIR);
 
+/* --------------------------------------------------- 对外地址（局域网 / 公网隧道） */
+
+const DATA_ROOT = path.dirname(DATA_DIR);           // server/data
+const PUBLIC_URL_FILE = path.join(DATA_ROOT, 'public-url.txt');
+// 隧道文件太旧就当它已经失效（cloudflared 快速隧道的域名是临时的）
+const PUBLIC_URL_TTL = parseInt(process.env.PUBLIC_URL_TTL || String(12 * 3600 * 1000), 10);
+
+/**
+ * 公网入口地址。由 tools/expose.js 启动隧道时写入 server/data/public-url.txt，
+ * 这里每次都现读 —— 隧道起来/关掉都不需要重启服务端。
+ */
+function currentPublicUrl() {
+  try {
+    if (!fs.existsSync(PUBLIC_URL_FILE)) return '';
+    const st = fs.statSync(PUBLIC_URL_FILE);
+    if (Date.now() - st.mtimeMs > PUBLIC_URL_TTL) return '';
+    const line = fs.readFileSync(PUBLIC_URL_FILE, 'utf8').split('\n')[0].trim();
+    return /^https?:\/\/[^\s]+$/i.test(line) ? line.replace(/\/+$/, '') : '';
+  } catch (e) { return ''; }
+}
+
+/** 本机的局域网地址，供「同一 WiFi 的朋友」直接打开 */
+function lanUrls() {
+  const out = [];
+  try {
+    const nets = os.networkInterfaces();
+    for (const k of Object.keys(nets)) {
+      for (const n of nets[k] || []) {
+        if (n.family === 'IPv4' && !n.internal) out.push('http://' + n.address + ':' + PORT);
+      }
+    }
+  } catch (e) { /* ignore */ }
+  return out;
+}
+
 /* ------------------------------------------------------------------ 静态站点 */
 
 const MIME = {
@@ -82,6 +117,7 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
   if (url.pathname === '/health') return json(res, 200, { ok: true, rooms: store.rooms.size, uptime: process.uptime() });
   if (url.pathname === '/api/rooms') return json(res, 200, { rooms: store.list() });
+  if (url.pathname === '/api/share') return json(res, 200, { publicUrl: currentPublicUrl(), lanUrls: lanUrls() });
   if (!fs.existsSync(PUBLIC_DIR)) {
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
     return res.end('茶绘服务端运行中（端口 ' + PORT + '）。桌面客户端可直接连接 /ws。');
@@ -168,6 +204,10 @@ function buildStroke(msg, member, layer) {
     sym: br.sym,
     brush: br.brush,
     filled: br.filled,
+    // 导入的 PS / CSP 笔刷要带笔尖位图和落点间隔 —— 少了它们，
+    // 别人的屏幕上这支笔会变回圆头，两端就对不上了
+    spacing: br.spacing,
+    tip: br.tip,
     seed: br.seed || P.newSeed(),
     points: [],
     ts: Date.now()

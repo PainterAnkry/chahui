@@ -14,6 +14,7 @@ server/data/
 # 测试/探针产物
 screenshots/
 tools/_*.js
+tools/bin/
 *.log
 
 # 编辑器 / 系统

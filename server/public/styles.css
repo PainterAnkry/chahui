@@ -1104,6 +1104,40 @@ input[type=range]::-webkit-slider-thumb {
 }
 
 .room-list-ops { display: flex; gap: 6px; }.room-list-ops .btn { flex: 1; }
+
+/* ---------------- 笔刷导入（PS .abr / CSP .sut） ---------------- */
+.hidden-file { display: none; }
+.modal.import { width: 520px; max-width: 92vw; }
+.imp-list {
+  max-height: 52vh;
+  overflow: auto;
+  margin: 8px 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: #fff;
+}
+.imp-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 9px;
+  border-bottom: 1px solid #eef1f5;
+  cursor: pointer;
+  font-size: 12.5px;
+}
+.imp-row:last-child { border-bottom: 0; }
+.imp-row:hover { background: #f5f8fc; }
+.imp-tip {
+  width: 34px; height: 34px; flex: none;
+  border-radius: 4px;
+  background: #f2f4f7;
+  border: 1px solid #e3e8ee;
+  object-fit: contain;
+}
+.imp-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.imp-meta { flex: none; color: var(--text-dim); font-size: 11.5px; font-family: var(--mono); }
+.imp-actions { display: flex; align-items: center; gap: 7px; }
+.imp-actions .spacer { flex: 1; }
 .room-list .room-item.blank { background: #f7f8fa; }
 .room-list .room-item.blank .rn b { color: var(--text-dim); font-weight: 500; }
 .tag-blank {

@@ -9,8 +9,7 @@
  * 用法: node tools/test-overlay.js
  */
 'use strict';
-const PW = 'C:/Users/Ankry/.workbuddy/binaries/node/workspace/node_modules/playwright-core';
-const { chromium } = require(PW);
+const { chromium } = require('./pw');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 let pass = 0, fail = 0;
 function check(name, ok, extra) {

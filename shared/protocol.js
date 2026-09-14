@@ -163,6 +163,13 @@
   var FX = ['none', 'waterdrop', 'noise', 'scatter'];
 
   // 笔刷参数默认值（服务端做范围约束，客户端做渲染）
+  /**
+   * 笔刷默认值。
+   *
+   * ⚠️ normalizeBrush 只输出这里出现过的字段 —— 往笔刷里加参数时**必须**在这里加一行，
+   * 否则参数会被静默丢掉（选区加选用的 add/subtract 就在 newStroke 的白名单上丢过一次，
+   * 表现是 Shift 加选退化成「替换」，页面不报错、很难查）。
+   */
   var BRUSH_DEFAULTS = {
     size: 12,          // 笔尖直径（像素）
     opacity: 1,        // 笔迹浓度
@@ -176,8 +183,23 @@
     grainScale: 1,     // 纸纹比例（0.2 = 细，4 = 粗）
     strength: 0.7,     // 模糊 / 涂抹强度
     tolerance: 32,     // 油漆桶色差范围
-    expand: 0          // 油漆桶扩大像素
+    expand: 0,         // 油漆桶扩大像素
+    spacing: 0.1,      // 笔尖位图的落点间隔（占直径的比例），导入的 PS/CSP 笔刷用
+    tip: ''            // 笔尖位图（打包成 32x32x4:base64 的 4 位灰度小图）
   };
+
+  // 笔尖位图字符串的形状与长度上限：32x32x4 打包后 base64 约 683 字符，
+  // 留一倍余量。它会被逐笔写进房间历史，所以必须卡死。
+  var TIP_RE = /^(\d{1,3})x(\d{1,3})x(\d{1,2}):([A-Za-z0-9+/]+={0,2})$/;
+  var TIP_MAX_CHARS = 1600;
+  function normalizeTip(v) {
+    if (typeof v !== 'string' || !v || v.length > TIP_MAX_CHARS) return '';
+    var m = TIP_RE.exec(v);
+    if (!m) return '';
+    var w = +m[1], h = +m[2], bits = +m[3];
+    if (w < 2 || h < 2 || w > 128 || h > 128 || bits !== 4) return '';
+    return v;
+  }
 
   // 把任意来源的笔刷参数收敛到合法范围
   function clampNum(v, d, a, b) {
@@ -214,6 +236,8 @@
     out.sym = pickOne(SYMMETRY_MODES, src.sym, 'none');
     out.brush = typeof src.brush === 'string' ? src.brush.slice(0, 24) : '';
     out.filled = !!src.filled;
+    out.spacing = clampNum(src.spacing, BRUSH_DEFAULTS.spacing, 0.02, 1);
+    out.tip = normalizeTip(src.tip);
     out.seed = Math.floor(clampNum(src.seed, 0, 0, 2147483646));
     return out;
   }

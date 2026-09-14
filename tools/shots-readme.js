@@ -5,8 +5,7 @@
 'use strict';
 const path = require('path');
 const fs = require('fs');
-const PW = 'C:/Users/Ankry/.workbuddy/binaries/node/workspace/node_modules/playwright-core';
-const { chromium } = require(PW);
+const { chromium } = require('./pw');
 const BASE = process.argv[2] || 'http://localhost:8437';
 const OUT = path.resolve(__dirname, '..', 'docs');
 fs.mkdirSync(OUT, { recursive: true });
@@ -108,40 +107,64 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await sleep(400);
 
   // ── 4) 笔刷样张 ──
-  await page.evaluate(() => {
-    const e = window.ChaApp.engine;
-    e.layers.forEach(function (l) {
-      l.strokes = []; l.baseImage = null; l.baseSeq = 0;
-      l.ctx.setTransform(1, 0, 0, 1, 0, 0); l.ctx.clearRect(0, 0, e.width, e.height);
-    });
-    e.strokes = []; e.byId = new Map(); e.baseDirty = true; e.baseKey = '';
-    e.pending.clear(); e.clearSelection(); e.invalidate();
-    e.setZoom(1);
-  });
-  await sleep(600);
-  const tools = ['pencil', 'pencilSoft', 'airbrush', 'brush', 'watercolor', 'marker', 'eraser', 'effect', 'scatter'];
-  const names = { pencil: '铅笔', pencilSoft: '软铅笔', airbrush: '喷枪', brush: '画笔', watercolor: '水彩笔', marker: '马克笔', eraser: '橡皮擦', effect: '特效笔', scatter: '散布' };
-  let y = 150;
-  for (const t of tools) {
-    await page.click('#toolGrid .tool[data-item="' + t + '"], #brushGrid .tool[data-item="' + t + '"]');
+  // 另开一张干净的画布。以前是在上面那个房间里手工清 engine 内部状态，
+  // 结果视图变换被搞坏：笔迹画不出来，逐支样张的裁剪坐标也错到左栏上去了。
+  const bpage = await browser.newPage({ viewport: { width: 1500, height: 940 }, deviceScaleFactor: 1.6 });
+  await bpage.goto(BASE + '/', { waitUntil: 'domcontentloaded' });
+  await bpage.waitForSelector('#entryMask:not(.hidden)', { timeout: 12000 });
+  await bpage.fill('#nameInput', 'Ankry');
+  await bpage.fill('#newRoomName', '笔刷样张');
+  await bpage.selectOption('#newRoomSize', '1920x1080');
+  await bpage.click('#btnCreateRoom');
+  await bpage.waitForFunction(() => window.ChaApp && window.ChaApp.state.joined, { timeout: 12000 });
+  await bpage.evaluate(() => document.querySelector('#entryMask').classList.add('hidden'));
+  await sleep(500);
+  await bpage.evaluate(() => document.querySelector('#btnZoomFit').click());
+  await sleep(500);
+  const bbox = await bpage.locator('#view').boundingBox();
+  // 用文档坐标定位，不受 letterbox 留白影响（按视口比例布点会把首尾两条甩到画布外的灰底上）
+  const bmk = async (x, y) => {
+    const s = await bpage.evaluate(([a, b]) => window.ChaApp.engine.docToScreen(a, b), [x, y]);
+    return [bbox.x + s.x, bbox.y + s.y];
+  };
+
+  // 每支笔一条不同颜色的线，一眼能分清哪条是哪支；橡皮擦不在这里演示
+  // （白底上擦不出可见痕迹，它出现在笔刷栏里就够了）。
+  const tools = [
+    ['pencil', '#2b2b2b'],
+    ['pencilSoft', '#5c5c5c'],
+    ['airbrush', '#e8544f'],
+    ['brush', '#2b8ae8'],
+    ['watercolor', '#37a8d8'],
+    ['marker', '#f0a92c'],
+    ['effect', '#8a5cf0'],
+    ['scatter', '#1fa971']
+  ];
+  for (let i = 0; i < tools.length; i++) {
+    const t = tools[i][0], color = tools[i][1];
+    await bpage.click('#toolGrid .tool[data-item="' + t + '"], #brushGrid .tool[data-item="' + t + '"]');
     await sleep(160);
-    await page.evaluate(() => {
-      const e = document.querySelector('#sizeRange'); e.value = 22; e.dispatchEvent(new Event('input', { bubbles: true }));
-      const h = document.querySelector('#hexInput'); h.value = '#2b2b2b'; h.dispatchEvent(new Event('change', { bubbles: true }));
-    });
+    await bpage.evaluate((c) => {
+      const e = document.querySelector('#sizeRange'); e.value = 46; e.dispatchEvent(new Event('input', { bubbles: true }));
+      const h = document.querySelector('#hexInput'); h.value = c; h.dispatchEvent(new Event('change', { bubbles: true }));
+    }, color);
     await sleep(140);
-    const a = await mk(120, y), b = await mk(1250, y + Math.sin(1) * 0);
-    await page.mouse.move(a[0], a[1]);
-    await page.mouse.down();
-    for (let i = 1; i <= 40; i++) await page.mouse.move(a[0] + (b[0] - a[0]) * i / 40, a[1] + Math.sin(i / 6) * 6);
-    await page.mouse.up();
-    await page.screenshot({ path: path.join(OUT, 'brush-' + t + '.png'), clip: { x: a[0] - 14, y: a[1] - 26, width: (b[0] - a[0]) + 28, height: 52 } });
-    void names;
+    // 文档坐标：画布 1920×1080，八条线纵向均分在 150~990
+    const y0 = 150 + i * 120;
+    const a = await bmk(220, y0);
+    const b = await bmk(1700, y0);
+    await bpage.mouse.move(a[0], a[1]);
+    await bpage.mouse.down();
+    for (let k = 1; k <= 40; k++) {
+      const s = k / 40;
+      await bpage.mouse.move(a[0] + (b[0] - a[0]) * s, a[1] + Math.sin(s * Math.PI * 2) * 6);
+    }
+    await bpage.mouse.up();
     await sleep(220);
-    y += 100;
   }
-  await page.screenshot({ path: path.join(OUT, '04-笔刷样张.png') });
-  console.log('已存 docs/04-笔刷样张.png 与逐支样张 brush-*.png');
+  await bpage.screenshot({ path: path.join(OUT, '04-笔刷样张.png') });
+  console.log('已存 docs/04-笔刷样张.png（每支笔一条线，颜色区分）');
+  await bpage.close();
 
   await browser.close();
 })().catch(e => { console.error(e); process.exit(1); });

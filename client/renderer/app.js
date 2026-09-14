@@ -62,6 +62,8 @@
     lastOfFamily: { brush: 'pencil', eraser: 'eraser', blur: 'blur', smudge: 'smudge', fill: 'bucket', gradient: 'gradient', select: 'select', selectErase: 'selectErase', line: 'line', rect: 'rect', ellipse: 'ellipse', picker: 'picker' },
     toolPrefs: null,          // { order: [id], hidden: [id] }
     toolEdit: false,
+    imported: [],             // 导入的笔刷（PS .abr / CSP .sut），存 localStorage
+    importPending: null,      // 导入对话框里待确认的笔刷
     stickers: [],             // 自定义表情（dataURL）
     stickerManaging: false,
     pressure: lsGet('chahu.pressure', '1') === '1',
@@ -71,6 +73,8 @@
     cursorStyle: ['auto', 'ring', 'cross'].indexOf(lsGet('chahu.cursor', 'auto')) >= 0 ? lsGet('chahu.cursor', 'auto') : 'auto',
     recent: [],
     hue: 0, sv: { s: 1, v: 1 },
+    publicUrl: '',            // 服务端开了公网隧道时由 /api/share 带回
+    lanUrls: [],
     session: null,
     pan: null,
     spaceDown: false,
@@ -409,6 +413,13 @@
         }
         loadBrush(it.id);
       };
+      // 导入的笔刷：右键删掉它（自带的笔刷不给删）
+      if (it.imported) {
+        b.oncontextmenu = function (e) {
+          e.preventDefault();
+          if (confirm('删除导入的笔刷「' + it.name + '」？')) removeImported(it.id);
+        };
+      }
       box.appendChild(b);
     });
   }
@@ -544,19 +555,43 @@
     var maxR = Math.min(h / 2 - 5, 16);
     var r = clamp(b.size / 2, 1.2, maxR);
     var steps = 34;
-    ctx.fillStyle = S.tool === 'eraser' ? '#c9ced8' : S.color;
+    var base = S.tool === 'eraser' ? '#c9ced8' : S.color;
+    var blur = b.hardness < 0.995 ? Math.min(6, b.size * (1 - b.hardness) * 0.5) : 0;
+    var pts = [];
     for (var i = 0; i <= steps; i++) {
       var t = i / steps;
       var x = 12 + t * (w - 24);
       var y = h / 2 + Math.sin(t * Math.PI * 1.6) * 6 - 3;
       var rr = r * (1 - (1 - b.minSize) * Math.pow(1 - t, 2));
       var a = b.opacity * ((1 - b.pressOpacity) + b.pressOpacity * Math.pow(t, 0.7));
-      ctx.globalAlpha = clamp(a, 0.03, 1);
-      var blur = b.hardness < 0.995 ? b.size * (1 - b.hardness) * 0.5 : 0;
-      ctx.filter = blur > 0.3 ? 'blur(' + Math.min(6, blur).toFixed(2) + 'px)' : 'none';
-      ctx.beginPath();
-      ctx.arc(x, y, Math.max(0.5, rr), 0, Math.PI * 2);
-      ctx.fill();
+      pts.push([x, y, Math.max(0.5, rr), clamp(a, 0.03, 1)]);
+    }
+    ctx.fillStyle = base;
+    ctx.strokeStyle = base;
+    if (b.scatter > 0) {
+      // 散布类：本来就是一颗颗点，照实画成点
+      for (var k = 0; k < pts.length; k++) {
+        ctx.globalAlpha = pts[k][3];
+        ctx.filter = blur > 0.3 ? 'blur(' + blur.toFixed(2) + 'px)' : 'none';
+        ctx.beginPath();
+        ctx.arc(pts[k][0], pts[k][1], pts[k][2], 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else {
+      // 连续类：连成一条带粗细变化的线。
+      // 以前每 6px 才点一个圆点，2px 的铅笔预览出来是一串虚线，看着像散布笔 —— 与实笔不符。
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      for (var j = 1; j < pts.length; j++) {
+        var p0 = pts[j - 1], p1 = pts[j];
+        ctx.globalAlpha = (p0[3] + p1[3]) / 2;
+        ctx.filter = blur > 0.3 ? 'blur(' + blur.toFixed(2) + 'px)' : 'none';
+        ctx.lineWidth = Math.max(0.7, (p0[2] + p1[2]));
+        ctx.beginPath();
+        ctx.moveTo(p0[0], p0[1]);
+        ctx.lineTo(p1[0], p1[1]);
+        ctx.stroke();
+      }
     }
     ctx.filter = 'none';
     ctx.globalAlpha = 1;
@@ -820,6 +855,7 @@
   }
 
   var ringCache = null;
+  var triCache = null;
 
   function buildRing(SZ, cx, cy, R, r0) {
     var c = document.createElement('canvas');
@@ -851,7 +887,8 @@
     ctx.drawImage(ringCache, 0, 0);
 
     // SV 三角：顶点 = 纯色相，右下 = 白，左下 = 黑
-    var tr = r0 - 6;
+    // 留出 9px 空隙，避免三角顶点贴住圆环内沿
+    var tr = r0 - 9;
     var A = [cx + Math.cos(-Math.PI / 2) * tr, cy + Math.sin(-Math.PI / 2) * tr];
     var B = [cx + Math.cos(-Math.PI / 2 + 2 * Math.PI / 3) * tr, cy + Math.sin(-Math.PI / 2 + 2 * Math.PI / 3) * tr];
     var C = [cx + Math.cos(-Math.PI / 2 + 4 * Math.PI / 3) * tr, cy + Math.sin(-Math.PI / 2 + 4 * Math.PI / 3) * tr];
@@ -863,7 +900,17 @@
     var maxy = Math.ceil(Math.max(A[1], B[1], C[1])) + 1;
     var w = maxx - minx, h = maxy - miny;
     if (w > 0 && h > 0) {
-      var img = ctx.createImageData(w, h);
+      // 关键：三角必须画在**离屏画布**上再 drawImage 合成。
+      // 直接用 putImageData 到主画布会连同 alpha 一起覆写，
+      // 于是包围盒四角落到圆环上的像素被「打孔」变透明 —— 看起来就是三角把圆环切掉了一块。
+      if (!triCache) { triCache = document.createElement('canvas'); }
+      if (triCache.width !== SZ || triCache.height !== SZ) {
+        triCache.width = SZ; triCache.height = SZ;
+      }
+      var tctx = triCache.getContext('2d');
+      tctx.setTransform(1, 0, 0, 1, 0, 0);
+      tctx.clearRect(0, 0, SZ, SZ);
+      var img = tctx.createImageData(w, h);
       var d = img.data;
       var v0x = B[0] - A[0], v0y = B[1] - A[1];
       var v1x = C[0] - A[0], v1y = C[1] - A[1];
@@ -886,7 +933,8 @@
           d[o + 3] = 255;
         }
       }
-      ctx.putImageData(img, minx, miny);
+      tctx.putImageData(img, minx, miny);
+      ctx.drawImage(triCache, 0, 0);
     }
 
     // 三角描边
@@ -896,7 +944,6 @@
     ctx.strokeStyle = 'rgba(0,0,0,.10)';
     ctx.lineWidth = 1;
     ctx.stroke();
-
     // 色相指示器
     var ha = S.hue * Math.PI / 180;
     var hx = cx + Math.cos(ha) * (R - ring / 2), hy = cy + Math.sin(ha) * (R - ring / 2);
@@ -1160,6 +1207,239 @@
     if (!await confirmDialog('把所有可见图层合并为一层？此操作会把当前画面固化为一张底图。', { danger: true })) return;
     var png = engine.renderDocument({ transparentBackground: true }).canvas.toDataURL('image/png');
     net.send(P.C2S.LAYER_FLATTEN, { png: png, upToSeq: engine.seq, name: '合并图层' });
+  }
+
+  /* ================================================================
+   * 笔刷导入：Photoshop 的 .abr 与 Clip Studio Paint 的 .sut
+   *
+   * 导入的是**笔尖形状 + 能量化的参数**，不是把 PS 的描边引擎搬过来。
+   * 笔尖打包成 32×32 的 4 位灰度小图跟着笔迹走，所以别人的屏幕上
+   * 也能画出同样的笔触（跨端像素一致这条不能破）。
+   * ================================================================ */
+
+  var LS_IMPORTED = 'chahu.brushes.imported';
+  var IMPORT_MAX = 160;          // 导入总量上限（要进 localStorage，还得跟着每一笔走）
+
+  function loadImported() {
+    var list = [];
+    try {
+      var raw = localStorage.getItem(LS_IMPORTED);
+      if (raw) list = JSON.parse(raw) || [];
+    } catch (e) { list = []; }
+    if (!Array.isArray(list)) list = [];
+    list = list.filter(function (it) { return it && it.id && it.params && it.params.tip; }).slice(0, IMPORT_MAX);
+    Brushes.register(list);
+    return list;
+  }
+
+  function saveImported() {
+    try {
+      localStorage.setItem(LS_IMPORTED, JSON.stringify(S.imported || []));
+      return true;
+    } catch (e) {
+      toast('保存失败（本地存储写不下了）：' + e.message, 'err');
+      return false;
+    }
+  }
+
+  function simpleHash(str) {
+    var h = 2166136261;
+    for (var i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = (h * 16777619) >>> 0;
+    }
+    return h.toString(36);
+  }
+
+  /** 把解析出来的笔尖变成一支可用的笔刷条目 */
+  function importedItem(rec, idx) {
+    var d = Math.max(4, Math.min(400, Math.round(rec.diameter || 40)));
+    return {
+      id: 'imp_' + (rec.hash || 'x') + '_' + idx,
+      name: rec.name || ('导入笔刷 ' + (idx + 1)),
+      tool: 'brush',
+      icon: 'imported',
+      type: 'brush',
+      tip: '导入的笔刷（' + (rec.sourceLabel || '') + '）｜笔尖 ' + d + 'px',
+      imported: true,
+      params: {
+        brush: 'custom',
+        size: d,
+        opacity: 1,
+        hardness: rec.hardness == null ? 0.8 : rec.hardness,
+        minSize: 0.4,
+        pressSize: 0.8,
+        pressOpacity: 0,
+        // 导入的笔刷靠笔尖出形状，关掉颗粒与散布 ——
+        // 那两样是给圆头笔加质感的，叠在笔尖上只会把形状糊掉
+        grain: 0,
+        scatter: 0,
+        spacing: rec.spacing || 0.1,
+        tip: rec.tip
+      }
+    };
+  }
+
+  function openBrushImport() {
+    var input = $('#brushFileInput');
+    if (!input) return;
+    input.value = '';
+    input.click();
+  }
+
+  function handleBrushFiles(files) {
+    var list = Array.prototype.slice.call(files || []);
+    if (!list.length) return;
+    var pending = list.length;
+    var collected = [];
+    var failed = [];
+
+    list.forEach(function (f) {
+      var fr = new FileReader();
+      fr.onload = function () {
+        try {
+          var res = window.ChaBrushImport.parse(f.name, new Uint8Array(fr.result));
+          if (!res.brushes.length) throw new Error('里面没有可导入的笔刷');
+          res.brushes.slice(0, IMPORT_MAX).forEach(function (b) {
+            b.sourceLabel = f.name + (res.kind === 'abr' ? '（Photoshop）' : '（CSP）');
+            b.hash = simpleHash(f.name + '|' + (b.name || '') + '|' + String(b.tip || '').slice(0, 32));
+            collected.push(b);
+          });
+        } catch (e) {
+          failed.push(f.name + '：' + e.message);
+        }
+        if (--pending === 0) finish();
+      };
+      fr.onerror = function () {
+        failed.push(f.name + '：读取失败');
+        if (--pending === 0) finish();
+      };
+      fr.readAsArrayBuffer(f);
+    });
+
+    function finish() {
+      if (failed.length) toast('这些文件没能解析：' + failed.join('；'), 'err', 6000);
+      if (!collected.length) return;
+      showImportDialog(collected, (S.imported || []).length);
+    }
+  }
+
+  /** 笔尖预览：把打包的 4 位小图放大画出来（深色笔尖，浅底上看得清） */
+  function tipThumb(tipStr, size) {
+    var u = window.ChaBrushImport.unpackTip(tipStr);
+    if (!u) return '';
+    var c = document.createElement('canvas');
+    c.width = u.w; c.height = u.h;
+    var cx = c.getContext('2d');
+    var img = cx.createImageData(u.w, u.h);
+    for (var p = 0; p < u.w * u.h; p++) {
+      img.data[p * 4] = 30;
+      img.data[p * 4 + 1] = 34;
+      img.data[p * 4 + 2] = 42;
+      img.data[p * 4 + 3] = u.rgba[p * 4 + 3];
+    }
+    cx.putImageData(img, 0, 0);
+    var out = document.createElement('canvas');
+    out.width = out.height = size;
+    var oc = out.getContext('2d');
+    oc.imageSmoothingEnabled = true;
+    var s = size - 6;
+    oc.drawImage(c, 3, 3, s, s);
+    return out.toDataURL('image/png');
+  }
+
+  function showImportDialog(found, existing) {
+    var body = $('#importBody');
+    var room = Math.max(0, IMPORT_MAX - existing);
+    if (room <= 0) {
+      toast('导入的笔刷已达上限 ' + IMPORT_MAX + ' 支，先删掉一些再导', 'err', 5000);
+      return;
+    }
+    $('#importTitle').textContent = '导入笔刷（发现 ' + found.length + ' 支）';
+    $('#importNote').textContent = found.length > room
+      ? '本地已有 ' + existing + ' 支，最多还能导入 ' + room + ' 支 —— 只会取前 ' + room + ' 支。'
+      : '本地已有 ' + existing + ' 支导入笔刷。勾选要加入「笔刷栏」的笔刷。';
+    body.innerHTML = '';
+    var pick = found.slice(0, room);
+    S.importPending = pick;
+    pick.forEach(function (b, i) {
+      var row = document.createElement('label');
+      row.className = 'imp-row';
+      var bits = [];
+      if (b.diameter) bits.push(b.diameter + 'px');
+      if (b.spacing) bits.push('间距 ' + Math.round(b.spacing * 100) + '%');
+      if (b.hardness != null) bits.push('硬度 ' + b.hardness.toFixed(2));
+      var thumb = b.tip ? tipThumb(b.tip, 34) : '';
+      row.innerHTML =
+        '<input type="checkbox" checked data-i="' + i + '">' +
+        (thumb ? '<img class="imp-tip" src="' + thumb + '" alt="">' : '<span class="imp-tip"></span>') +
+        '<span class="imp-name">' + esc(b.name) + '</span>' +
+        '<span class="imp-meta">' + esc(bits.join(' · ')) + '</span>';
+      body.appendChild(row);
+    });
+    $('#importMask').classList.remove('hidden');
+    $('#btnImportAll').onclick = function () {
+      $('#importBody input[type=checkbox]').forEach(function (c) { c.checked = true; });
+    };
+    $('#btnImportNone').onclick = function () {
+      $('#importBody input[type=checkbox]').forEach(function (c) { c.checked = false; });
+    };
+    $('#btnImportCancel').onclick = function () { $('#importMask').classList.add('hidden'); };
+    $('#btnImportOk').onclick = function () {
+      var keep = [];
+      $('#importBody input[type=checkbox]').forEach(function (c) {
+        if (c.checked) keep.push(S.importPending[+c.dataset.i]);
+      });
+      $('#importMask').classList.add('hidden');
+      applyImported(keep);
+    };
+  }
+
+  function applyImported(list) {
+    if (!list || !list.length) { toast('没有选中任何笔刷'); return; }
+    var base = (S.imported || []).length;
+    var items = [];
+    list.forEach(function (rec, i) {
+      var it = importedItem(rec, base + i);
+      // 同一支笔重复导入时覆盖旧的，别堆成一串重名笔刷
+      var dup = (S.imported || []).filter(function (x) {
+        return x.name === it.name && String(x.tip || '').indexOf(rec.sourceLabel) >= 0;
+      })[0];
+      if (dup) it.id = dup.id;
+      items.push(it);
+    });
+    Brushes.register(items);
+    var ids = {};
+    items.forEach(function (it) { ids[it.id] = 1; });
+    S.imported = (S.imported || []).filter(function (x) { return !ids[x.id]; }).concat(items).slice(0, IMPORT_MAX);
+    items.forEach(function (it) {
+      if (S.toolPrefs.order.indexOf(it.id) < 0) S.toolPrefs.order.push(it.id);
+    });
+    saveImported();
+    saveToolPrefs();
+    renderToolGrid();
+    loadBrush(items[items.length - 1].id);
+    toast('已导入 ' + items.length + ' 支笔刷，排在「笔刷栏」最后', 'ok', 4200);
+  }
+
+  function removeImported(id) {
+    var it = Brushes.get(id);
+    if (!it || !it.imported) return;
+    S.imported = (S.imported || []).filter(function (x) { return x.id !== id; });
+    Brushes.unregister(id);
+    var oi = S.toolPrefs.order.indexOf(id);
+    if (oi >= 0) S.toolPrefs.order.splice(oi, 1);
+    var hi = S.toolPrefs.hidden.indexOf(id);
+    if (hi >= 0) S.toolPrefs.hidden.splice(hi, 1);
+    saveImported();
+    saveToolPrefs();
+    if (S.brushId === id) {
+      var next = Brushes.forTool('brush')[0] || Brushes.ITEMS[0];
+      loadBrush(next.id);
+    } else {
+      renderToolGrid();
+    }
+    toast('已删除「' + it.name + '」');
   }
 
   /* ============================================================ 成员 / 聊天 / 笔迹 */
@@ -1487,7 +1767,12 @@
       blend: b.blend,
       sym: S.sym,
       brush: S.brushId,
-      filled: !!b.filled
+      filled: !!b.filled,
+      // 导入的 PS / CSP 笔刷的笔尖位图与落点间隔。
+      // 这里是**第二道白名单**（第一道是 engine.newStroke / 服务端 buildStroke），
+      // 三道里漏掉任何一道，笔尖就传不到别的客户端，别人看到的会是一支圆头笔。
+      spacing: b.spacing,
+      tip: b.tip
     };
     if (extra) Object.assign(base, extra);
     return base;
@@ -2582,19 +2867,44 @@
    * 用 localhost 发出去对方点开只会连到他自己那台机器。
    */
   function shareBase() {
+    // 公网隧道优先：外网朋友也能打开，局域网地址只对同一 WiFi 的人有效
+    if (S.publicUrl) return S.publicUrl;
     var lan = Cfg.lanBase ? Cfg.lanBase() : '';
     if (lan) return lan;
     return Cfg.httpBaseOf(net.url);
+  }
+
+  /**
+   * 问一下服务端有没有开公网隧道（tools/expose.js 会把地址写到 server/data/public-url.txt）。
+   * 有的话分享链接就用公网地址，这样发出去的链接谁都能打开。
+   */
+  function probePublicUrl() {
+    var base = Cfg.httpBaseOf(net.url);
+    if (!base || typeof fetch !== 'function') return;
+    fetch(base + '/api/share', { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) {
+        if (!j) return;
+        var next = (j.publicUrl || '').replace(/\/+$/, '');
+        if (next === S.publicUrl) return;
+        S.publicUrl = next;
+        S.lanUrls = j.lanUrls || [];
+        if (next) toast('检测到公网入口，分享链接已切换为 ' + next, 'ok', 4200);
+        // 房间信息面板正开着的话，顺手刷新一下里面的链接
+        var mask = $('#infoMask');
+        if (mask && !mask.classList.contains('hidden') && S.room) showInfo();
+      })
+      .catch(function () { /* 没有就是没开隧道，忽略 */ });
   }
 
   function doShare() {
     if (!S.room) { toast('还没有进入房间'); return; }
     var base = shareBase();
     var text = base ? base + '/?room=' + S.room.id : S.room.id;
-    if (S.room.hasPassword) text += '（房间有密码，请向房主索取）';
+    var note = text + (S.room.hasPassword ? '（房间有密码，请向房主索取）' : '');
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(function () {
-        toast('分享链接已复制：' + text, 'ok', 3600);
+      navigator.clipboard.writeText(note).then(function () {
+        toast('分享链接已复制：' + note, 'ok', 3600);
       }, function () { showInfo(text); });
     } else {
       showInfo(text);
@@ -2604,6 +2914,11 @@
   function showInfo(text) {
     $('#infoTitle').textContent = '房间信息';
     var r = S.room || {};
+    // 没显式传链接就自己算一条（会优先用公网地址）
+    if (text === undefined || text === null) {
+      var b0 = shareBase();
+      text = b0 && r.id ? b0 + '/?room=' + r.id : (r.id || '');
+    }
     $('#infoBody').innerHTML =
       '<div class="kv"><label>房间名</label><div>' + esc(r.name || '-') + '</div></div>' +
       '<div class="kv"><label>房间号</label><div><code>' + esc(r.id || '-') + '</code></div></div>' +
@@ -2613,6 +2928,11 @@
       '<div class="kv"><label>笔迹</label><div>' + engine.strokes.length + ' 笔（我可撤销 ' + S.myUndo.length + ' 笔）</div></div>' +
       '<div class="kv"><label>图层</label><div>' + engine.layers.length + ' 层</div></div>' +
       '<div class="kv"><label>服务器</label><div><code>' + esc(net.url) + '</code></div></div>' +
+      (S.publicUrl
+        ? '<div class="kv"><label>公网入口</label><div><code>' + esc(S.publicUrl) + '</code>' +
+          '<span class="hint">（外网的朋友打开这个地址就能加入）</span></div></div>'
+        : '<div class="kv"><label>公网入口</label><div><span class="hint">未开启 —— 在服务端机器上运行 ' +
+          'npm run expose 就能生成一个外网可访问的链接</span></div></div>') +
       (Cfg.lanBase && Cfg.lanBase()
         ? '<div class="kv"><label>局域网</label><div><code>' + esc(Cfg.lanBase()) + '</code>' +
           '<span class="hint">（同一 WiFi 下的朋友用浏览器打开这个地址就能加入）</span></div></div>'
@@ -3393,6 +3713,11 @@
     $('#btnBrushEdit').addEventListener('click', function () { toggleToolEdit(this); });
     $('#btnToolReset').addEventListener('click', resetToolPrefs);
 
+    // 笔刷导入（PS .abr / CSP .sut）
+    $('#btnBrushImport').addEventListener('click', function (e) { e.stopPropagation(); openBrushImport(); });
+    $('#brushFileInput').addEventListener('change', function () { handleBrushFiles(this.files); });
+    $('#btnImportCancelX').addEventListener('click', function () { $('#importMask').classList.add('hidden'); });
+
     $$('.tab').forEach(function (t) {
       t.addEventListener('click', function () {
         $$('.tab').forEach(function (x) { x.classList.toggle('active', x === t); });
@@ -3417,10 +3742,8 @@
     $('#btnCreateRoom').addEventListener('click', doCreate);
 
     $('#roomChip').addEventListener('click', function () {
-      if (S.room) {
-        var base = Cfg.httpBaseOf(net.url);
-        showInfo(base ? base + '/?room=' + S.room.id : S.room.id);
-      } else { openEntry(true); }
+      if (S.room) showInfo();
+      else openEntry(true);
     });
 
     $('#btnExport').addEventListener('click', doExport);
@@ -3557,6 +3880,8 @@
     buildSizePresets();
     buildPaperPicker();
     buildEffectSelects();
+    // 导入的笔刷要先注册进 Brushes，loadToolPrefs 才能认出它们
+    S.imported = loadImported();
     loadToolPrefs();
     applyPanelOrder();
     bindUI();
@@ -3582,6 +3907,8 @@
         setStatus('已重连，正在回到「' + S.room.name + '」…');
         net.send(P.C2S.ROOM_JOIN, { roomId: S.room.id, user: S.me.name });
       }
+      // 每次连上（含重连）都问一次：隧道可能是中途才开的
+      probePublicUrl();
     });
     net.on('message', handleMessage);
     net.on('retry', function (e) { setStatus('连接中断，' + Math.round(e.delay / 1000) + 's 后重试…'); });
@@ -3613,5 +3940,13 @@
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else boot();
 
-  global.ChaApp = { engine: engine, net: net, state: S, undo: undo, redo: redo, toast: toast };
+  global.ChaApp = {
+    engine: engine, net: net, state: S, undo: undo, redo: redo, toast: toast,
+    // 笔刷导入（给测试用，也让控制台里能手动导一支试试）
+    openBrushImport: openBrushImport,
+    handleBrushFiles: handleBrushFiles,
+    applyImported: applyImported,
+    removeImported: removeImported,
+    tipThumb: tipThumb
+  };
 })(window);

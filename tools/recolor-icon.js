@@ -6,9 +6,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
-const PW = 'C:/Users/Ankry/.workbuddy/binaries/node/workspace/node_modules/playwright-core';
-const { chromium } = require(PW);
-
+const { chromium } = require('./pw');
 const ICON = path.resolve(__dirname, '..', 'client', 'build', 'icon.png');
 const OUT_SIZES = [
   ['client/build/icon.png', 256]

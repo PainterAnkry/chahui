@@ -6,8 +6,7 @@
  */
 'use strict';
 const path = require('path');
-const PW = 'C:/Users/Ankry/.workbuddy/binaries/node/workspace/node_modules/playwright-core';
-const { chromium } = require(PW);
+const { chromium } = require('./pw');
 const BASE = process.argv[2] || 'http://127.0.0.1:8437';
 const OUT = path.resolve(__dirname, '..', 'docs');
 const sleep = ms => new Promise(r => setTimeout(r, ms));

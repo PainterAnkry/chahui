@@ -37,6 +37,8 @@
 
   // 24×24 视窗内的笔画示意（支持 path 字符串，或整段 inner SVG）
   var ICONS = {
+    // 导入的笔刷（PS / CSP）用「下载箭头 + 笔」表示
+    imported: '<path d="M12 3v10"/><path d="M8 9.5l4 4 4-4"/><path d="M5 17.5h14"/>',
     pencil: 'M4 20l1-4L16 5a2.1 2.1 0 0 1 3 3L8 19zM13.5 7.5l3 3',
     airbrush: '<path d="M8 20h7a1 1 0 0 0 1-1V9a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1z"/><path d="M10 8V6h3.5v2"/><path d="M17 4.5h.01M19.5 6.5h.01M21 9.5h.01M19 13h.01"/>',
     brush: 'M6.5 19.5c0-2 .8-3.6 2.2-5l7-7 3.3 3.3-7 7c-1.4 1.4-3 2.2-5 2.2z"/><path d="M15 6.5l3.3 3.3"/><path d="M6.5 19.5l1-3.2 2.7 2.7z"/>',
@@ -48,6 +50,13 @@
     bucket: '<path d="M4 13 11 6l6 6-7 7a1.4 1.4 0 0 1-2 0l-4-4a1.4 1.4 0 0 1 0-2z"/><path d="M9 3.5 7 5.5"/><path d="M19 15c1.1 1.6 1.6 2.5 1.6 3.2a1.6 1.6 0 0 1-3.2 0c0-.7.5-1.6 1.6-3.2z"/>',
     gradient: '<defs><linearGradient id="chgrad" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="currentColor" stop-opacity="1"/><stop offset="0.5" stop-color="currentColor" stop-opacity=".45"/><stop offset="1" stop-color="currentColor" stop-opacity=".05"/></linearGradient></defs><rect x="4" y="6" width="16" height="12" rx="1.4" fill="url(#chgrad)" stroke="currentColor" stroke-width="1.2"/>',
     blur: '<circle cx="12" cy="12" r="7.4"/><circle cx="12" cy="12" r="3.4" opacity=".45"/>',
+    // ── 追加笔刷的图标 ──
+    hardRound: '<circle cx="12" cy="12" r="6.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="8.4" stroke-dasharray="1.6 2.6" opacity=".5"/>',
+    inking: '<path d="M12 2.8 6.6 14.2 12 21.2l5.4-7z"/><path d="M12 5.6v3.4"/><circle cx="12" cy="12.6" r="1.7"/>',
+    bristle: '<path d="M4.6 13.4c0-4.1 3.3-7.4 7.4-7.4s7.4 3.3 7.4 7.4"/><path d="M4.6 13.4h14.8"/><path d="M7.4 13.4v3.4M10.4 13.4v4.4M13.6 13.4v4.4M16.6 13.4v3.4"/>',
+    dry: '<path d="M7.6 20.4 3.6 16.4 13 7l4 4z"/><path d="M13 7l3.4-3.4a2 2 0 0 1 2.8 0l1 1a2 2 0 0 1 0 2.8L17 11"/>',
+    chalk: '<rect x="7.2" y="3.4" width="6.6" height="17.2" rx="1.8" transform="rotate(34 11 12)"/><path d="M3.6 21h7"/>',
+    glow: '<circle cx="12" cy="12" r="4.2"/><path d="M12 3v3.2M12 17.8V21M3 12h3.2M17.8 12H21M5.7 5.7l2.3 2.3M16 16l2.3 2.3M18.3 5.7 16 8M8 16l-2.3 2.3"/>',
     effect: '<path d="M5 19.5l1.2-3.6 7-7 2.6 2.6-7 7z"/><path d="m15.4 6.4 1.6-1.6"/><path d="M17 3.2l.8 1.9 1.9.8-1.9.8-.8 1.9-.8-1.9-1.9-.8 1.9-.8z"/>',
     scatter: '<path d="M12 4.2 14 6.2 12 8.2 10 6.2zM5.4 10.4 7.6 12.6 5.4 14.8 3.2 12.6zM18.6 12.6 20.8 14.8 18.6 17 16.4 14.8zM11 17.6 12.9 19.5 11 21.4 9.1 19.5z"/>',
     smudge: '<ellipse cx="11.6" cy="9.4" rx="4.2" ry="5.6"/><path d="M6 17.4c1.5 1.1 3.4 1.7 5.4 1.7s3.9-.6 5.4-1.7" opacity=".5"/><path d="M19.6 6.6c.6-.9 1.4-1 2-.5" opacity=".6"/>',
@@ -62,7 +71,9 @@
 
   /* ------------------------------------------------------------ 条目 */
 
-  // type: 'brush' 画笔家族 / 'paint' 特殊绘制工具 / 'shape' 形状 / 'util' 辅助
+  // type: 'brush' 画笔家族（进「笔刷栏」）/ 'paint' 区域类工具（进「工具栏」）/ 'shape' 形状 / 'util' 辅助
+  // 注意：油漆桶 / 渐变 / 模糊 / 涂抹 已归入笔刷家族 —— 它们本质是「笔刷性质」的工具，
+  // 在 SAI2 里也是和笔刷排在一起的，所以放笔刷栏更顺手。
   var ITEMS = [
     {
       id: 'pencil', name: '铅笔', tool: 'brush', icon: 'pencil', type: 'brush',
@@ -74,6 +85,54 @@
       params: params({
         brush: 'pencil', size: 2, opacity: 1, hardness: 1, minSize: 0.3,
         pressSize: 1, pressOpacity: 0.6, grain: 0, grainScale: 1, paper: 'none', scatter: 0
+      })
+    },
+    {
+      id: 'hardRound', name: '圆笔 19', tool: 'brush', icon: 'hardRound', type: 'brush',
+      tip: 'PS「19 号画笔」：正圆硬边，笔压只控粗细、浓度恒定 —— 铺色与描线都好用',
+      params: params({
+        brush: 'hardRound', size: 19, opacity: 1, hardness: 1, minSize: 0.25,
+        pressSize: 1, pressOpacity: 0
+      })
+    },
+    {
+      id: 'inking', name: '勾线笔', tool: 'brush', icon: 'inking', type: 'brush',
+      tip: '细而稳的墨线，压感偏「线宽」；开一点修正值可拉长直线',
+      params: params({
+        brush: 'inking', size: 3, opacity: 1, hardness: 1, minSize: 0.2,
+        pressSize: 1, pressOpacity: 0.15
+      })
+    },
+    {
+      id: 'bristle', name: '毛发笔', tool: 'brush', icon: 'bristle', type: 'brush',
+      tip: '带画布纸纹的鬃毛笔，扫出笔触的毛糙感',
+      params: params({
+        brush: 'bristle', size: 22, opacity: 0.72, hardness: 0.62, minSize: 0.5,
+        pressSize: 0.8, pressOpacity: 0.4, grain: 0.45, grainScale: 0.85, paper: 'canvas'
+      })
+    },
+    {
+      id: 'dry', name: '干笔', tool: 'brush', icon: 'dry', type: 'brush',
+      tip: '枯笔，纸纹吃色，边缘容易断开',
+      params: params({
+        brush: 'dry', size: 20, opacity: 0.62, hardness: 0.78, minSize: 0.45,
+        pressSize: 0.75, pressOpacity: 0.45, grain: 0.62, grainScale: 1.9, paper: 'coarse'
+      })
+    },
+    {
+      id: 'chalk', name: '粉笔', tool: 'brush', icon: 'chalk', type: 'brush',
+      tip: '颗粒最重的笔，适合打质感与肌理',
+      params: params({
+        brush: 'chalk', size: 26, opacity: 0.5, hardness: 0.88, minSize: 0.7,
+        pressSize: 0.5, pressOpacity: 0.6, grain: 0.78, grainScale: 1.4, paper: 'coarse'
+      })
+    },
+    {
+      id: 'glow', name: '加色笔', tool: 'brush', icon: 'glow', type: 'brush',
+      tip: '发光叠加，画高光与光晕；深浅靠笔压控制',
+      params: params({
+        brush: 'glow', size: 30, opacity: 0.28, hardness: 0.06, minSize: 0.8,
+        pressSize: 0.35, pressOpacity: 0.9, blend: 'add'
       })
     },
     {
@@ -151,17 +210,17 @@
       params: params({ brush: 'wand', size: 20, opacity: 1, tolerance: 32, expand: 0 })
     },
     {
-      id: 'bucket', name: '油漆桶', tool: 'fill', icon: 'bucket', type: 'paint',
+      id: 'bucket', name: '油漆桶', tool: 'fill', icon: 'bucket', type: 'brush',
       tip: '按色差范围填充，可扩大边缘',
       params: params({ brush: 'bucket', size: 20, opacity: 1, tolerance: 32, expand: 0 })
     },
     {
-      id: 'gradient', name: '渐变', tool: 'gradient', icon: 'gradient', type: 'paint',
+      id: 'gradient', name: '渐变', tool: 'gradient', icon: 'gradient', type: 'brush',
       tip: '拖一条线拉出线性渐变；勾选「填充」则变成径向渐变',
       params: params({ brush: 'gradient', size: 20, opacity: 1, blend: 'normal' })
     },
     {
-      id: 'blur', name: '模糊', tool: 'blur', icon: 'blur', type: 'paint',
+      id: 'blur', name: '模糊', tool: 'blur', icon: 'blur', type: 'brush',
       tip: '涂抹即模糊，做柔化与过渡',
       params: params({
         brush: 'blur', size: 30, opacity: 1, hardness: 0.6, minSize: 0.7,
@@ -185,7 +244,7 @@
       })
     },
     {
-      id: 'smudge', name: '涂抹', tool: 'smudge', icon: 'smudge', type: 'paint',
+      id: 'smudge', name: '涂抹', tool: 'smudge', icon: 'smudge', type: 'brush',
       tip: '把碰到颜色拖走，做混色与过渡',
       params: params({ brush: 'smudge', size: 30, opacity: 1, hardness: 0.5, minSize: 0.8, pressSize: 0.4, strength: 0.6 })
     },
@@ -197,6 +256,30 @@
 
   var BY_ID = {};
   ITEMS.forEach(function (p) { BY_ID[p.id] = p; });
+
+  /**
+   * 注册导入的笔刷（PS 的 .abr / CSP 的 .sut）。
+   * 同一个 id 以**新的为准**：用户重新导入同一支笔时应该覆盖，而不是留下两份。
+   */
+  function register(list) {
+    (list || []).forEach(function (it) {
+      if (!it || !it.id) return;
+      if (!BY_ID[it.id]) ITEMS.push(it);
+      else {
+        var i = ITEMS.indexOf(BY_ID[it.id]);
+        if (i >= 0) ITEMS[i] = it;
+      }
+      BY_ID[it.id] = it;
+    });
+  }
+
+  function unregister(id) {
+    var it = BY_ID[id];
+    if (!it) return;
+    var i = ITEMS.indexOf(it);
+    if (i >= 0) ITEMS.splice(i, 1);
+    delete BY_ID[id];
+  }
 
   // 工具 → 家族标签
   var FAMILY = {
@@ -289,6 +372,8 @@
     forTool: forTool,
     defaultForTool: defaultForTool,
     resolveParams: resolveParams,
-    iconSvg: iconSvg
+    iconSvg: iconSvg,
+    register: register,
+    unregister: unregister
   };
 })(window);

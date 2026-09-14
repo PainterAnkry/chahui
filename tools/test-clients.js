@@ -14,6 +14,25 @@ const URL_ = process.argv[2] || 'ws://localhost:8437/ws';
 let pass = 0, fail = 0;
 const failures = [];
 
+/** 把 ws(s):// 地址换算成 http(s)://，用来打 REST 接口 */
+function httpBase() {
+  return URL_.replace(/^ws:/, 'http:').replace(/^wss:/, 'https:').replace(/\/ws\/?$/, '');
+}
+
+function httpJson(pathname) {
+  return new Promise((resolve) => {
+    const mod = /^https:/.test(httpBase()) ? require('https') : require('http');
+    const req = mod.get(httpBase() + pathname, { timeout: 8000 }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (d) => { body += d; });
+      res.on('end', () => { try { resolve(JSON.parse(body)); } catch (e) { resolve(null); } });
+    });
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+  });
+}
+
 function ok(name, cond, extra) {
   if (cond) { pass++; console.log('  \u2713 ' + name); }
   else { fail++; failures.push(name + (extra ? ' → ' + extra : '')); console.log('  \u2717 ' + name + (extra ? ' → ' + extra : '')); }
@@ -55,6 +74,22 @@ function Client(name) {
 }
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+/**
+ * 轮询等待某个条件成立（成功立刻返回，不必等满）。
+ *
+ * 为什么不用固定 sleep：服务端把房间目录挪走、写存档、压消息都在同一个
+ * 事件循环 / 线程池里排队，宿主机磁盘一忙，广播就可能晚到几十~几百毫秒。
+ * 固定 sleep 会变成随机失败，轮询则只在「真的没发生」时才失败。
+ */
+async function waitFor(cond, timeoutMs) {
+  const end = Date.now() + (timeoutMs || 2500);
+  for (;;) {
+    if (cond()) return true;
+    if (Date.now() >= end) return cond();
+    await sleep(50);
+  }
+}
 
 function stroke(id, layerId, color, n, size) {
   const pts = [];
@@ -191,12 +226,18 @@ async function main() {
   await sleep(250);
   ok('非房主解散被拒绝', (D2.got.errors || []).some(e => e.code === 'not_owner'));
   A.send(P.C2S.ROOM_DESTROY, {});            // 房主解散
-  await sleep(400);
-  ok('成员收到房间已解散', E.log.some(m => m.t === P.S2C.ROOM_DESTROYED) && D2.log.some(m => m.t === P.S2C.ROOM_DESTROYED));
+  const notified = await waitFor(
+    () => E.log.some(m => m.t === P.S2C.ROOM_DESTROYED) && D2.log.some(m => m.t === P.S2C.ROOM_DESTROYED));
+  ok('成员收到房间已解散', notified,
+    'E=[' + E.log.map(m => m.t).join(',') + '] D2=[' + D2.log.map(m => m.t).join(',') + ']');
   C.send(P.C2S.ROOM_LIST, {});
-  await sleep(250);
+  const removed = await waitFor(() => {
+    const l = C.log.filter(m => m.t === P.S2C.ROOM_LIST).pop();
+    return !!l && !l.rooms.some(r => r.id === roomId2);
+  });
   const list2 = C.log.filter(m => m.t === P.S2C.ROOM_LIST).pop();
-  ok('房间已从列表移除', !!list2 && !list2.rooms.some(r => r.id === roomId2));
+  ok('房间已从列表移除', removed,
+    'roomId2=' + roomId2 + ' 列表=[' + ((list2 && list2.rooms) || []).map(r => r.id).join(',') + ']');
 
   A.ws.close(); B.ws.close(); C.ws.close(); D.ws.close(); E.ws.close(); D2.ws.close();
   await sleep(200);
@@ -375,6 +416,20 @@ async function main() {
   await sleep(300);
   X.ws.close(); Y.ws.close();
   await sleep(150);
+
+  console.log('\n[22] 公网穿透接口 /api/share');
+  const share = await httpJson('/api/share');
+  ok('/api/share 可用', !!share && typeof share === 'object', JSON.stringify(share));
+  ok('/api/share 带 publicUrl 字段（未开隧道时为空串）',
+    !!share && typeof share.publicUrl === 'string',
+    share ? JSON.stringify(share.publicUrl) : 'no body');
+  ok('publicUrl 是合法 http(s) 地址（或为空）',
+    !!share && (share.publicUrl === '' || /^https?:\/\/[^\s/]+$/.test(share.publicUrl)),
+    share ? share.publicUrl : '');
+  ok('/api/share 带局域网地址列表',
+    !!share && Array.isArray(share.lanUrls) &&
+      share.lanUrls.every(u => /^http:\/\/\d+\.\d+\.\d+\.\d+:\d+$/.test(u)),
+    share ? JSON.stringify(share.lanUrls) : '');
 
   console.log('\n════════════════════════════════════════');
   console.log('  通过 ' + pass + ' / ' + (pass + fail));

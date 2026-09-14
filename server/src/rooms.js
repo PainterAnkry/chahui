@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('fs');
+const fsp = fs.promises;
 const path = require('path');
 const P = require('./protocol');
 
@@ -8,6 +9,17 @@ const MAX_STROKES_PER_ROOM = 60000;
 const MAX_CHAT = 300;
 const MAX_ROOM_STROKE_BYTES = 24 * 1024 * 1024; // 房间历史（不含底图）序列化上限
 const ROOM_SCHEMA = 3;                          // 存档结构版本：旧版本存档在启动时清理
+
+/**
+ * 待删目录的中转站（rooms/.trash）。
+ *
+ * drop() 不能同步删目录：rmSync 在 Windows 上遇到被占用的文件会同步重试，
+ * 实测单个房间能堵住事件循环近 1 秒，而 drop() 是在处理 WebSocket 消息时调用的
+ * —— 一堵就是整个房间的笔迹 / 心跳 / 房间列表全部卡住。
+ * 所以改成「先把目录 rename 进 .trash（只改目录项，毫秒级），再异步删」，
+ * 这样即使进程当场被杀，房间也不会被 loadAll() 重新载回来。
+ */
+const TRASH_DIR = '.trash';
 
 function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
 function isPng(s) { return typeof s === 'string' && s.startsWith('data:image/png;base64,'); }
@@ -38,6 +50,39 @@ function rmTree(dir) {
     try { fs.chmodSync(dir, 0o777); } catch (e) { /* ignore */ }
   }
   return !fs.existsSync(dir);
+}
+
+/**
+ * 待删目录队列：串行 + 轻量删除。
+ *
+ * 为什么要串行、为什么不做多层兜底重试：
+ * fs 操作和 zlib 压缩共用 libuv 线程池（默认 4 个线程）。一次 GC 可能产生
+ * 十几个待删目录，如果并发 + 逐个反复重试，线程池会被占满，连 WebSocket
+ * 消息的压缩都要排队 —— 客户端看到的就是「消息明显延迟」。
+ *
+ * 而 .trash 里的目录已经不在存档命名空间内了（loadAll 会跳过 `.` 开头的目录），
+ * 删不掉也不会让房间复活，下次启动 purgeTrash 会再试。所以这里删一次就够了。
+ */
+const _rmQueue = [];
+let _rmBusy = false;
+
+function rmTreeQueued(dir, onDone) {
+  _rmQueue.push({ dir, onDone });
+  _pumpRmQueue();
+}
+
+function _pumpRmQueue() {
+  if (_rmBusy) return;
+  const job = _rmQueue.shift();
+  if (!job) return;
+  _rmBusy = true;
+  fsp.rm(job.dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 80 })
+    .then(() => { if (job.onDone) job.onDone(true); })
+    .catch(() => { if (job.onDone) job.onDone(false); })
+    .then(() => {
+      _rmBusy = false;
+      _pumpRmQueue();
+    });
 }
 
 function newLayer(meta) {
@@ -360,6 +405,8 @@ class RoomStore {
     this.saveTimers = new Map();
     fs.mkdirSync(dataDir, { recursive: true });
     this.loadAll();
+    const trashed = this.purgeTrash();
+    if (trashed) console.log('[store] 清理了 ' + trashed + ' 个待删存档目录');
   }
 
   roomDir(id) { return path.join(this.dataDir, id); }
@@ -388,9 +435,38 @@ class RoomStore {
     if (t) { clearTimeout(t); this.saveTimers.delete(id); }
     const room = this.rooms.get(id);
     if (room) room.dropped = true;
-    this.rooms.delete(id);
+    this.rooms.delete(id);   // 内存里立刻消失：房间列表、广播马上就是最新状态
+
+    // 磁盘目录：rename 进 .trash（毫秒级，不阻塞），再交给异步删除收拾。
+    // rename 失败（目录不存在 / 被占用）就退化成直接在原地异步删。
     const dir = this.roomDir(id);
-    if (!rmTree(dir)) console.error('[store] 目录删不掉，可能是文件被占用：' + dir);
+    const trashRoot = path.join(this.dataDir, TRASH_DIR);
+    const trash = path.join(trashRoot, id + '_' + Date.now().toString(36));
+    let target = dir;
+    try {
+      fs.mkdirSync(trashRoot, { recursive: true });
+      fs.renameSync(dir, trash);
+      target = trash;
+    } catch (e) { /* 目录本来就不存在，或句柄被占用：原地异步删 */ }
+
+    setImmediate(() => {
+      rmTreeQueued(target, (gone) => {
+        if (!gone) console.error('[store] 目录删不掉，可能是文件被占用（已移出存档目录）：' + target);
+      });
+    });
+  }
+
+  /** 清掉上次退出时残留在 .trash 里的目录（启动时后台做，不阻塞；删不掉就留着下次再试） */
+  purgeTrash() {
+    const trashRoot = path.join(this.dataDir, TRASH_DIR);
+    let entries = [];
+    try { entries = fs.readdirSync(trashRoot, { withFileTypes: true }); } catch (e) { return 0; }
+    let n = 0;
+    for (const e of entries) {
+      n++;
+      rmTreeQueued(path.join(trashRoot, e.name));
+    }
+    return n;
   }
 
   /**
@@ -469,20 +545,22 @@ class RoomStore {
     try { entries = fs.readdirSync(this.dataDir, { withFileTypes: true }); } catch (e) { return; }
     let orphans = 0;
     for (const e of entries) {
-      if (!e.isDirectory()) continue;
+      if (!e.isDirectory() || e.name.charAt(0) === '.') continue;
       const dir = path.join(this.dataDir, e.name);
       const file = path.join(dir, 'room.json');
       // 没有 room.json 的目录（写盘写了一半、手工删过文件…）永远不会被载入，
       // 也就永远不会被 GC 回收——顺手清掉，免得存档目录里越积越多僵尸目录。
+      // 注意用异步删除：启动时同步 rmSync 十几个目录能把服务端卡住十几秒。
       if (!fs.existsSync(file)) {
-        if (rmTree(dir)) orphans++;
+        orphans++;
+        rmTreeQueued(dir);
         continue;
       }
       try {
         const data = JSON.parse(fs.readFileSync(file, 'utf8'));
         if (data.schema !== ROOM_SCHEMA) {
           // 旧结构存档：不载入并直接清掉，避免脏数据长期堆积
-          rmTree(dir);
+          rmTreeQueued(dir);
           continue;
         }
         const layers = (data.layers || []).map(l => {
@@ -509,4 +587,4 @@ class RoomStore {
   }
 }
 
-module.exports = { Room, RoomStore, rmTree, MAX_STROKES_PER_ROOM, MAX_CHAT, MAX_ROOM_STROKE_BYTES, ROOM_SCHEMA };
+module.exports = { Room, RoomStore, rmTree, rmTreeQueued, MAX_STROKES_PER_ROOM, MAX_CHAT, MAX_ROOM_STROKE_BYTES, ROOM_SCHEMA };

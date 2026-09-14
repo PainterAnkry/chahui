@@ -7,9 +7,7 @@
 
 const path = require('path');
 const fs = require('fs');
-const PW = 'C:/Users/Ankry/.workbuddy/binaries/node/workspace/node_modules/playwright-core';
-const { chromium } = require(PW);
-
+const { chromium } = require('./pw');
 const BASE = process.argv[2] || 'http://localhost:8437';
 const OUT = path.resolve(__dirname, '..', 'screenshots');
 fs.mkdirSync(OUT, { recursive: true });
@@ -21,6 +19,9 @@ function ok(name, cond, extra) {
   else { fail++; failures.push(name + (extra ? ' → ' + extra : '')); console.log('  \u2717 ' + name + (extra ? ' → ' + extra : '')); }
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+/** 截图脱敏（把真实公网地址 / 内网 IP 换成占位符），实现见 tools/mask-page.js */
+const MP = require('./mask-page');
 
 function watch(page, tag, bag) {
   page.on('console', m => {
@@ -352,7 +353,10 @@ async function main() {
   ok('房间信息弹窗打开', info.open === true);
   ok('四个操作按钮齐全', info.buttons.length === 4, JSON.stringify(info.buttons));
   ok('分享链接可用', /room=/.test(info.share), info.share);
+  // 房间里写着真实的公网入口 / 服务器地址，截图前脱敏，拍完立刻还原（后面还有断言要跑）
+  await A.evaluate(MP.mask);
   await A.screenshot({ path: path.join(OUT, '07-房间信息.png') });
+  await A.evaluate(MP.unmask);
   await A.click('#btnInfoClose');
   await sleep(250);
 
@@ -854,6 +858,68 @@ async function main() {
   ok('选区之外不会落笔', inkR1 - inkR0 <= 20, inkR0 + ' → ' + inkR1);
   await A.click('#btnSelNone');
   await sleep(300);
+
+  console.log('\n[16.11] v3 · 色环完整性与三角留白');
+  const ringInfo = await A.evaluate(() => {
+    const cv = document.querySelector('#colorWheel');
+    const ctx = cv.getContext('2d');
+    const SZ = cv.width, cx = SZ / 2, cy = SZ / 2;
+    const R = SZ / 2 - 3, ring = 17, r0 = R - ring;
+    const mid = (R + r0) / 2;
+    const img = ctx.getImageData(0, 0, SZ, SZ).data;
+    // 沿整圈取样：环带中点必须是不透明的纯色（三角曾经把包围盒四角的环像素打孔成透明）
+    const bad = [];
+    for (let a = 0; a < 360; a += 3) {
+      const x = Math.round(cx + Math.cos(a * Math.PI / 180) * mid);
+      const y = Math.round(cy + Math.sin(a * Math.PI / 180) * mid);
+      const o = (y * SZ + x) * 4;
+      const al = img[o + 3];
+      const white = img[o] > 248 && img[o + 1] > 248 && img[o + 2] > 248;
+      if (al < 200 || white) bad.push(a + '°(a=' + al + ')');
+    }
+    // 三角顶点必须离内圈有肉眼可见的空隙
+    let maxR = 0;
+    const pts = img;
+    for (let y = 0; y < SZ; y++) {
+      for (let x = 0; x < SZ; x++) {
+        const o = (y * SZ + x) * 4;
+        if (pts[o + 3] < 250) continue;
+        const d = Math.hypot(x - cx, y - cy);
+        if (d < r0 - 1 && d > maxR) maxR = d;
+      }
+    }
+    return { bad, gap: r0 - maxR, r0, mid };
+  });
+  ok('色环整圈无缺口（三角不再打孔）', ringInfo.bad.length === 0, ringInfo.bad.slice(0, 6).join(' '));
+  ok('三角与色环之间留有间隙', ringInfo.gap >= 5, 'gap=' + ringInfo.gap.toFixed(1) + 'px');
+
+  console.log('\n[16.12] v3 · 工具栏 / 笔刷栏分工');
+  const bars = await A.evaluate(() => {
+    const ids = (sel) => Array.prototype.map.call(
+      document.querySelectorAll(sel + ' .tool'), b => b.dataset.item);
+    return { tools: ids('#toolGrid'), brushes: ids('#brushGrid') };
+  });
+  const movedToBrush = ['bucket', 'gradient', 'blur', 'smudge'];
+  ok('油漆桶 / 渐变 / 模糊 / 涂抹已移入笔刷栏',
+    movedToBrush.every(id => bars.brushes.includes(id) && !bars.tools.includes(id)),
+    'tools=' + bars.tools.join(',')); 
+  ok('工具栏只剩区域类工具（选区 / 形状 / 吸管）',
+    bars.tools.includes('marquee') && bars.tools.includes('wand') && bars.tools.includes('picker'),
+    bars.tools.join(','));
+  const newBrushes = ['hardRound', 'inking', 'bristle', 'dry', 'chalk', 'glow'];
+  ok('新增笔刷已就位（圆笔19 / 勾线笔 / 毛发笔 / 干笔 / 粉笔 / 加色笔）',
+    newBrushes.every(id => bars.brushes.includes(id)),
+    bars.brushes.join(','));
+  const pickNew = await A.evaluate(() => {
+    const b = document.querySelector('#brushGrid .tool[data-item="hardRound"]');
+    if (!b) return null;
+    b.click();
+    const s = window.ChaApp.state;
+    return { tool: s.tool, item: s.brushId, size: s.brush.size, hardness: s.brush.hardness, press: s.brush.pressSize };
+  });
+  ok('圆笔 19 参数正确（硬边 / 笔压控粗细）',
+    pickNew && pickNew.tool === 'brush' && pickNew.size === 19 && pickNew.hardness === 1 && pickNew.press === 1,
+    JSON.stringify(pickNew));
 
   console.log('\n[17] 运行期报错检查');
   ok('浏览器控制台无报错', errors.length === 0, errors.slice(0, 6).join(' || '));

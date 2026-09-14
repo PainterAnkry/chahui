@@ -97,6 +97,7 @@
       <!-- ── 笔刷栏（与工具栏分开，和 SAI2 一样） ── -->
       <section class="group" data-section="brushes">
         <h4><span class="section-grip" title="拖动调整顺序">⋮⋮</span>笔刷栏
+          <button class="mini h4-btn" id="btnBrushImport" title="导入 Photoshop (.abr) 或 Clip Studio Paint (.sut) 笔刷">导入</button>
           <button class="mini h4-btn" id="btnBrushEdit" title="自定义笔刷栏：调整顺序与显隐">编辑</button>
         </h4>
         <div class="tool-grid" id="brushGrid"></div>
@@ -507,9 +508,31 @@
   </div>
 </div>
 
-<script src="protocol.js"></script>
-<script src="config.js"></script>
+<!-- ============ 笔刷导入 ============ -->
+<input type="file" id="brushFileInput" accept=".abr,.sut" multiple class="hidden-file" />
+<div class="modal-mask hidden" id="importMask">
+  <div class="modal import">
+    <div class="modal-head">
+      <h3 id="importTitle">导入笔刷</h3>
+      <button class="icon-btn" id="btnImportCancelX">×</button>
+    </div>
+    <div class="modal-body">
+      <p class="hint" id="importNote">—</p>
+      <div class="imp-list" id="importBody"></div>
+      <div class="imp-actions">
+        <button class="btn tiny ghost" id="btnImportAll">全选</button>
+        <button class="btn tiny ghost" id="btnImportNone">全不选</button>
+        <span class="spacer"></span>
+        <button class="btn tiny ghost" id="btnImportCancel">取消</button>
+        <button class="btn tiny primary" id="btnImportOk">导入所选</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="protocol.js"></script><script src="config.js"></script>
 <script src="brushes.js"></script>
+<script src="brush-import.js"></script>
 <script src="engine.js"></script>
 <script src="transform.js"></script>
 <script src="net.js"></script>
