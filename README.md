@@ -9,6 +9,21 @@
 
 ---
 
+## 下载
+
+不想自己编译的话，直接去 **[Releases](https://github.com/PainterAnkry/chahui/releases/latest)** 拿现成的
+Windows x64 安装包：
+
+| 文件 | 说明 |
+| --- | --- |
+| `chahui-setup-<版本>.exe` | 安装版，可自选目录、建桌面快捷方式 |
+| `chahui-portable-<版本>.exe` | 免安装版，双击即用 |
+
+装好之后**双击图标就能开房联机**（同一 WiFi 下的朋友用浏览器打开你那个地址即可）——
+详见下面「最省事的用法」。想让**不同网络**的朋友也能进来，用 `npm run expose` 打一条隧道，见「公网部署」。
+
+---
+
 ## 功能
 
 ### 绘画
