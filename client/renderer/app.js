@@ -919,17 +919,23 @@
         for (var i = 0; i < w; i++) {
           var px = minx + i, py = miny + j;
           var v2x = px - A[0], v2y = py - A[1];
-          var u = ((v2x * v1y - v1x * v2y) / den);
-          var vv = ((v0x * v2y - v2x * v0y) / den);
-          var ww = 1 - u - vv;
+          // ⚠️ 变量名和顶点对不上，别按字面理解：
+          //   cross((p-A), v1) 得到的是 **B 的权重**，cross(v0, (p-A)) 得到的是 **C 的权重**，
+          //   1 减掉它们才是 **A 的权重**。
+          // 之前直接把 `u` 当成 A 的权重去乘纯色相，结果整块三角被转了一圈 ——
+          // 纯色相跑到右下角、顶部成了黑色，于是「在色轮上点哪儿，小圆圈都不在那儿」。
+          var wB = ((v2x * v1y - v2y * v1x) / den);
+          var wC = ((v0x * v2y - v2x * v0y) / den);
+          var wA = 1 - wB - wC;
           var o = (j * w + i) * 4;
-          if (u < -0.004 || vv < -0.004 || ww < -0.004) { d[o + 3] = 0; continue; }
-          u = clamp(u, 0, 1); vv = clamp(vv, 0, 1); ww = clamp(ww, 0, 1);
-          var sum = u + vv + ww || 1;
-          u /= sum; vv /= sum; ww /= sum;
-          d[o] = Math.round(u * hue[0] + vv * 255 + ww * 0);
-          d[o + 1] = Math.round(u * hue[1] + vv * 255 + ww * 0);
-          d[o + 2] = Math.round(u * hue[2] + vv * 255 + ww * 0);
+          if (wA < -0.004 || wB < -0.004 || wC < -0.004) { d[o + 3] = 0; continue; }
+          wA = clamp(wA, 0, 1); wB = clamp(wB, 0, 1); wC = clamp(wC, 0, 1);
+          var sum = wA + wB + wC || 1;
+          wA /= sum; wB /= sum; wC /= sum;
+          // A = 纯色相（上）· B = 白（右下）· C = 黑（左下）
+          d[o] = Math.round(wA * hue[0] + wB * 255 + wC * 0);
+          d[o + 1] = Math.round(wA * hue[1] + wB * 255 + wC * 0);
+          d[o + 2] = Math.round(wA * hue[2] + wB * 255 + wC * 0);
           d[o + 3] = 255;
         }
       }
@@ -953,9 +959,20 @@
     ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.lineWidth = 1; ctx.stroke();
 
     // SV 指示器
+    //
+    // 三角形的三个顶点分别是 A=纯色相、B=白、C=黑，所以点的重心坐标应该是
+    //     [A 的权重, B 的权重, C 的权重] = [v*s, v*(1-s), 1-v]
+    // 推法：颜色 = a*hue + b*255 + c*0，取 max/min 得 V = a+b、S = 1 - b/(a+b)，
+    // 于是 c = 1-V、b = V(1-S)、a = V*S。
+    //
+    // 这里以前写的是 [1-s, s*(1-v), s*v] —— 权重和确实也是 1，但对应关系是错的：
+    // 比如 s=1,v=1（纯色相）会算成 [0,0,1] 直接落到黑角上，
+    // 而且 s=0,v=1 时算出 [1,1,0] 权重和是 2，点会跑到三角形外面去。
+    // 用户看到的「在色轮上取色时位置识别不对」就是这个。
     var s = S.sv.s, v = S.sv.v;
-    var sx = u_weight(A, B, C, [1 - s, s * (1 - v), s * v])[0];
-    var sy = u_weight(A, B, C, [1 - s, s * (1 - v), s * v])[1];
+    var sw = [v * s, v * (1 - s), 1 - v];
+    var sx = u_weight(A, B, C, sw)[0];
+    var sy = u_weight(A, B, C, sw)[1];
     ctx.beginPath();
     ctx.arc(sx, sy, 5, 0, Math.PI * 2);
     ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
@@ -996,11 +1013,22 @@
       drawWheel();
     }
     cv.addEventListener('pointerdown', function (e) {
+      // 数位笔 / 触摸拖色轮时，浏览器默认会把它当成「滚动手势」，
+      // 结果整条左侧面板跟着一起滑 —— 必须两个一起做才压得住：
+      //   · CSS 里给 canvas 设 touch-action: none
+      //   · 事件里 preventDefault（并阻止后续的兼容鼠标事件）
+      e.preventDefault();
       drag = true;
-      cv.setPointerCapture(e.pointerId);
+      // 合成事件（脚本发出的）没有真实指针，setPointerCapture 会抛异常。
+      // 以前没包 try，一抛就把整个 pointerdown 处理器打断，连 pick(e) 都执行不到。
+      try { cv.setPointerCapture(e.pointerId); } catch (err) { /* 没有真实指针就算了 */ }
       pick(e);
     });
-    cv.addEventListener('pointermove', function (e) { if (drag) pick(e); });
+    cv.addEventListener('pointermove', function (e) {
+      if (!drag) return;
+      e.preventDefault();
+      pick(e);
+    });
     cv.addEventListener('pointerup', function () { drag = false; });
     cv.addEventListener('pointercancel', function () { drag = false; });
   }
@@ -1029,7 +1057,11 @@
     try { $('#colorInput').value = hex; } catch (e) { /* ignore */ }
     var rg = global.CanvasEngine.hexToRgb(hex);
     var hsv = rgbToHsv(rg.r, rg.g, rg.b);
-    S.hue = hsv.h;
+    // 灰阶颜色（黑 / 白 / 灰）算不出色相，rgbToHsv 会回 0。
+    // 这时候**保留原来的色相**，否则在色轮上拖色相环会「没有任何反应」：
+    // 环上选色 → applyHsv 用当前 S/V 合成 → 若当前 S=0 合成出来还是灰 →
+    // setColor 又把 hue 打回 0 —— 用户看到的就是「点环没用 / 位置识别不对」。
+    if (hsv.s > 0.0001) S.hue = hsv.h;
     S.sv = { s: hsv.s, v: hsv.v };
     if (remember !== false) pushRecent(hex);
   }

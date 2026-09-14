@@ -395,7 +395,17 @@ input[type=range]::-webkit-slider-thumb {
 /* ============================== 色轮 / 调色板 ============================== */
 
 .wheel-wrap { display: grid; place-items: center; margin-bottom: 7px; }
-#colorWheel { width: 168px; height: 168px; cursor: crosshair; }
+#colorWheel {
+  width: 168px; height: 168px;
+  cursor: crosshair;
+  /* 数位笔 / 触摸在色轮上拖动时，不要把整条左侧面板也带着滚起来。
+     touch-action: none 关掉浏览器的默认手势，再配 app.js 里的 preventDefault 才彻底。 */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
+  overscroll-behavior: contain;
+}
 
 .color-current { display: flex; gap: 8px; margin-bottom: 7px; }
 .swatch-lg {
