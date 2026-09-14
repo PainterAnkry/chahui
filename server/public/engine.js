@@ -968,6 +968,7 @@
       // 导入的 PS / CSP 笔刷：笔尖位图 + 落点间隔
       spacing: br.spacing,
       tip: br.tip,
+      mix: br.mix,
       seed: br.seed || P.newSeed(),
       points: [],
       ts: info.ts || Date.now(),
@@ -1158,7 +1159,37 @@
       lock.ctx.globalCompositeOperation = 'source-over';
       src = lock.canvas;
     }
+
+    // 混色（SAI2 水彩笔那种「和下面的颜色融在一起」的手感）
+    //
+    // 先把**落笔之前**的图层像素留一份快照，画完再把这份快照按笔迹覆盖面、
+    // 以 mix 的强度盖回去。设下层色 U、笔迹色 C：
+    //   正常画完 → P = C
+    //   把 U 以 alpha=m 盖上去 → R = (1-m)·C + m·U
+    // 正好就是「按 m 把笔迹色和底色混合」。三次 canvas 合成搞定，没有逐像素 JS；
+    // 快照取自落笔前，所以两端算出来完全一致。
+    var mixSnap = null;
+    if (stroke.mix > 0 && !isEraser(stroke) && !isSelectTool(stroke) && !isBlur(stroke) && !isSmudge(stroke)) {
+      mixSnap = this.takeScratch();
+      clearCtx(mixSnap.ctx, this.width, this.height);
+      mixSnap.ctx.drawImage(ctx.canvas, 0, 0);
+      mixSnap.ctx.globalCompositeOperation = 'destination-in';
+      mixSnap.ctx.drawImage(src, 0, 0);          // 只有笔迹覆盖到的地方才需要混
+      mixSnap.ctx.globalCompositeOperation = 'source-over';
+    }
+
     paintOnto(ctx, stroke, src, 1, true);
+
+    if (mixSnap) {
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalAlpha = clamp(stroke.mix, 0, 1);
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.filter = 'none';
+      ctx.drawImage(mixSnap.canvas, 0, 0);
+      ctx.restore();
+      this.releaseScratch(mixSnap.canvas);
+    }
 
     if (stroke.edge > 0 && !isEraser(stroke)) {
       var rim = this.buildRim(stroke);

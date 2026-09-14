@@ -63,6 +63,10 @@
     toolPrefs: null,          // { order: [id], hidden: [id] }
     toolEdit: false,
     imported: [],             // 导入的笔刷（PS .abr / CSP .sut），存 localStorage
+    antsOn: true,             // 是否显示选区蚂蚁线（菜单里可勾）
+    leftPanelOpen: true,      // 左侧整列面板是否显示
+    gridOn: false,
+    uiScale: 1,
     importPending: null,      // 导入对话框里待确认的笔刷
     stickers: [],             // 自定义表情（dataURL）
     stickerManaging: false,
@@ -1804,7 +1808,8 @@
       // 这里是**第二道白名单**（第一道是 engine.newStroke / 服务端 buildStroke），
       // 三道里漏掉任何一道，笔尖就传不到别的客户端，别人看到的会是一支圆头笔。
       spacing: b.spacing,
-      tip: b.tip
+      tip: b.tip,
+      mix: b.mix
     };
     if (extra) Object.assign(base, extra);
     return base;
@@ -4252,6 +4257,159 @@
     return base && S.room ? base + '/?room=' + S.room.id : (S.room ? S.room.id : '');
   }
 
+  /* ================================================================
+   * 菜单栏里那些「茶绘原本没有入口」的动作。
+   * 能复用已有函数的一律复用；确实没有的功能在 menu.js 里就置灰了，不会走到这里。
+   * ================================================================ */
+
+  function quitApp() {
+    if (global.chahuDesktop && global.chahuDesktop.isDesktop) {
+      // 桌面端：让主进程关窗口
+      window.close();
+      return;
+    }
+    toast('网页版直接关掉标签页就行');
+  }
+
+  /* ---------------- 编辑：剪贴板 ---------------- */
+
+  /** 把选区内的画面拷到系统剪贴板（没有选区就整幅） */
+  async function copySelection() {
+    if (!S.joined) { toast('先进入一个房间', 'err'); return; }
+    if (engine.transform) { toast('先按 Enter 确定当前的变换'); return; }
+    var src = engine.renderDocument({});
+    var bb = engine.hasSelection() ? engine.selectionBBox() : null;
+    if (!bb) bb = { x: 0, y: 0, w: engine.width, h: engine.height };
+    var out = document.createElement('canvas');
+    out.width = Math.max(1, Math.round(bb.w));
+    out.height = Math.max(1, Math.round(bb.h));
+    out.getContext('2d').drawImage(src.canvas, -Math.round(bb.x), -Math.round(bb.y));
+    S.clip = { png: out.toDataURL('image/png'), w: out.width, h: out.height };
+    try {
+      if (navigator.clipboard && global.ClipboardItem) {
+        var blob = await new Promise(function (r) { out.toBlob(r, 'image/png'); });
+        await navigator.clipboard.write([new global.ClipboardItem({ 'image/png': blob })]);
+        toast('已拷贝 ' + out.width + ' × ' + out.height + ' 到剪贴板', 'ok');
+        return;
+      }
+    } catch (e) { /* 没权限就算了，S.clip 里还留着一份 */ }
+    toast('已拷贝 ' + out.width + ' × ' + out.height + '（茶绘内部剪贴板）', 'ok');
+  }
+
+  /* ---------------- 图层 ---------------- */
+
+  function dupLayer() { layerDup(); }
+  function delLayer() { layerDel(); }
+  function moveLayerTo(dir) {
+    // 图层面板上「上移」= 往数组后面走
+    layerMove(dir);
+  }
+  function mergeDown() { layerMerge(); }
+  function mergeVisible() { layerFlatten(); }
+
+  /* ---------------- 图像 ---------------- */
+
+  function setBackground(what) {
+    if (!S.joined) { toast('先进入一个房间', 'err'); return; }
+    var color = what === 'transparent' ? null : what;
+    engine.background = color;
+    S.bg = what;
+    try { localStorage.setItem('chahu.bg', what); } catch (e) { /* ignore */ }
+    engine.invalidate();
+    toast('画布背景：' + (what === 'transparent' ? '透明' : what));
+  }
+
+  /* ---------------- 选择 ---------------- */
+
+  function toggleMarchingAnts() {
+    S.antsOn = S.antsOn === false;
+    engine.selectionAnimate(S.antsOn);
+    engine.drawOverlay();
+    toast(S.antsOn ? '显示选区边缘' : '隐藏选区边缘');
+  }
+
+  /** 把选区往外 / 往里推 n 像素（用现有蒙版做一次形态学近似） */
+  function growSelection(n) { return shrinkGrow(Math.abs(n)); }
+  function shrinkSelection(n) { return shrinkGrow(-Math.abs(n)); }
+
+  function shrinkGrow(px) {
+    if (!engine.hasSelection()) { toast('先用选区工具圈一块', 'err'); return; }
+    var s = engine.ensureSelection();
+    var tmp = document.createElement('canvas');
+    tmp.width = engine.width; tmp.height = engine.height;
+    var tc = tmp.getContext('2d');
+    // 用多次 1px 的描边/擦除近似膨胀与腐蚀（够用，且两端跑出来一样）
+    tc.drawImage(s.canvas, 0, 0);
+    for (var i = 0; i < Math.abs(px); i++) {
+      var one = document.createElement('canvas');
+      one.width = engine.width; one.height = engine.height;
+      var oc = one.getContext('2d');
+      oc.drawImage(tmp, 0, 0);
+      tc.globalCompositeOperation = px > 0 ? 'source-over' : 'destination-out';
+      // 八个方向各画一次，等效于 3×3 的膨胀/腐蚀核
+      var dirs = [[-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [1, -1], [-1, 1], [1, 1]];
+      var off = document.createElement('canvas');
+      off.width = engine.width; off.height = engine.height;
+      var ofc = off.getContext('2d');
+      ofc.drawImage(one, 0, 0);
+      for (var d = 0; d < dirs.length; d++) tc.drawImage(off, dirs[d][0], dirs[d][1]);
+      tc.globalCompositeOperation = 'source-over';
+    }
+    beginSelSnapshot();
+    var sc = s.ctx;
+    sc.save();
+    sc.setTransform(1, 0, 0, 1, 0, 0);
+    sc.globalCompositeOperation = 'copy';
+    sc.drawImage(tmp, 0, 0);
+    sc.globalCompositeOperation = 'source-over';
+    sc.restore();
+    s.active = true;
+    engine.refreshSelectionTint();
+    if (!s.bbox) s.active = false;
+    commitSelSnapshot();
+    toast(px > 0 ? '选区已向外扩展 ' + px + ' 像素' : '选区已向内收缩 ' + Math.abs(px) + ' 像素');
+  }
+
+  /* ---------------- 窗口 ---------------- */
+
+  function setUiScale(f) {
+    S.uiScale = f;
+    document.documentElement.style.setProperty('--ui-scale', String(f));
+    try { localStorage.setItem('chahu.uiscale', String(f)); } catch (e) { /* ignore */ }
+    var l = document.querySelector('#leftPanelScroll');
+    if (l) l.style.zoom = f === 1 ? '' : String(f);
+    engine.resize();
+    toast('界面缩放：' + Math.round(f * 100) + '%');
+  }
+
+  function setCursorMode(mode) {
+    S.cursorStyle = mode === 'dot' ? 'cross' : (mode === 'ring' ? 'ring' : 'auto');
+    try { localStorage.setItem('chahu.cursor', S.cursorStyle); } catch (e) { /* ignore */ }
+    updateBrushCursor();
+    toast('画笔光标：' + (S.cursorStyle === 'ring' ? '大小圆形' : S.cursorStyle === 'cross' ? '圆点' : '智能'));
+  }
+
+  function toggleLeftPanel() {
+    var el = document.querySelector('aside.panel.left');
+    if (!el) return;
+    var hidden = el.classList.toggle('hidden');
+    S.leftPanelOpen = !hidden;
+    engine.resize();
+    toast(hidden ? '已隐藏全部操作面板' : '已显示全部操作面板');
+  }
+
+  function toggleFullscreen() {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(function () { });
+    } else if (document.documentElement.requestFullscreen) {
+      document.documentElement.requestFullscreen().catch(function () { toast('浏览器不允许全屏', 'err'); });
+    }
+  }
+
+  function openSettings() {
+    global.ChaMenu.openKeyDialog();
+  }
+
   global.ChaApp = {
     engine: engine, net: net, state: S, undo: undo, redo: redo, toast: toast,
     // 笔刷导入（给测试用，也让控制台里能手动导一支试试）
@@ -4279,6 +4437,17 @@
     toggleNav: toggleNav, toggleSide: toggleSide, toggleSection: toggleSection, resetPanels: resetPanels,
     showRoomInfo: showRoomInfo, showStatus: showStatus,
     clearHistory: clearHistory, cycleCursor: cycleCursor,
-    setTool: setTool
+    setTool: setTool,
+
+    /* ---- 照 SAI2 菜单结构补齐的动作 ---- */
+    quitApp: quitApp,
+    copySelection: copySelection,
+    dupLayer: dupLayer, delLayer: delLayer, mergeDown: mergeDown, mergeVisible: mergeVisible,
+    setBackground: setBackground,
+    toggleMarchingAnts: toggleMarchingAnts,
+    growSelection: growSelection, shrinkSelection: shrinkSelection,
+    setUiScale: setUiScale, setCursorMode: setCursorMode,
+    toggleLeftPanel: toggleLeftPanel, toggleFullscreen: toggleFullscreen,
+    openSettings: openSettings
   };
 })(window);

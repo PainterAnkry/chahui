@@ -82,9 +82,11 @@
       // 笔压→大小 + 笔压→浓度都开、画材效果关（无颗粒 / 无散布）。
       // 以前这里是 hardness 0.95 + grain 0.22 + paper fine + scatter 0.04，
       // 结果铅笔被「散布」分支整笔拆成了点，又被 0.4px 的强制模糊磨软，完全不像铅笔。
+      // 纸纹要开：SAI2 的铅笔是有颗粒的，纯硬边反而像「画笔」。
+      // 但散布必须留 0 —— 散布会把整笔拆成一串点（这个坑踩过）。
       params: params({
         brush: 'pencil', size: 2, opacity: 1, hardness: 1, minSize: 0.3,
-        pressSize: 1, pressOpacity: 0.6, grain: 0, grainScale: 1, paper: 'none', scatter: 0
+        pressSize: 1, pressOpacity: 0.6, grain: 0.34, grainScale: 1.15, paper: 'fine', scatter: 0
       })
     },
     {
@@ -164,9 +166,10 @@
     {
       id: 'watercolor', name: '水彩笔', tool: 'brush', icon: 'watercolor', type: 'brush',
       tip: '柔边 + 水彩边缘，会积水',
+      // mix 就是「和下面的颜色融在一起」的强度 —— 水彩笔最关键的一项。
       params: params({
         brush: 'watercolor', size: 24, opacity: 0.42, hardness: 0.26, minSize: 0.5,
-        pressSize: 0.7, pressOpacity: 0.6, edge: 0.8, fx: 'waterdrop'
+        pressSize: 0.7, pressOpacity: 0.6, edge: 0.8, fx: 'waterdrop', mix: 0.5
       })
     },
     {

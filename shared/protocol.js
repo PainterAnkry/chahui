@@ -185,6 +185,7 @@
     tolerance: 32,     // 油漆桶色差范围
     expand: 0,         // 油漆桶扩大像素
     spacing: 0.1,      // 笔尖位图的落点间隔（占直径的比例），导入的 PS/CSP 笔刷用
+    mix: 0,            // 混色：笔迹与「下面的颜色」融合的程度（SAI2 水彩笔的核心手感）
     tip: ''            // 笔尖位图（打包成 32x32x4:base64 的 4 位灰度小图）
   };
 
@@ -237,6 +238,7 @@
     out.brush = typeof src.brush === 'string' ? src.brush.slice(0, 24) : '';
     out.filled = !!src.filled;
     out.spacing = clampNum(src.spacing, BRUSH_DEFAULTS.spacing, 0.02, 1);
+    out.mix = clampNum(src.mix, BRUSH_DEFAULTS.mix, 0, 1);
     out.tip = normalizeTip(src.tip);
     out.seed = Math.floor(clampNum(src.seed, 0, 0, 2147483646));
     return out;

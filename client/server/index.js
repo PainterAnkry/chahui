@@ -208,6 +208,7 @@ function buildStroke(msg, member, layer) {
     // 别人的屏幕上这支笔会变回圆头，两端就对不上了
     spacing: br.spacing,
     tip: br.tip,
+    mix: br.mix,
     seed: br.seed || P.newSeed(),
     points: [],
     ts: Date.now()
