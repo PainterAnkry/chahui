@@ -71,6 +71,39 @@ function ok(name, cond, extra) {
   ok('灰色像素不会被色相染上颜色', math.gray[0] === math.gray[1] && math.gray[1] === math.gray[2], JSON.stringify(math.gray));
   ok('alpha 不受影响', math.alpha === 77, String(math.alpha));
 
+  console.log('\n=== 色阶数学 ===');
+  const lv = await page.evaluate(() => {
+    const F = window.ChaFilters;
+    function one(v, o) {
+      const c = document.createElement('canvas'); c.width = c.height = 1;
+      const cx = c.getContext('2d');
+      const img = cx.createImageData(1, 1);
+      img.data[0] = img.data[1] = img.data[2] = v; img.data[3] = 200;
+      F.applyLevels(img, o);
+      return [img.data[0], img.data[3]];
+    }
+    return {
+      ident: one(128, { inBlack: 0, inWhite: 255, gamma: 1, outBlack: 0, outWhite: 255 }),
+      clipLow: one(50, { inBlack: 100, inWhite: 200, gamma: 1 }),
+      clipHigh: one(230, { inBlack: 100, inWhite: 200, gamma: 1 }),
+      mid: one(150, { inBlack: 100, inWhite: 200, gamma: 1 }),
+      gammaUp: one(128, { gamma: 2 }),
+      gammaDown: one(128, { gamma: 0.5 }),
+      outRange: one(255, { outBlack: 30, outWhite: 200 }),
+      outLow: one(0, { outBlack: 30, outWhite: 200 })
+    };
+  });
+  console.log('  ' + JSON.stringify(lv));
+  ok('色阶：全默认是恒等变换', lv.ident[0] === 128, JSON.stringify(lv.ident));
+  ok('色阶：低于输入黑场的被压到 0', lv.clipLow[0] === 0, String(lv.clipLow[0]));
+  ok('色阶：高于输入白场的被提到 255', lv.clipHigh[0] === 255, String(lv.clipHigh[0]));
+  ok('色阶：输入黑/白场之间的线性映射正确（中点 128）', Math.abs(lv.mid[0] - 128) <= 1, String(lv.mid[0]));
+  ok('色阶：gamma > 1 变亮', lv.gammaUp[0] > 128, String(lv.gammaUp[0]));
+  ok('色阶：gamma < 1 变暗', lv.gammaDown[0] < 128, String(lv.gammaDown[0]));
+  ok('色阶：输出范围上限生效', lv.outRange[0] === 200, String(lv.outRange[0]));
+  ok('色阶：输出范围下限生效', lv.outLow[0] === 30, String(lv.outLow[0]));
+  ok('色阶：alpha 不动', lv.ident[1] === 200 && lv.gammaUp[1] === 200, String(lv.ident[1]));
+
   console.log('\n=== 对话框与预览 ===');
   // 造两层：底层红、上层蓝
   await page.evaluate(() => {

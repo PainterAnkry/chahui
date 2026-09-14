@@ -225,7 +225,7 @@
           mnemonic: 'A', sub: [
             sub('filter', 'filter.tone.hs', '色相 / 饱和度…', { run: function () { A().openToneDialog(); } }),
             sub('filter', 'filter.tone.bc', '亮度 / 对比度…', { run: function () { A().openToneDialog(); } }),
-            { label: '色阶（暂未实现）', disabled: true }
+            sub('filter', 'filter.tone.levels', '色阶…', { run: function () { A().openLevelsDialog(); } })
           ]
         }),
         SEP,
@@ -233,6 +233,7 @@
           mnemonic: 'B', sub: [
             sub('filter', 'filter.blurTool', '模糊工具', { key: 'U', run: function () { A().setTool('blur'); } }),
             sub('filter', 'filter.smudgeTool', '涂抹工具', { key: 'S', run: function () { A().setTool('smudge'); } }),
+            sub('filter', 'filter.liquify', '液化…', { run: function () { A().setTool('liquify'); } }),
             { label: '高斯模糊（暂未实现）', disabled: true }
           ]
         }),
@@ -461,6 +462,7 @@
       b.onmouseenter = function () {
         subBox.classList.remove('hidden');
         b.classList.add('active');
+        placeSub(subBox, wrap);
       };
       wrap.onmouseleave = function () {
         subBox.classList.add('hidden');
@@ -477,6 +479,25 @@
     }
     void inSub;
     return b;
+  }
+
+  /**
+   * 子菜单定位：默认往右下方展开，但**碰到窗口下边缘就改成向上弹**，
+   * 碰到右边缘就往左移回来。以前是纯 CSS 定位，靠底部的「色阶」这类
+   * 最后几项的子菜单会掉到屏幕外，根本点不到。
+   */
+  function placeSub(subBox, wrap) {
+    subBox.classList.remove('up', 'flip-x');
+    subBox.style.left = '';
+    subBox.style.right = '';
+    var r = subBox.getBoundingClientRect();
+    var vh = window.innerHeight || document.documentElement.clientHeight;
+    var vw = window.innerWidth || document.documentElement.clientWidth;
+    if (r.bottom > vh - 4) subBox.classList.add('up');
+    // 重新量一次（加了 up 之后高度不变，但左边界可能变）
+    r = subBox.getBoundingClientRect();
+    if (r.right > vw - 4) subBox.classList.add('flip-x');
+    void wrap;
   }
 
   function buildMenuBar() {

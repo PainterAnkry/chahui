@@ -138,7 +138,8 @@
     'line', 'rect', 'ellipse', 'picker',
     // 文字：作为一种笔迹走既有通道（同步 / 撤销 / 回放都是现成的）
     // 漏了这一行，newStroke 会把 tool 归一化成 brush，文字就画不出来了
-    'text'
+    'text',
+    'liquify'
   ];
 
   // 图层 / 画笔混合模式（画布端映射见 engine.js 的 BLEND_OPS）

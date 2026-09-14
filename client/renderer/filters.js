@@ -106,7 +106,72 @@
     return out;
   }
 
+  /* ============================================================ 色阶 */
+
+  var LEVELS_DEFAULTS = { inBlack: 0, inWhite: 255, gamma: 1, outBlack: 0, outWhite: 255 };
+
+  function isLevelsIdentity(o) {
+    return !o || (o.inBlack === 0 && o.inWhite === 255 && Math.abs(o.gamma - 1) < 1e-6 &&
+      o.outBlack === 0 && o.outWhite === 255);
+  }
+
+  /**
+   * 色阶：输入黑场 / 白场 / 中间调 gamma + 输出黑场 / 白场。
+   *   1) 把 [inBlack, inWhite] 拉成 [0,1]（夹住两端）
+   *   2) 按 gamma 做中间调幂函数（gamma > 1 变亮，< 1 变暗 —— 和高斯那套一致）
+   *   3) 映射到 [outBlack, outWhite]
+   * 逐像素、alpha 不动。
+   */
+  function applyLevels(img, o) {
+    o = Object.assign({}, LEVELS_DEFAULTS, o || {});
+    if (isLevelsIdentity(o)) return img;
+    var inB = clamp255(o.inBlack), inW = clamp255(o.inWhite);
+    if (inW <= inB) inW = inB + 1;                       // 防止除零
+    var outB = clamp255(o.outBlack), outW = clamp255(o.outWhite);
+    var gamma = Math.max(0.1, Math.min(9.99, o.gamma || 1));
+    var invG = 1 / gamma;
+
+    // 查表：0..255 一次算好，逐像素只查表，快很多
+    var lut = new Uint8ClampedArray(256);
+    var span = inW - inB;
+    var outSpan = outW - outB;
+    for (var v = 0; v < 256; v++) {
+      var t = (v - inB) / span;
+      if (t < 0) t = 0; else if (t > 1) t = 1;
+      if (Math.abs(invG - 1) > 1e-9) t = Math.pow(t, invG);
+      lut[v] = clamp255(outB + t * outSpan);
+    }
+    var d = img.data;
+    for (var i = 0; i < d.length; i += 4) {
+      d[i] = lut[d[i]];
+      d[i + 1] = lut[d[i + 1]];
+      d[i + 2] = lut[d[i + 2]];
+    }
+    return img;
+  }
+
+  function levelsCanvas(src, o, rect) {
+    var W = src.width, H = src.height;
+    var x = rect ? Math.max(0, Math.floor(rect.x)) : 0;
+    var y = rect ? Math.max(0, Math.floor(rect.y)) : 0;
+    var w = rect ? Math.min(W - x, Math.ceil(rect.w)) : W;
+    var h = rect ? Math.min(H - y, Math.ceil(rect.h)) : H;
+    var out = document.createElement('canvas');
+    out.width = W; out.height = H;
+    var oc = out.getContext('2d');
+    oc.drawImage(src, 0, 0);
+    if (w <= 0 || h <= 0 || isLevelsIdentity(o)) return out;
+    var img = oc.getImageData(x, y, w, h);
+    applyLevels(img, o);
+    oc.putImageData(img, x, y);
+    return out;
+  }
+
   global.ChaFilters = {
+    LEVELS_DEFAULTS: LEVELS_DEFAULTS,
+    isLevelsIdentity: isLevelsIdentity,
+    applyLevels: applyLevels,
+    levelsCanvas: levelsCanvas,
     DEFAULTS: DEFAULTS,
     isIdentity: isIdentity,
     applyTone: applyTone,

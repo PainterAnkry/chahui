@@ -38,8 +38,8 @@ function ok(name, cond, extra) {
   const q = await page.evaluate(() => ({
     exists: !!document.querySelector('#quickBar'),
     btns: document.querySelectorAll('#quickBar .qb-btn').length,
-    zoom: document.querySelector('#qbZoomText').textContent,
-    rot: document.querySelector('#qbRotText').textContent
+    zoom: (document.querySelector('#qbZoomText').value || ''),
+    rot: (document.querySelector('#qbRotText').value || '')
   }));
   console.log('  ' + JSON.stringify(q));
   ok('画布上沿有快捷条', q.exists && q.btns >= 12, q.btns + ' 个按钮');
@@ -60,14 +60,14 @@ function ok(name, cond, extra) {
   await page.click('#qbRotR'); await sleep(400);
   ok('旋转真的生效', Math.abs(await page.evaluate(() => window.ChaApp.engine.rot)) > 1e-6);
   ok('旋转数字跟着视图走（不是死的 0.0°）',
-    (await page.evaluate(() => document.querySelector('#qbRotText').textContent)) === '15.0°',
-    await page.evaluate(() => document.querySelector('#qbRotText').textContent));
+    (await page.evaluate(() => (document.querySelector('#qbRotText').value || ''))) === '15.0°',
+    await page.evaluate(() => (document.querySelector('#qbRotText').value || '')));
   await page.click('#qbRotReset'); await sleep(300);
   ok('角度归零可用', Math.abs(await page.evaluate(() => window.ChaApp.engine.rot)) < 1e-6);
   await page.evaluate(() => window.ChaApp.engine.setZoom(0.42)); await sleep(300);
   ok('缩放数字跟随视图变化',
-    (await page.evaluate(() => document.querySelector('#qbZoomText').textContent)) === '42%',
-    await page.evaluate(() => document.querySelector('#qbZoomText').textContent));
+    (await page.evaluate(() => (document.querySelector('#qbZoomText').value || ''))) === '42%',
+    await page.evaluate(() => (document.querySelector('#qbZoomText').value || '')));
   await page.click('#qbSteadierUp'); await sleep(300);
   ok('手抖修正加减可用', Number(await page.evaluate(() => window.ChaApp.state.brush.steadier)) >= 1,
     String(await page.evaluate(() => window.ChaApp.state.brush.steadier)));

@@ -70,6 +70,7 @@
   var RULER_TOOLS = { brush: 1, eraser: 1, blur: 1, smudge: 1 };
 
   function isText(stroke) { return stroke.tool === 'text'; }
+  function isLiquify(stroke) { return stroke.tool === 'liquify'; }
 
   var FONT_STACK = {
     sans: 'system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif',
@@ -516,7 +517,7 @@
   function paintStrokeShape(ctx, stroke, pts, fromIndex, opts) {
     opts = opts || {};
     if (!pts || !pts.length) return;
-    if (isText(stroke)) return;          // 文字不走笔刷栅格化
+    if (isText(stroke) || isLiquify(stroke)) return;   // 文字 / 液化不走笔刷栅格化
     var W = opts.width || ctx.canvas.width;
     var H = opts.height || ctx.canvas.height;
     var st = stroke;
@@ -636,6 +637,23 @@
     release(acc.canvas);
     release(mask.canvas);
   }
+
+  // 给测试/排查用
+  global.__liquifyProbe = function (stroke, srcCanvas) {
+    var f = liquifyField(stroke);
+    if (!f) return { field: null };
+    var max = 0, at = null;
+    for (var i = 0; i < f.dx.length; i++) {
+      var v = Math.abs(f.dx[i]);
+      if (v > max) { max = v; at = [f.x0 + (i % f.w), f.y0 + Math.floor(i / f.w)]; }
+    }
+    var out = liquifyResample(srcCanvas, f, srcCanvas.width, srcCanvas.height);
+    var a = srcCanvas.getContext('2d').getImageData(0, 0, srcCanvas.width, srcCanvas.height).data;
+    var b = out.canvas.getContext('2d').getImageData(0, 0, srcCanvas.width, srcCanvas.height).data;
+    var diff = 0;
+    for (var k = 0; k < a.length; k += 4) if (a[k] !== b[k] || a[k + 3] !== b[k + 3]) diff++;
+    return { box: [f.x0, f.y0, f.w, f.h], maxDx: max, at: at, diffAfterResample: diff };
+  };
 
   function clearCtx(ctx, w, h) {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -1037,6 +1055,14 @@
     var stroke = this.newStroke(info);
     var layer = this.getLayer(stroke.layerId);
     if (!layer) return null;
+    // 液化要一份「落笔那一刻」的像素：结果是 (快照, 笔迹点) 的纯函数。
+    // 注意必须挂在 **stroke** 上 —— newStroke 返回的是新对象，
+    // 挂在传进来的 info 上会被丢掉（和白名单漏字段是同一种坑）。
+    if (isLiquify(stroke)) {
+      var fc = mkCanvas(this.width, this.height, false);
+      fc.ctx.drawImage(layer.canvas, 0, 0);
+      stroke._frozen = fc.canvas;
+    }
     var sc = this.takeScratch();
     var entry = { stroke: stroke, layer: layer, scratch: sc.canvas, sctx: sc.ctx, local: !!info.local };
     clearCtx(entry.sctx, this.width, this.height);
@@ -1212,6 +1238,12 @@
 
   /** 把「覆盖率蒙版」按笔刷属性叠加进目标（含保护不透明度、水彩边缘） */
   CanvasEngine.prototype.stampStroke = function (ctx, layer, stroke, scratchCanvas) {
+    // 液化：按位移场重采样（覆盖受影响的区域），不走覆盖率蒙版
+    if (isLiquify(stroke)) {
+      applyLiquifyTo(ctx, this.width, this.height, ctx.canvas, stroke);
+      return;
+    }
+
     // 文字：直接画进图层，不走覆盖率蒙版那套
     if (isText(stroke)) {
       paintText(ctx, stroke);
@@ -1460,6 +1492,157 @@
   };
 
   /* ---------------- 涂抹 ---------------- */
+
+  /* ================================================================
+   * 液化（小型）
+   *
+   * 做法：落笔那一刻冻结一份图层像素，整笔按「位移场」重新采样。
+   * 每个采样点把自己所在的小圆盘里的像素朝拖动方向推一把，权重按到圆心的
+   * 距离平滑衰减；重采样时按 -位移 取值（等于把内容往前推）。
+   *
+   * 为什么可以跨端一致：结果是 (冻结快照, 笔迹点) 的**纯函数**——
+   * 两端在落笔时的图层像素本来就一样，点也一样，所以算出来一样。
+   * 这也是它敢在实时预览里反复重算的原因。
+   * ================================================================ */
+
+  function liquifyRadius(stroke) {
+    return Math.max(4, (stroke.size || 60) * 0.5);
+  }
+
+  /** 位移场：返回 { x0,y0,w,h, dx, dy }（只在受影响的包围盒里分配） */
+  function liquifyField(stroke) {
+    var pts = stroke.points || [];
+    if (pts.length < 2) return null;
+    var rad = liquifyRadius(stroke);
+    var strength = clamp(stroke.strength == null ? 0.6 : stroke.strength, 0.05, 1);
+    var maxPush = rad * 0.5;               // 单步最多推这么远，防止一下子撕开
+
+    var minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
+    for (var i = 0; i < pts.length; i++) {
+      minX = Math.min(minX, pts[i][0]); maxX = Math.max(maxX, pts[i][0]);
+      minY = Math.min(minY, pts[i][1]); maxY = Math.max(maxY, pts[i][1]);
+    }
+    // 再往外扩：圆盘半径 + 单步最大位移
+    var pad = rad + maxPush + 2;
+    var x0 = Math.floor(minX - pad), y0 = Math.floor(minY - pad);
+    var x1 = Math.ceil(maxX + pad), y1 = Math.ceil(maxY + pad);
+    var w = x1 - x0, h = y1 - y0;
+    if (w <= 0 || h <= 0 || w * h > 40000000) return null;
+
+    var dx = new Float32Array(w * h);
+    var dy = new Float32Array(w * h);
+    for (var k = 1; k < pts.length; k++) {
+      var ax = pts[k - 1][0], ay = pts[k - 1][1];
+      var bx = pts[k][0], by = pts[k][1];
+      var mx = bx - ax, my = by - ay;
+      var mlen = Math.hypot(mx, my);
+      if (mlen < 1e-6) continue;
+      // 一步推的位移就是这一步的移动量（乘强度），再夹到上限
+      var pushX = mx * strength, pushY = my * strength;
+      var plen = Math.hypot(pushX, pushY);
+      if (plen > maxPush) { pushX = pushX / plen * maxPush; pushY = pushY / plen * maxPush; }
+      var px0 = Math.max(0, Math.floor(bx - rad - x0));
+      var py0 = Math.max(0, Math.floor(by - rad - y0));
+      var px1 = Math.min(w - 1, Math.ceil(bx + rad - x0));
+      var py1 = Math.min(h - 1, Math.ceil(by + rad - y0));
+      for (var yy = py0; yy <= py1; yy++) {
+        for (var xx = px0; xx <= px1; xx++) {
+          var wx = x0 + xx, wy = y0 + yy;
+          var d = Math.hypot(wx - bx, wy - by);
+          if (d > rad) continue;
+          // 平滑衰减：圆心 1，边缘 0（用 cos 曲线，比线性更「软」）
+          var t = 1 - d / rad;
+          var wgt = (1 - Math.cos(t * Math.PI)) / 2;
+          var o = yy * w + xx;
+          dx[o] += pushX * wgt;
+          dy[o] += pushY * wgt;
+        }
+      }
+    }
+    return { x0: x0, y0: y0, w: w, h: h, dx: dx, dy: dy };
+  }
+
+  /** 按位移场把 src 重采样到一张新 canvas 上（只有 bbox 被改，其余照抄） */
+  function liquifyResample(srcCanvas, field, W, H) {
+    var out = mkCanvas(W, H, false);
+    out.ctx.drawImage(srcCanvas, 0, 0);
+    if (!field) return out;
+    var x0 = field.x0, y0 = field.y0, w = field.w, h = field.h;
+    var sx = Math.max(0, x0), sy = Math.max(0, y0);
+    var ex = Math.min(W, x0 + w), ey = Math.min(H, y0 + h);
+    var sw = ex - sx, sh = ey - sy;
+    if (sw <= 0 || sh <= 0) return out;
+
+    var srcCtx = srcCanvas.getContext('2d');
+    var sImg = srcCtx.getImageData(sx, sy, sw, sh);
+    var dImg = out.ctx.createImageData(sw, sh);
+    var sd = sImg.data, dd = dImg.data;
+    var dx = field.dx, dy = field.dy;
+
+    // 双线性采样（越界就取最近的边界像素，避免出现黑边）
+    function sample(fx, fy, out2) {
+      if (fx < 0) fx = 0; else if (fx > sw - 1) fx = sw - 1;
+      if (fy < 0) fy = 0; else if (fy > sh - 1) fy = sh - 1;
+      var ix = Math.floor(fx), iy = Math.floor(fy);
+      var tx = fx - ix, ty = fy - iy;
+      var ix1 = Math.min(sw - 1, ix + 1), iy1 = Math.min(sh - 1, iy + 1);
+      var o00 = (iy * sw + ix) * 4, o10 = (iy * sw + ix1) * 4;
+      var o01 = (iy1 * sw + ix) * 4, o11 = (iy1 * sw + ix1) * 4;
+      for (var c = 0; c < 4; c++) {
+        var top = sd[o00 + c] + (sd[o10 + c] - sd[o00 + c]) * tx;
+        var bot = sd[o01 + c] + (sd[o11 + c] - sd[o01 + c]) * tx;
+        out2[c] = top + (bot - top) * ty;
+      }
+    }
+
+    var tmp = [0, 0, 0, 0];
+    for (var y = 0; y < sh; y++) {
+      for (var x = 0; x < sw; x++) {
+        var gx = sx + x, gy = sy + y;
+        var fi = (gy - y0) * w + (gx - x0);
+        var offX = dx[fi], offY = dy[fi];
+        var o = (y * sw + x) * 4;
+        if (offX === 0 && offY === 0) {
+          dd[o] = sd[o]; dd[o + 1] = sd[o + 1]; dd[o + 2] = sd[o + 2]; dd[o + 3] = sd[o + 3];
+          continue;
+        }
+        // 取「来自后方」的像素 → 视觉上内容被推向前方
+        sample(x - offX, y - offY, tmp);
+        dd[o] = tmp[0]; dd[o + 1] = tmp[1]; dd[o + 2] = tmp[2]; dd[o + 3] = tmp[3];
+      }
+    }
+    out.ctx.putImageData(dImg, sx, sy);
+    return out;
+  }
+
+  /** 把液化结果写进 ctx（只覆盖受影响的包围盒，其余保持原样） */
+  function applyLiquifyTo(ctx, W, H, layerCanvas, stroke) {
+    if (stroke.points.length < 2) return;
+    var field = liquifyField(stroke);
+    if (!field) return;
+    var frozen = stroke._frozen || layerCanvas;
+    var disp = liquifyResample(frozen, field, W, H);
+    var pad = 2;
+    var bx = Math.max(0, field.x0 - pad);
+    var by = Math.max(0, field.y0 - pad);
+    var bw = Math.min(W, field.x0 + field.w + pad) - bx;
+    var bh = Math.min(H, field.y0 + field.h + pad) - by;
+    if (bw <= 0 || bh <= 0) return;
+    // 覆盖受影响的包围盒：先原样清掉这一块，再把重采样结果铺上去。
+    // 这里刻意不用 clearCtx —— 它会顺手把变换复位，和 clip 叠在一起容易出岔子；
+    // 直接 clearRect 精确清这一块更直白。
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.filter = 'none';
+    ctx.clearRect(bx, by, bw, bh);
+    ctx.beginPath();
+    ctx.rect(bx, by, bw, bh);
+    ctx.clip();
+    ctx.drawImage(disp.canvas, 0, 0);   // mkCanvas 返回 { canvas, ctx }，不是 canvas 本身
+    ctx.restore();
+  }
 
   CanvasEngine.prototype.applySmudge = function (layer, stroke, sctx) {
     if (stroke.points.length < 2) return;
@@ -2048,7 +2231,7 @@
     this.pending.forEach(function (e) {
       if (e.layer !== layer) return;
       var s = e.stroke;
-      if (isText(s)) { self.stampStroke(tmpCtx, layer, s, e.scratch); return; }
+      if (isText(s) || isLiquify(s)) { self.stampStroke(tmpCtx, layer, s, e.scratch); return; }
       if (isShape(s) || isFill(s)) return;   // 形状走 overlay，油漆桶已直接落到图层
       if (isBlur(s)) {
         applyBlurMaskedTo(tmpCtx, tmpCanvas, e.scratch, s, self.width, self.height,

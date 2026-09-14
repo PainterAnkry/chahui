@@ -312,14 +312,14 @@
       </select>
       <span class="qb-sep"></span>
       <span class="qb-label">缩放</span>
-      <span class="qb-num" id="qbZoomText">100%</span>
+      <input class="qb-num qb-input" id="qbZoomText" value="100%" title="可以直接输入百分比，回车生效" />
       <button class="qb-btn" id="qbZoomOut" title="缩小 (-)">−</button>
       <button class="qb-btn" id="qbZoomIn" title="放大 (=)">＋</button>
       <button class="qb-btn" id="qbZoomFit" title="适应窗口 (0)">▣</button>
       <button class="qb-btn" id="qbZoom100" title="实际大小 (1)">1:1</button>
       <span class="qb-sep"></span>
       <span class="qb-label">旋转</span>
-      <span class="qb-num" id="qbRotText">0.0°</span>
+      <input class="qb-num qb-input" id="qbRotText" value="0.0°" title="可以直接输入角度（度），回车生效" />
       <button class="qb-btn" id="qbRotL" title="向左旋转 (,)">↺</button>
       <button class="qb-btn" id="qbRotR" title="向右旋转 (.)">↻</button>
       <button class="qb-btn" id="qbRotReset" title="角度归零">⌂</button>
@@ -722,6 +722,51 @@
         <span class="spacer"></span>
         <button class="btn tiny ghost" id="btnTextZero">取消</button>
         <button class="btn tiny primary" id="btnTextOk">放到画布上</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 色阶 ============ -->
+<div class="modal-mask hidden" id="levelsMask">
+  <div class="modal tone">
+    <div class="modal-head">
+      <h3>色阶</h3>
+      <button class="icon-btn" id="btnLevelsCancel">×</button>
+    </div>
+    <div class="modal-body">
+      <p class="hint" id="levelsNote">—</p>
+      <div class="tone-row">
+        <label>输入黑场</label>
+        <input type="range" id="lvInBlack" min="0" max="254" value="0" />
+        <b id="lvInBlackVal">0</b>
+      </div>
+      <div class="tone-row">
+        <label>中间调</label>
+        <input type="range" id="lvGamma" min="10" max="300" value="100" />
+        <b id="lvGammaVal">1.00</b>
+      </div>
+      <div class="tone-row">
+        <label>输入白场</label>
+        <input type="range" id="lvInWhite" min="1" max="255" value="255" />
+        <b id="lvInWhiteVal">255</b>
+      </div>
+      <div class="tone-row">
+        <label>输出黑场</label>
+        <input type="range" id="lvOutBlack" min="0" max="255" value="0" />
+        <b id="lvOutBlackVal">0</b>
+      </div>
+      <div class="tone-row">
+        <label>输出白场</label>
+        <input type="range" id="lvOutWhite" min="0" max="255" value="255" />
+        <b id="lvOutWhiteVal">255</b>
+      </div>
+      <div class="imp-actions">
+        <button class="btn tiny ghost" id="btnLevelsAuto">自动</button>
+        <button class="btn tiny ghost" id="btnLevelsReset">重置</button>
+        <span class="spacer"></span>
+        <button class="btn tiny ghost" id="btnLevelsZero">取消</button>
+        <button class="btn tiny primary" id="btnLevelsOk">确定</button>
       </div>
     </div>
   </div>

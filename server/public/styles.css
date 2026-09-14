@@ -1180,6 +1180,18 @@ input[type=range]::-webkit-slider-thumb {
   text-align: center;
   color: var(--text);
 }
+/* 缩放 / 旋转的数字可以直接改：回车或失焦生效 */
+.qb-input {
+  width: 56px;
+  height: 22px;
+  padding: 0 4px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+}
+.qb-input:hover { background: #f1f5fa; border-color: #dde3ec; }
+.qb-input:focus { outline: none; background: #fff; border-color: var(--accent); }
 .qb-select {
   font: inherit; font-size: 11.5px;
   height: 22px; border-radius: 5px;
@@ -1310,6 +1322,11 @@ input[type=range]::-webkit-slider-thumb {
 .mrow-label { flex: 1; white-space: nowrap; }
 .mrow-key { flex: none; color: var(--text-dim); font-family: var(--mono); font-size: 11.5px; }
 .menu-sep { height: 1px; margin: 5px 8px; background: #e8ecf2; }
+/* 子菜单：贴着父项右侧展开；越界时由 JS 加 .up / .flip-x 调整 */
+.menu-subwrap { position: relative; }
+.menu-sub { top: -5px; left: 100%; }
+.menu-sub.up { top: auto; bottom: -5px; }
+.menu-sub.flip-x { left: auto; right: 100%; }
 
 /* ---------------- 快捷键设置 ---------------- */
 .modal.keys { width: 560px; max-width: 94vw; }

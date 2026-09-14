@@ -3901,6 +3901,20 @@
     $('#btnTextCancel').addEventListener('click', function () { $('#textMask').classList.add('hidden'); });
     $('#btnTextZero').addEventListener('click', function () { $('#textMask').classList.add('hidden'); });
 
+    // 色阶
+    ['#lvInBlack', '#lvInWhite', '#lvGamma', '#lvOutBlack', '#lvOutWhite'].forEach(function (id) {
+      $(id).addEventListener('input', function () { levelsSyncLabels(); updateTonePreview(); });
+    });
+    $('#btnLevelsAuto').addEventListener('click', levelsAuto);
+    $('#btnLevelsReset').addEventListener('click', function () {
+      $('#lvInBlack').value = 0; $('#lvInWhite').value = 255; $('#lvGamma').value = 100;
+      $('#lvOutBlack').value = 0; $('#lvOutWhite').value = 255;
+      levelsSyncLabels(); updateTonePreview();
+    });
+    $('#btnLevelsOk').addEventListener('click', function () { closeLevelsDialog(true); });
+    $('#btnLevelsCancel').addEventListener('click', function () { closeLevelsDialog(false); });
+    $('#btnLevelsZero').addEventListener('click', function () { closeLevelsDialog(false); });
+
     // 导出
     $('#exportFormat').addEventListener('change', syncExportNote);
     $('#exportQuality').addEventListener('input', function () { $('#exportQualityVal').textContent = this.value; });
@@ -4623,6 +4637,36 @@
     });
     on('#qbRef', function () { pickReferenceImage(); });
 
+    // 缩放 / 旋转可以直接输入：回车或失焦生效
+    function commitZoom() {
+      var raw = String($('#qbZoomText').value).replace(/[^0-9.\-]/g, '');
+      var pct = parseFloat(raw);
+      if (!isFinite(pct) || pct <= 0) { updateQuickBar(); return; }
+      engine.setZoom(Math.max(0.02, Math.min(32, pct / 100)));
+      updateQuickBar();
+    }
+    function commitRot() {
+      var raw = String($('#qbRotText').value).replace(/[^0-9.\-]/g, '');
+      var deg = parseFloat(raw);
+      if (!isFinite(deg)) { updateQuickBar(); return; }
+      // 归一化到 -180..180，免得输入 720 之后数字越来越长
+      deg = ((deg + 180) % 360 + 360) % 360 - 180;
+      engine.setRotation(deg * Math.PI / 180);
+      updateQuickBar();
+    }
+    $('#qbZoomText').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); commitZoom(); this.blur(); }
+      if (e.key === 'Escape') { updateQuickBar(); this.blur(); }
+      e.stopPropagation();                    // 别让画布快捷键抢走输入
+    });
+    $('#qbZoomText').addEventListener('blur', commitZoom);
+    $('#qbRotText').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); commitRot(); this.blur(); }
+      if (e.key === 'Escape') { updateQuickBar(); this.blur(); }
+      e.stopPropagation();
+    });
+    $('#qbRotText').addEventListener('blur', commitRot);
+
     var vm = $('#qbViewMode');
     if (vm) {
       vm.addEventListener('change', function () {
@@ -4642,9 +4686,10 @@
   /** 快捷条上那些数字要跟着视图变 */
   function updateQuickBar() {
     var z = $('#qbZoomText');
-    if (z) z.textContent = Math.round((engine.scale || 1) * 100) + '%';
+    // 正在输入的时候不要覆盖用户敲的字
+    if (z && document.activeElement !== z) z.value = Math.round((engine.scale || 1) * 100) + '%';
     var r = $('#qbRotText');
-    if (r) r.textContent = ((engine.rot || 0) * 180 / Math.PI).toFixed(1) + '°';
+    if (r && document.activeElement !== r) r.value = ((engine.rot || 0) * 180 / Math.PI).toFixed(1) + '°';
     var f = $('#qbFlip');
     if (f) f.classList.toggle('active', !!engine.flipX);
     var vm = $('#qbViewMode');
@@ -4903,12 +4948,99 @@
     $('#toneSatVal').textContent = o.saturation;
   }
 
+  /* ---------------- 色阶 ---------------- */
+
+  function levelsOpts() {
+    return {
+      inBlack: Number($('#lvInBlack').value),
+      inWhite: Number($('#lvInWhite').value),
+      gamma: Number($('#lvGamma').value) / 100,
+      outBlack: Number($('#lvOutBlack').value),
+      outWhite: Number($('#lvOutWhite').value)
+    };
+  }
+
+  function levelsSyncLabels() {
+    var o = levelsOpts();
+    $('#lvInBlackVal').textContent = o.inBlack;
+    $('#lvInWhiteVal').textContent = o.inWhite;
+    $('#lvGammaVal').textContent = o.gamma.toFixed(2);
+    $('#lvOutBlackVal').textContent = o.outBlack;
+    $('#lvOutWhiteVal').textContent = o.outWhite;
+  }
+
+  function openLevelsDialog() {
+    if (!S.joined) { toast('先进入一个房间', 'err'); return; }
+    var layer = engine.activeLayer();
+    if (!layer) return;
+    if (engine.transform) { toast('先按 Enter 确定当前的变换'); return; }
+    if (!layer.baseImage && !layer.strokes.length) { toast('「' + layer.name + '」上还没有内容', 'err'); return; }
+    S.filterMode = 'levels';
+    S.toneLayerId = layer.id;
+    ['#lvInBlack', '#lvInWhite', '#lvOutBlack', '#lvOutWhite'].forEach(function (id, i) {
+      $(id).value = i % 2 === 0 ? 0 : 255;
+    });
+    $('#lvGamma').value = 100;
+    levelsSyncLabels();
+    $('#levelsNote').textContent = '作用于图层「' + layer.name + '」。画布上就是最终效果。';
+    updateTonePreview();
+    $('#levelsMask').classList.remove('hidden');
+  }
+
+  /** 自动色阶：按当前图层的亮度直方图掐掉两头 0.5% */
+  function levelsAuto() {
+    var id = S.toneLayerId || (engine.activeLayer() || {}).id;
+    if (!id) return;
+    var raw = engine.renderLayerRaw(id);
+    var d = raw.getContext('2d').getImageData(0, 0, raw.width, raw.height).data;
+    var hist = new Uint32Array(256);
+    var total = 0;
+    for (var i = 0; i < d.length; i += 4) {
+      if (d[i + 3] < 8) continue;
+      var lum = Math.round(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]);
+      hist[lum]++;
+      total++;
+    }
+    if (!total) { toast('这一层是空的', 'err'); return; }
+    var cut = Math.max(1, Math.floor(total * 0.005));
+    var lo = 0, hi = 255, acc = 0, k;
+    for (k = 0; k < 256; k++) { acc += hist[k]; if (acc >= cut) { lo = k; break; } }
+    acc = 0;
+    for (k = 255; k >= 0; k--) { acc += hist[k]; if (acc >= cut) { hi = k; break; } }
+    if (hi <= lo) hi = Math.min(255, lo + 1);
+    $('#lvInBlack').value = lo;
+    $('#lvInWhite').value = hi;
+    $('#lvGamma').value = 100;
+    levelsSyncLabels();
+    updateTonePreview();
+    toast('自动色阶：输入 ' + lo + ' ~ ' + hi, 'ok');
+  }
+
+  function closeLevelsDialog(apply) {
+    var id = S.toneLayerId;
+    S.toneLayerId = null;
+    engine.layerOverride = null;
+    engine.invalidate();
+    $('#levelsMask').classList.add('hidden');
+    if (!apply || !id) return;
+    var o = levelsOpts();
+    if (global.ChaFilters.isLevelsIdentity(o)) { toast('没有改动'); return; }
+    var filtered = global.ChaFilters.levelsCanvas(engine.renderLayerRaw(id), o);
+    net.send(P.C2S.LAYER_PIXELS, {
+      layerId: id, png: filtered.toDataURL('image/png'), upToSeq: engine.seq, label: '色阶'
+    });
+    pushOp({ type: 'pixels', layerId: id, label: '色阶', before: null, after: null });
+    toast('已应用色阶：输入 ' + o.inBlack + '~' + o.inWhite + '　中间调 ' + o.gamma.toFixed(2) +
+      '　输出 ' + o.outBlack + '~' + o.outWhite, 'ok', 3800);
+  }
+
   function openToneDialog() {
     if (!S.joined) { toast('先进入一个房间', 'err'); return; }
     var layer = engine.activeLayer();
     if (!layer) return;
     if (engine.transform) { toast('先按 Enter 确定当前的变换'); return; }
     if (!layer.baseImage && !layer.strokes.length) { toast('「' + layer.name + '」上还没有内容', 'err'); return; }
+    S.filterMode = 'tone';
     S.toneLayerId = layer.id;
     ['#toneBright', '#toneContrast', '#toneHue', '#toneSat'].forEach(function (id) { $(id).value = 0; });
     toneSyncLabels();
@@ -4922,15 +5054,17 @@
     if (!S.toneLayerId) return;
     var layer = engine.getLayer(S.toneLayerId);
     if (!layer) return;
-    var o = toneOpts();
-    if (global.ChaFilters.isIdentity(o)) {
-      engine.layerOverride = null;
+    var raw = engine.renderLayerRaw(S.toneLayerId);        // 该图层现在的样子（含未提交笔迹）
+    if (S.filterMode === 'levels') {
+      var lo = levelsOpts();
+      engine.layerOverride = global.ChaFilters.isLevelsIdentity(lo)
+        ? null
+        : { layerId: S.toneLayerId, canvas: global.ChaFilters.levelsCanvas(raw, lo) };
     } else {
-      var raw = engine.renderLayerRaw(S.toneLayerId);      // 该图层现在的样子（含未提交笔迹）
-      engine.layerOverride = {
-        layerId: S.toneLayerId,
-        canvas: global.ChaFilters.toneCanvas(raw, o)
-      };
+      var o = toneOpts();
+      engine.layerOverride = global.ChaFilters.isIdentity(o)
+        ? null
+        : { layerId: S.toneLayerId, canvas: global.ChaFilters.toneCanvas(raw, o) };
     }
     engine.invalidate();
   }
@@ -5190,6 +5324,7 @@
     openSettings: openSettings,
     openAbout: openAbout, checkUpdate: checkUpdate, cmpVer: cmpVer,
     openToneDialog: openToneDialog, updateTonePreview: updateTonePreview, closeToneDialog: closeToneDialog,
+    openLevelsDialog: openLevelsDialog, closeLevelsDialog: closeLevelsDialog, levelsOpts: levelsOpts, levelsAuto: levelsAuto,
     openExportDialog: openExportDialog, exportAs: exportAs, syncExportNote: syncExportNote,
     armRuler: armRuler, clearRuler: clearRuler, toggleRulerVisible: toggleRulerVisible, commitRuler: commitRuler,
     openTextDialog: openTextDialog, commitText: commitText, placeTextAt: placeTextAt, textOpts: textOpts,
