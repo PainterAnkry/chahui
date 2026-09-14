@@ -109,7 +109,7 @@ Windows x64 安装包：
 
 ### 界面
 - **菜单栏按 SAI2 的真实菜单做**：文件 / 编辑 / 图像 / 图层 / 选择 / 尺子 / 滤镜 / 视图 / 窗口 / 其他，
-  共 132 项 —— 带助记键（`新建(N)`）、▸ 子菜单、☑ 勾选项；
+  共 146 项 —— 带助记键（`新建(N)`）、▸ 子菜单、☑ 勾选项；
   **茶绘还没有的功能照样列出来但置灰**，一眼能看出「哪些是我没找到、哪些是还没有」
 - **快捷键可以改**：「其他 → 快捷键设置…」里点一行按一下就行，改完立刻生效、下次打开还在；
   和别的功能撞键会当场提示并把对方清空，「全部恢复默认」一键还原
@@ -363,6 +363,8 @@ npm run test:import    # 笔刷导入回归（.abr v1/v2/v6、.sut、笔尖打�
 npm run test:embed    # 桌面端内置服务器（起服务 / 托管网页版 / 建房 / 端口复用）
 npm run test:lan      # 「双击 exe → 局域网朋友用浏览器加入」整条链路（需先启动桌面端）
 npm run test:public   # 公网（隧道）端到端验收
+npm run test:panels   # 面板布局回归（小节跨左右两栏拖 / 颜色栏 RGB·HSV / 恢复默认布局）
+npm run test:all      # 一次跑完上面全部浏览器类回归
 npm run verify        # 第一轮反馈验收（光标 / 图层清除 / 面板排序 / 分辨率 / 房间清理）
 npm run verify2       # 第二轮反馈验收（选区语义 / 导航器 / 图像大小 / 图像变换 + 跨端同步）
 npm run verify3       # 第三轮反馈验收（魔棒框选套索 / 自动变换 / 撤销 / 翻转不越界）
@@ -375,7 +377,11 @@ npm run shots:lan     # 重新生成「双击即联机」展示图（docs/05）
 跑浏览器测试前先起服务端（默认 `http://localhost:8437`）。
 
 浏览器类测试（`test:browser` / `test:selection` / `test:overlay` / `test:transform` /
-`test:import` / `verify*` / `shots*`）需要一个 Playwright。按下面的顺序找：
+`test:import` / `test:panels` / `verify*` / `shots*`）需要一个 Playwright。按下面的顺序找：
+
+> 浏览器类测试都要一个已经在跑的服务器，把地址当第一个参数传进去，例如
+> `node tools/test-panels.js http://127.0.0.1:8440`（默认 `http://localhost:8437`）。
+> 别忘了 `npm run sync` —— 测试读的是 `server/public/` 里的镜像，不是 `client/renderer/`。
 
 1. 环境变量 `CHAHU_PLAYWRIGHT`（指向 `playwright-core` 目录）
 2. 项目里的 `playwright-core` / `playwright`（`playwright-core` 已列进 `optionalDependencies`，
