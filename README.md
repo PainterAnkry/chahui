@@ -7,6 +7,10 @@
 
 ![主界面](docs/01-主界面.png)
 
+📹 **[53 秒介绍视频](https://github.com/PainterAnkry/chahui/releases/download/v1.5.4/chahui-intro-1080p.mp4)**（1920×1080 · MP4）
+—— 两部电脑、一张画布，朋友用浏览器打开地址就进来了。视频也是**脚本拍出来的**，
+重做一遍只要 `npm run video:shoot && npm run video:build`，详见 [`video/README.md`](video/README.md)。
+
 ---
 
 ## 下载
@@ -384,6 +388,9 @@ npm run verify2       # 第二轮反馈验收（选区语义 / 导航器 / 图�
 npm run verify3       # 第三轮反馈验收（魔棒框选套索 / 自动变换 / 撤销 / 翻转不越界）
 npm run brushes       # 笔刷客观量测（峰值浓度 / 边缘过渡带 / 沿线覆盖率）
 npm run rooms         # 房间存档体检与清理
+npm run video:shoot   # 重拍介绍视频的分镜素材（真实操作茶绘 + 录屏）
+npm run video:build   # 重新合成介绍视频（标题卡 / 字幕 / 运镜 / BGM → MP4）
+npm run video:verify  # 验收视频：能播吗、多长、有没有声音
 npm run shots         # 重新生成 README 展示图（docs/01~04）
 npm run shots:lan     # 重新生成「双击即联机」展示图（docs/05）
 ```

@@ -44,7 +44,11 @@
     "test:panels": "node tools/test-panels.js",
     "test:all": "node tools/run-all-tests.js",
     "test:color": "node tools/test-color.js",
-    "test:cansize": "node tools/test-cansize.js"
+    "test:cansize": "node tools/test-cansize.js",
+    "video:shoot": "node tools/video/shoot.js",
+    "video:build": "node tools/video/build.js",
+    "video:verify": "node tools/video/verify.js \"video/茶绘-介绍.mp4\"",
+    "video:frames": "node tools/video/grab.js"
   },
   "license": "MIT",
   "repository": {

@@ -17,6 +17,10 @@ tools/_*.js
 tools/bin/
 *.log
 
+# 介绍视频的中间产物（成片太大也不进库；video/README.md 例外）
+video/*
+!video/README.md
+
 # 编辑器 / 系统
 .vscode/
 .idea/
