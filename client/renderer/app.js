@@ -964,6 +964,111 @@
   var ringCache = null;
   var triCache = null;
 
+  /* 三角顶点离色环内沿留多少空隙。
+     9px 太「瘦」了：三角本来就比内圈小一圈，顶点以外的部分又全是弦，
+     实际能点中的面积比看上去小得多（探针画出来的命中图就是一圈大死区），
+     于是「想点三角，结果点到环」——色相被改、环上的小圈直接跳走。
+     缩到 6px：肉眼还是看得出分开，但好点多了。 */
+  var TRI_GAP = 6;
+
+  /**
+   * 色轮的几何 —— **绘制和命中判定必须共用这一份**。
+   * 以前 drawWheel 和 pick 各算一遍，改一处忘另一处的话，
+   * 就会出现「看到的地方点不中、点中的地方没画东西」。
+   */
+  function wheelGeom(cv) {
+    var SZ = cv.width, cx = SZ / 2, cy = SZ / 2;
+    var R = SZ / 2 - 3, ring = 17, r0 = R - ring;
+    var tr = r0 - TRI_GAP;
+    var T3 = Math.sqrt(3) / 2;
+    return {
+      SZ: SZ, cx: cx, cy: cy, R: R, ring: ring, r0: r0, tr: tr,
+      // A = 纯色相（上）· B = 白（右下）· C = 黑（左下）
+      A: [cx, cy - tr],
+      B: [cx + T3 * tr, cy + tr / 2],
+      C: [cx - T3 * tr, cy + tr / 2]
+    };
+  }
+
+  /** 点的重心坐标 [wA, wB, wC]（三个权重和恒为 1） */
+  function triBary(g, px, py) {
+    var A = g.A, B = g.B, C = g.C;
+    var v0x = B[0] - A[0], v0y = B[1] - A[1];
+    var v1x = C[0] - A[0], v1y = C[1] - A[1];
+    var den = v0x * v1y - v1x * v0y;
+    var v2x = px - A[0], v2y = py - A[1];
+    var wB = (v2x * v1y - v2y * v1x) / den;
+    var wC = (v0x * v2y - v2x * v0y) / den;
+    return [1 - wB - wC, wB, wC];
+  }
+
+  /** 点到线段的距离（用来算「点离三角有多远」） */
+  function distToSeg(px, py, ax, ay, bx, by) {
+    var dx = bx - ax, dy = by - ay;
+    var L2 = dx * dx + dy * dy;
+    var t = L2 ? ((px - ax) * dx + (py - ay) * dy) / L2 : 0;
+    t = clamp(t, 0, 1);
+    return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+  }
+
+  /** 点在一条线段上的最近点 */
+  function closestOnSeg(px, py, a, b) {
+    var dx = b[0] - a[0], dy = b[1] - a[1];
+    var L2 = dx * dx + dy * dy;
+    var t = L2 ? ((px - a[0]) * dx + (py - a[1]) * dy) / L2 : 0;
+    t = clamp(t, 0, 1);
+    return [a[0] + t * dx, a[1] + t * dy];
+  }
+
+  /** 点到三角的距离：在里面就是 0，在外面取三条边里最近的那条 */
+  function distToTri(g, px, py) {
+    var w = triBary(g, px, py);
+    if (w[0] >= 0 && w[1] >= 0 && w[2] >= 0) return 0;
+    var A = g.A, B = g.B, C = g.C;
+    return Math.min(
+      distToSeg(px, py, A[0], A[1], B[0], B[1]),
+      distToSeg(px, py, B[0], B[1], C[0], C[1]),
+      distToSeg(px, py, C[0], C[1], A[0], A[1])
+    );
+  }
+
+  /**
+   * 在色轮上取一个「三角里的」像素。
+   * 直接读点到的那个像素是不够的：三角和内圈之间有一圈空白，
+   * 空白里读出来 alpha = 0，于是「点了没反应」。
+   * 这里先把它吸到三角边上，再朝重心挪进去一点（避开那 1px 描边），
+   * 取到的色值和画出来的一模一样 —— 因为它读的就是画布本身。
+   */
+  function sampleTriPixel(ctx, g, x, y) {
+    var px = clamp(Math.round(x), 0, g.SZ - 1), py = clamp(Math.round(y), 0, g.SZ - 1);
+    var d = ctx.getImageData(px, py, 1, 1).data;
+    if (d[3] >= 200) return d;
+    // 先找三角边上离它最近的点（在三角里的话就是它自己）
+    var q = [x, y];
+    if (distToTri(g, x, y) > 0) {
+      var cands = [
+        closestOnSeg(x, y, g.A, g.B),
+        closestOnSeg(x, y, g.B, g.C),
+        closestOnSeg(x, y, g.C, g.A)
+      ];
+      var bd = Infinity;
+      cands.forEach(function (c) {
+        var dd = Math.hypot(c[0] - x, c[1] - y);
+        if (dd < bd) { bd = dd; q = c; }
+      });
+    }
+    var gx = (g.A[0] + g.B[0] + g.C[0]) / 3;
+    var gy = (g.A[1] + g.B[1] + g.C[1]) / 3;
+    for (var i = 1; i <= 20; i++) {
+      var t = i * 0.05;
+      var ix = clamp(Math.round(q[0] + (gx - q[0]) * t), 0, g.SZ - 1);
+      var iy = clamp(Math.round(q[1] + (gy - q[1]) * t), 0, g.SZ - 1);
+      d = ctx.getImageData(ix, iy, 1, 1).data;
+      if (d[3] >= 200) return d;
+    }
+    return d;
+  }
+
   function buildRing(SZ, cx, cy, R, r0) {
     var c = document.createElement('canvas');
     c.width = SZ; c.height = SZ;
@@ -985,8 +1090,8 @@
     var cv = $('#colorWheel');
     if (!cv) return;
     var ctx = cv.getContext('2d');
-    var SZ = cv.width, cx = SZ / 2, cy = SZ / 2;
-    var R = SZ / 2 - 3, ring = 17, r0 = R - ring;
+    var g = wheelGeom(cv);
+    var SZ = g.SZ, cx = g.cx, cy = g.cy, R = g.R, ring = g.ring, r0 = g.r0;
     if (!ringCache) ringCache = buildRing(SZ, cx, cy, R, r0);
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -994,11 +1099,7 @@
     ctx.drawImage(ringCache, 0, 0);
 
     // SV 三角：顶点 = 纯色相，右下 = 白，左下 = 黑
-    // 留出 9px 空隙，避免三角顶点贴住圆环内沿
-    var tr = r0 - 9;
-    var A = [cx + Math.cos(-Math.PI / 2) * tr, cy + Math.sin(-Math.PI / 2) * tr];
-    var B = [cx + Math.cos(-Math.PI / 2 + 2 * Math.PI / 3) * tr, cy + Math.sin(-Math.PI / 2 + 2 * Math.PI / 3) * tr];
-    var C = [cx + Math.cos(-Math.PI / 2 + 4 * Math.PI / 3) * tr, cy + Math.sin(-Math.PI / 2 + 4 * Math.PI / 3) * tr];
+    var A = g.A, B = g.B, C = g.C;
     var hue = hsvToRgb(S.hue, 1, 1);
 
     var minx = Math.floor(Math.min(A[0], B[0], C[0])) - 1;
@@ -1097,24 +1198,49 @@
     var cv = $('#colorWheel');
     if (!cv) return;
     var drag = false;
+
+    /**
+     * 判定鼠标落在「色相环」还是「SV 三角」上。
+     *
+     * 以前只按半径切：dist >= r0 就算环，否则算三角。问题是三角是**内接**的，
+     * 边上和顶点附近跟内圈之间有一圈空白，那圈空白既不在三角里、也没到环的半径，
+     * 于是「点了没反应」；再往外一点就变成环 —— 用户看到的正是
+     * 「想点三角，结果色相被改、环上的小圈跳走了」。
+     *
+     * 现在按「离谁近就算谁」切：圈内空白一分为二，两边都不再有死区，
+     * 三角的实际可点范围也就顺势往外长了一圈（顶点方向长出大约半个空隙）。
+     */
+    function hitIsRing(g, x, y) {
+      var dist = Math.hypot(x - g.cx, y - g.cy);
+      if (dist >= g.r0) return true;          // 已经在环带里
+      if (distToTri(g, x, y) <= 0) return false; // 在三角里
+      // 夹在中间：比一比「离三角」和「离环内沿」哪个近
+      return (g.r0 - dist) < distToTri(g, x, y);
+    }
+
     function pick(e) {
       var r = cv.getBoundingClientRect();
       var x = (e.clientX - r.left) * cv.width / r.width;
       var y = (e.clientY - r.top) * cv.height / r.height;
-      var cx = cv.width / 2, cy = cv.height / 2;
-      var dist = Math.hypot(x - cx, y - cy);
-      var R = cv.width / 2 - 3, ring = 17, r0 = R - ring;
-      if (dist >= r0) {
-        S.hue = (Math.atan2(y - cy, x - cx) * 180 / Math.PI + 360) % 360;
-        drawWheel();
+      var g = wheelGeom(cv);
+      // 标记这次落在哪一边，测试靠它判定「到底点中了什么」（比猜颜色可靠）
+      cv.dataset.pick = hitIsRing(g, x, y) ? 'ring' : 'tri';
+      if (hitIsRing(g, x, y)) {
+        var deg = (Math.atan2(y - g.cy, x - g.cx) * 180 / Math.PI + 360) % 360;
+        // 按住 Shift 每 15° 吸一档 —— 画对称图 / 想要标准色相时省事
+        if (e.shiftKey) deg = Math.round(deg / 15) * 15 % 360;
+        S.hue = deg;
         applyHsv();
+        drawWheel();
         return;
       }
       var ctx = cv.getContext('2d');
-      var d = ctx.getImageData(clamp(Math.round(x), 0, cv.width - 1), clamp(Math.round(y), 0, cv.height - 1), 1, 1).data;
-      if (d[3] < 8) return;
+      var d = sampleTriPixel(ctx, g, x, y);
+      if (d[3] < 8) { cv.dataset.pick = 'miss'; return; }
       var hsv = rgbToHsv(d[0], d[1], d[2]);
-      S.hue = hsv.h;
+      // 三角里靠近白角 / 黑角的像素几乎没有彩度，色相是算不出来的（会回 0）。
+      // 直接写 S.hue 会让色环上的小圈毫无理由地跳到红色去 —— 只在真的有色相时才更新。
+      if (hsv.s > 0.0001) S.hue = hsv.h;
       S.sv = { s: hsv.s, v: hsv.v };
       setColor(hexOf(d[0], d[1], d[2]), false);
       drawWheel();
@@ -1140,21 +1266,108 @@
     cv.addEventListener('pointercancel', function () { drag = false; });
   }
 
+  /**
+   * 用当前的 H / S / V 合成颜色。
+   *
+   * ⚠ 合成出来的是 8 位 RGB，从它反推回 HSV 是有误差的 —— 暗色或低饱和时
+   * 色相能差好几度（拖到 200° 显示成 199.7°，点环上 45° 变成 48°）。
+   * 所以 setColor 之后把用户刚定的 H / S / V **原样放回去**：
+   * 画布上用的是 RGB（有色深限制，没办法），但滑条和指示器显示的是你选的值，
+   * 而且拖 H 滑条时不会每帧被量化一次、越拖越偏。
+   */
   function applyHsv() {
-    var rgb = hsvToRgb(S.hue, S.sv.s, S.sv.v);
+    var h = S.hue, s = S.sv.s, v = S.sv.v;
+    var rgb = hsvToRgb(h, s, v);
     setColor(hexOf(rgb[0], rgb[1], rgb[2]), false);
+    S.hue = h;
+    S.sv = { s: s, v: v };
+    refreshColorSliders();
+    drawWheel();
+  }
+
+  /* ── 色板 ──
+     内置色板（引擎里那份）永远在最前面，后面接用户自己加的。
+     自己加的记在 localStorage，右键点掉、或整块「恢复默认」。 */
+  var SWATCH_KEY = 'chahu.swatches';
+
+  function loadCustomSwatches() {
+    var raw = null;
+    try { raw = JSON.parse(lsGet(SWATCH_KEY, 'null')); } catch (e) { raw = null; }
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .filter(function (c) { return typeof c === 'string' && /^#[0-9a-fA-F]{6}$/.test(c); })
+      .slice(0, 60);
+  }
+
+  function saveCustomSwatches(list) {
+    S.customSwatches = list.slice(0, 60);
+    lsSet(SWATCH_KEY, JSON.stringify(S.customSwatches));
   }
 
   function buildPalette() {
     var box = $('#palette');
+    if (!box) return;
     box.innerHTML = '';
-    global.CanvasEngine.SWATCHES.forEach(function (c) {
+    var builtin = global.CanvasEngine.SWATCHES;
+    var custom = S.customSwatches || loadCustomSwatches();
+    S.customSwatches = custom;
+
+    function cell(hex, isCustom, extraClass) {
       var i = document.createElement('i');
-      i.style.background = c;
-      i.title = c;
-      i.onclick = function () { setColor(c); };
+      i.style.background = hex;
+      i.title = hex + (isCustom ? ' · 右键删除' : '');
+      i.setAttribute('data-hex', hex.toLowerCase());
+      if (isCustom) i.className = 'custom';
+      if (extraClass) i.className += ' ' + extraClass;
+      i.onclick = function (e) {
+        // Alt / 中键点自己加的色格 = 删除，和右键一个意思（数位笔上按不出右键）
+        if (isCustom && (e.altKey || e.button === 1)) { removeSwatch(hex); return; }
+        setColor(hex);
+      };
+      if (isCustom) {
+        i.addEventListener('contextmenu', function (e) {
+          e.preventDefault();
+          removeSwatch(hex);
+        });
+      }
       box.appendChild(i);
+      return i;
+    }
+
+    builtin.forEach(function (c) { cell(c, false); });
+    if (custom.length) {
+      cell('', false, 'palette-sep');
+      custom.forEach(function (c) { cell(c, true); });
+    }
+    markPaletteSelection();
+  }
+
+  /** 当前颜色在色板里就描一圈，一眼看出选中的是哪个 */
+  function markPaletteSelection() {
+    var box = $('#palette');
+    if (!box) return;
+    var want = String(S.color || '').toLowerCase();
+    Array.prototype.forEach.call(box.querySelectorAll('i'), function (i) {
+      i.classList.toggle('sel', i.getAttribute('data-hex') === want);
     });
+  }
+
+  function addCurrentSwatch() {
+    var hex = String(S.color || '').toLowerCase();
+    if (!/^#[0-9a-f]{6}$/.test(hex)) return;
+    var list = S.customSwatches || [];
+    if (list.indexOf(hex) >= 0) { toast('这个颜色已经在色板里了'); return; }
+    list.push(hex);
+    saveCustomSwatches(list);
+    buildPalette();
+    toast('已加入色板 ' + hex.toUpperCase(), 'ok');
+  }
+
+  function removeSwatch(hex) {
+    var list = (S.customSwatches || []).filter(function (c) { return c.toLowerCase() !== hex.toLowerCase(); });
+    saveCustomSwatches(list);
+    buildPalette();
+    toast('已从色板移除 ' + hex.toUpperCase());
   }
 
   /* ── RGB / HSV 滑块 ──
@@ -1261,6 +1474,25 @@
       if (nm) {
         nm.addEventListener('input', function () { onInput(k, nm.value); });
         nm.addEventListener('change', function () { onInput(k, nm.value); });
+        // 上下方向键 / 滚轮微调：整格整格拖太糙，调「差一点点」的色值时很有用
+        // （Shift 一次 10）
+        nm.addEventListener('keydown', function (e) {
+          if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+          e.preventDefault();
+          var step = (e.shiftKey ? 10 : 1) * (e.key === 'ArrowUp' ? 1 : -1);
+          var now = parseFloat(nm.value);
+          if (!isFinite(now)) now = 0;
+          nm.value = clamp(Math.round(now + step), 0, CH[k].max);
+          onInput(k, nm.value);
+        });
+        nm.addEventListener('wheel', function (e) {
+          e.preventDefault();
+          var step = (e.deltaY < 0 ? 1 : -1) * (e.shiftKey ? 10 : 1);
+          var now = parseFloat(nm.value);
+          if (!isFinite(now)) now = 0;
+          nm.value = clamp(Math.round(now + step), 0, CH[k].max);
+          onInput(k, nm.value);
+        }, { passive: false });
       }
     });
     refreshColorSliders();
@@ -1270,8 +1502,7 @@
     S.color = hex;
     $('#colorPreview').style.background = hex;
     $('#hexInput').value = hex.toUpperCase();
-    try { $('#colorInput').value = hex; } catch (e) { /* ignore */ }
-    var rg = global.CanvasEngine.hexToRgb(hex);
+    try { $('#colorInput').value = hex; } catch (e) { /* ignore */ }    var rg = global.CanvasEngine.hexToRgb(hex);
     var hsv = rgbToHsv(rg.r, rg.g, rg.b);
     // 灰阶颜色（黑 / 白 / 灰）算不出色相，rgbToHsv 会回 0；纯黑连饱和度也推不出来。
     // 这两种情况**保留原来的色相 / 饱和度**，否则：
@@ -1281,6 +1512,11 @@
     if (hsv.s > 0.0001) S.hue = hsv.h;
     S.sv = { s: hsv.v > 0.0001 ? hsv.s : S.sv.s, v: hsv.v };
     refreshColorSliders();
+    // 色轮上的两个指示器（环上的小圈 + 三角里的小圈）都是从 S.hue / S.sv 画的，
+    // 所以颜色一变就得重画 —— 以前只有「点色轮」那条路会调 drawWheel，
+    // 于是拖 RGB / HSV 滑块、点色板、吸管取色之后，色轮原地不动，看着像没生效。
+    drawWheel();
+    markPaletteSelection();
     if (remember !== false) pushRecent(hex);
   }
 
@@ -3773,9 +4009,16 @@
   function swapColors() {
     var c = S.color;
     setColor(S.bgColor, false);
-    S.bgColor = c;
-    drawWheel();
+    setBgColor(c);
     toast('前景 ' + S.color.toUpperCase() + ' / 背景 ' + S.bgColor.toUpperCase());
+  }
+
+  /** 背景色：只在自己和前景色互换时用得到，但得看得见 —— 不然「互换」点了像没反应 */
+  function setBgColor(hex) {
+    S.bgColor = hex;
+    var el = $('#bgPreview');
+    if (el) el.style.background = hex;
+    try { $('#bgColorInput').value = hex; } catch (e) { /* ignore */ }
   }
 
   /* ============================================================ 选区 */
@@ -4069,9 +4312,24 @@
     });
     $('#colorInput').addEventListener('input', function () {
       setColor(this.value);
-      drawWheel();
     });
     $('#btnSwap').addEventListener('click', swapColors);
+    var bgIn = $('#bgColorInput');
+    if (bgIn) bgIn.addEventListener('input', function () { setBgColor(this.value); });
+
+    // 点进十六进制框就全选，直接覆盖输入最省事
+    $('#hexInput').addEventListener('focus', function () { this.select(); });
+
+    // 色板：加入当前色 / 恢复默认内置色板
+    var addSw = $('#btnSwatchAdd');
+    if (addSw) addSw.addEventListener('click', addCurrentSwatch);
+    var resetSw = $('#btnSwatchReset');
+    if (resetSw) resetSw.addEventListener('click', function () {
+      if (!(S.customSwatches || []).length) { toast('色板里还没有你加的色'); return; }
+      saveCustomSwatches([]);
+      buildPalette();
+      toast('色板已恢复为内置的 ' + (global.CanvasEngine.SWATCHES.length) + ' 个颜色');
+    });
 
     // 工具栏和笔刷栏各有一个「编辑」按钮，但共用同一个编辑状态 —— 点哪个都是两栏一起进编辑
     function toggleToolEdit(btn) {
@@ -4355,8 +4613,8 @@
     engine.attach($('#view'), $('#overlay'));
 
     loadBrush(S.brushId);
-    setColor('#2b2b2b', false);
-    drawWheel();
+    setBgColor(S.bgColor);
+    setColor(S.color || '#2b2b2b', false);
     $('#symSelect').value = S.sym;
     $('#cursorStyle').value = S.cursorStyle;
     syncViewBar();

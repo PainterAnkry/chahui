@@ -442,7 +442,32 @@ input[type=range]::-webkit-slider-thumb {
   overscroll-behavior: contain;
 }
 
-.color-current { display: flex; gap: 8px; margin-bottom: 7px; }
+.color-current { display: flex; gap: 8px; margin-bottom: 7px; align-items: flex-start; }
+/* 前景（大） + 背景（小） + 互换按钮，一竖排挤在左边 */
+.fg-bg { display: flex; gap: 4px; flex: none; }
+.fg-side { display: flex; flex-direction: column; gap: 3px; }
+.swatch-sm {
+  width: 20px; height: 20px; flex: none;
+  border-radius: 3px;
+  border: 1px solid var(--line);
+  position: relative; overflow: hidden; cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0,0,0,.12) inset;
+}
+.swatch-sm input[type=color] {
+  position: absolute; inset: -4px; width: 140%; height: 140%;
+  border: none; padding: 0; opacity: 0; cursor: pointer;
+}
+.fg-swap {
+  width: 20px; height: 20px; flex: none;
+  padding: 0; line-height: 1;
+  font-size: 11px;
+  border-radius: 3px;
+  border: 1px solid var(--line);
+  background: var(--bg-2, rgba(0,0,0,.03));
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.fg-swap:hover { border-color: var(--accent); color: var(--accent); }
 .swatch-lg {
   width: 42px; height: 42px; flex: none;
   border-radius: var(--radius-sm);
@@ -478,6 +503,51 @@ input[type=range]::-webkit-slider-thumb {
   transition: transform .1s;
 }
 .palette i:hover { transform: scale(1.18); z-index: 2; }
+/* 自己加的色格：右下角一个小角标，跟内置的分得开 */
+.palette i.custom {
+  position: relative;
+  box-shadow: 0 0 0 1px rgba(0,0,0,.18);
+}
+.palette i.custom::after {
+  content: '';
+  position: absolute;
+  right: 1px; bottom: 1px;
+  width: 0; height: 0;
+  border-left: 4px solid transparent;
+  border-bottom: 4px solid rgba(255,255,255,.85);
+  filter: drop-shadow(0 -1px 0 rgba(0,0,0,.4));
+  pointer-events: none;
+}
+/* 当前颜色在色板里的那一格描一圈 */
+.palette i.sel {
+  box-shadow: 0 0 0 2px var(--accent);
+  z-index: 3;
+}
+/* 内置色板 / 自加色板之间的分隔 */
+.palette i.palette-sep {
+  grid-column: 1 / -1;
+  height: 1px;
+  aspect-ratio: auto;
+  background: var(--line);
+  border: none;
+  border-radius: 0;
+  cursor: default;
+  margin: 2px 0;
+}
+.palette i.palette-sep:hover { transform: none; }
+
+.palette-ops {
+  display: flex;
+  gap: 3px;
+  margin-bottom: 5px;
+}
+.palette-ops .mini { flex: 1; }
+.palette-tip {
+  margin: 5px 0 0;
+  font-size: 10px;
+  line-height: 1.5;
+  color: #9aa2ae;
+}
 
 /* 颜色栏顶部那排开关 + 各块滑块 */
 .color-modes {

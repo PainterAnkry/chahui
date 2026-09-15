@@ -25,6 +25,7 @@ const SUITE = [
   'test-personal.js',
   'test-layout.js',
   'test-panels.js',
+  'test-color.js',
   'verify-issues.js',
   'verify-round2.js',
   'verify-round3.js'

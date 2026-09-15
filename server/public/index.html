@@ -242,13 +242,22 @@
         <h4><span class="section-grip" title="拖动调整顺序">⋮⋮</span>颜色</h4>
 
         <div class="color-current">
-          <label class="swatch-lg" id="colorPreview" style="background:#2b2b2b">
-            <input type="color" id="colorInput" value="#2b2b2b" />
-          </label>
+          <!-- 前景 / 背景两个方块并排（对照 SAI2 左下的那对）：
+               前景 = 真正画下去的颜色，背景 = 留着备用的另一个，X 键互换 -->
+          <div class="fg-bg">
+            <label class="swatch-lg" id="colorPreview" style="background:#2b2b2b" title="前景色：画出来的就是它">
+              <input type="color" id="colorInput" value="#2b2b2b" />
+            </label>
+            <div class="fg-side">
+              <label class="swatch-sm" id="bgPreview" style="background:#ffffff" title="背景色：按 X 与前景色互换">
+                <input type="color" id="bgColorInput" value="#ffffff" />
+              </label>
+              <button class="fg-swap" id="btnSwap" title="前景 / 背景色互换（X）">⇄</button>
+            </div>
+          </div>
           <div class="color-hex">
-            <input type="text" id="hexInput" value="#2B2B2B" spellcheck="false" maxlength="7" />
+            <input type="text" id="hexInput" value="#2B2B2B" spellcheck="false" maxlength="7" title="输入十六进制颜色，支持 #abc 简写" />
             <div class="recent" id="recentColors"></div>
-            <button class="btn tiny ghost full" id="btnSwap" title="交换前景/背景色（X）">前景 / 背景色互换</button>
           </div>
         </div>
 
@@ -301,7 +310,12 @@
         </div>
 
         <div class="cm-block" data-cm-block="swatch">
+          <div class="palette-ops">
+            <button class="mini" id="btnSwatchAdd" title="把当前颜色加进色板">＋ 加入色板</button>
+            <button class="mini ghost" id="btnSwatchReset" title="删掉自己加的颜色，只留内置色板">恢复默认</button>
+          </div>
           <div class="palette" id="palette"></div>
+          <p class="palette-tip">右键色格可以删掉自己加的色。</p>
         </div>
       </section>
 
