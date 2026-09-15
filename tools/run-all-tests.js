@@ -27,6 +27,7 @@ const SUITE = [
   'test-panels.js',
   'test-color.js',
   'test-cansize.js',
+  'test-collab-view.js',
   'verify-issues.js',
   'verify-round2.js',
   'verify-round3.js'

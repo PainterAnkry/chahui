@@ -63,6 +63,9 @@
     toolPrefs: null,          // { order: [id], hidden: [id] }
     toolEdit: false,
     imported: [],             // 导入的笔刷（PS .abr / CSP .sut），存 localStorage
+    // 协作视图：别人的笔迹在本机显示得多淡（纯本地，见「他人笔触」那一段）
+    dimMode: 'off',           // 'off' | 'soft' | 'faint' | 'hide'
+    dimUsers: {},             // userId -> 0..1，成员面板里单独设的
     antsOn: true,             // 是否显示选区蚂蚁线（菜单里可勾）
     text: { fontFamily: 'sans', fontSize: 48, lineHeight: 1.35 },   // 文字工具的上次设置
     textAt: null,             // 文字要放在画布的哪个位置
@@ -241,7 +244,101 @@
     lsSet('chahu.tools', JSON.stringify(S.toolPrefs));
   }
 
-  /* ---------------------------------------------------------- 左栏面板排序（可拖拽） */
+  /* ============================================================ 协作视图
+   *
+   * 两件事，都是**纯本机显示**，不同步、不改文档：
+   *   1. 别人的笔迹淡一点 / 直接藏起来（画布上人多的时候，一眼分清哪笔是自己的）
+   *   2. 图层「只对我隐藏」（看底稿用，别人那边不受影响，导出也照样包含）
+   *
+   * ⚠ 有个天然边界要跟用户讲清楚：笔迹一旦被「固化底图 / 合并可见图层 /
+   * 变换 / 滤镜」处理过，那些像素就变成图层底图了，**再也分不出是谁画的**，
+   * 只能整层隐藏。所以「他人笔触」只对还没固化的笔迹生效。
+   */
+  var DIM_KEY = 'chahu.dimOthers';
+  var DIM_USERS_KEY = 'chahu.dimUsers';
+  var DIM_STEPS = [
+    { id: 'off', label: '原样', tip: '别人画的和自己画的一样清楚' },
+    { id: 'soft', label: '淡', tip: '别人的笔迹 45% 透明度' },
+    { id: 'faint', label: '很淡', tip: '别人的笔迹 14% 透明度，几乎只剩自己的' },
+    { id: 'hide', label: '隐藏', tip: '只看自己的笔迹（对方还是看得见全部）' }
+  ];
+
+  function dimStep() {
+    for (var i = 0; i < DIM_STEPS.length; i++) if (DIM_STEPS[i].id === S.dimMode) return DIM_STEPS[i];
+    return DIM_STEPS[0];
+  }
+
+  function loadDimPrefs() {
+    S.dimMode = lsGet(DIM_KEY, 'off');
+    if (!DIM_STEPS.some(function (d) { return d.id === S.dimMode; })) S.dimMode = 'off';
+    try {
+      var raw = JSON.parse(lsGet(DIM_USERS_KEY, 'null'));
+      S.dimUsers = (raw && typeof raw === 'object') ? raw : {};
+    } catch (e) { S.dimUsers = {}; }
+  }
+
+  /** 把当前的协作视图设置推给引擎 */
+  function applyDimView() {
+    engine.dimUsers = {};
+    Object.keys(S.dimUsers).forEach(function (k) { engine.dimUsers[k] = S.dimUsers[k]; });
+    engine.setDimMode(S.dimMode);
+    updateDimUi();
+  }
+
+  function setDimMode(mode) {
+    S.dimMode = mode;
+    lsSet(DIM_KEY, mode);
+    applyDimView();
+    var st = dimStep();
+    toast(mode === 'off' ? '他人笔触：原样显示' : '他人笔触：' + st.label, 'ok');
+  }
+
+  function cycleDimMode() {
+    var i = DIM_STEPS.findIndex(function (d) { return d.id === S.dimMode; });
+    setDimMode(DIM_STEPS[(i + 1) % DIM_STEPS.length].id);
+  }
+
+  /** 单独设某个人的笔迹透明度；alpha = null 表示恢复成「跟随全局档位」 */
+  function setUserDim(userId, alpha) {
+    if (alpha == null) delete S.dimUsers[userId];
+    else S.dimUsers[userId] = alpha;
+    lsSet(DIM_USERS_KEY, JSON.stringify(S.dimUsers));
+    applyDimView();
+  }
+
+  function updateDimUi() {
+    var btn = $('#qbDimOthers');
+    if (btn) {
+      var st = dimStep();
+      btn.textContent = st.label;
+      btn.classList.toggle('active', S.dimMode !== 'off');
+      btn.title = '别人的笔迹在本机显示得多清楚：' + st.tip
+        + '（只影响你自己的屏幕 —— 不影响导出，也不会同步给别人）';
+    }
+    renderMembers();
+  }
+
+  /** 图层「只对我隐藏」：跟同步的显示/隐藏分开，别人那边不受影响 */
+  function toggleLocalHidden(layerId) {
+    var on = engine.toggleLocalHidden(layerId);
+    var l = engine.getLayer(layerId);
+    toast('「' + (l ? l.name : '图层') + '」' + (on ? '只对你隐藏了（别人还看得见）' : '对你重新显示'));
+    renderLayers();
+  }
+
+  function clearLocalHidden() {
+    if (!engine.localHiddenCount()) { toast('没有被「只对我隐藏」的图层'); return; }
+    engine.clearLocalHidden();
+    renderLayers();
+    toast('已取消「只对我隐藏」', 'ok');
+  }
+
+  /** 菜单：把「当前图层」在「只对我隐藏 / 显示」之间切换 */
+  function toggleLocalHideActive() {
+    var l = engine.activeLayer();
+    if (!l) { toast('还没有图层', 'err'); return; }
+    toggleLocalHidden(l.id);
+  }
 
   var PANEL_DEFAULT_ORDER = ['nav', 'tools', 'brushes', 'brush', 'fx', 'color', 'layers'];
 
@@ -1605,7 +1702,8 @@
     list.forEach(function (l) {
       var row = document.createElement('div');
       row.className = 'layer-item' + (l.id === engine.activeLayerId ? ' active' : '') +
-        (l.visible ? '' : ' hidden-layer') + (l.locked ? ' locked-layer' : '');
+        (l.visible ? '' : ' hidden-layer') + (l.locked ? ' locked-layer' : '') +
+        (engine.isLocallyHidden(l) ? ' local-hidden-layer' : '');
       row.dataset.id = l.id;
 
       var eye = document.createElement('button');
@@ -1613,11 +1711,27 @@
       eye.innerHTML = l.visible
         ? '<svg viewBox="0 0 24 24"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.6"/></svg>'
         : '<svg viewBox="0 0 24 24"><path d="M4 4l16 16"/><path d="M9.5 5.4A9.9 9.9 0 0 1 12 5c6.4 0 10 6 10 6a17 17 0 0 1-3 3.4M6.3 7.2A17.5 17.5 0 0 0 2 11s3.6 6 10 6c1 0 1.9-.1 2.7-.4"/></svg>';
+      eye.title = l.visible
+        ? '对所有人隐藏这一层（会同步给别人）—— 只想自己看不到就点右边那只眼睛'
+        : '对所有人显示这一层（会同步给别人）';
       eye.onclick = function (e) {
         e.stopPropagation();
         net.send(P.C2S.LAYER_UPD, { layerId: l.id, patch: { visible: !l.visible } });
       };
       row.appendChild(eye);
+
+      // 第二只眼睛：只对我隐藏（不同步、不影响导出）
+      var mine = document.createElement('button');
+      mine.className = 'eye mine-eye' + (engine.isLocallyHidden(l) ? ' local' : '');
+      mine.innerHTML = '<svg viewBox="0 0 24 24"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.6"/></svg>';
+      mine.title = engine.isLocallyHidden(l)
+        ? '只对我隐藏（别人不受影响，导出也照样包含）—— 点一下恢复'
+        : '只对我隐藏这一层：看底稿用，别人那边不受影响，导出也照样包含';
+      mine.onclick = function (e) {
+        e.stopPropagation();
+        toggleLocalHidden(l.id);
+      };
+      row.appendChild(mine);
 
       var th = document.createElement('div');
       th.className = 'thumb';
@@ -1980,6 +2094,31 @@
         (m.isOwner ? '<span class="badge">房主</span>' : '') +
         (m.userId === S.me.userId ? '<span class="badge me">我</span>' : '') +
         '</b><span>' + (m.drawing ? '<span class="live">正在作画…</span>' : '在房间里') + '</span></div>';
+      // 别人的笔迹显示得多清楚 —— 点一下循环：跟随全局 → 原样 → 淡 → 隐藏 → 跟随全局
+      // （纯本地设置，只改我自己屏幕上看到的）
+      if (m.userId !== S.me.userId) {
+        var per = S.dimUsers[m.userId];
+        var btn = document.createElement('button');
+        btn.className = 'm-dim' + (per != null ? ' on' : '');
+        btn.textContent = per == null ? '跟' : (per <= 0 ? '隐' : (per >= 1 ? '100' : Math.round(per * 100) + ''));
+        btn.title = per == null
+          ? '这个人的笔迹跟随全局「' + dimStep().label + '」—— 点一下单独设置（只影响你自己的屏幕）'
+          : '这个人的笔迹显示 ' + Math.round(per * 100) + '% —— 点一下换下一档（只影响你自己的屏幕）';
+        btn.onclick = function (e) {
+          e.stopPropagation();
+          // 顺序按「越来越看不见」排：跟着全局 → 淡 → 很淡 → 隐藏 → 原样 → 跟着全局。
+          // 第一下点下去一定要有肉眼可见的变化，所以不把「原样」放在第二档
+          // （全局本来就不淡的时候，跟着全局和原样看起来一模一样，用户会以为按钮坏了）。
+          var opts = [null, 0.45, 0.15, 0, 1];
+          var i = opts.findIndex(function (v) {
+            return (v == null && per == null) || (v != null && per != null && Math.abs(v - per) < 0.001);
+          });
+          setUserDim(m.userId, opts[(i + 1) % opts.length]);
+          toast(m.name + ' 的笔迹：' + (opts[(i + 1) % opts.length] == null ? '跟随全局'
+            : (opts[(i + 1) % opts.length] === 1 ? '原样' : (opts[(i + 1) % opts.length] === 0 ? '不显示' : Math.round(opts[(i + 1) % opts.length] * 100) + '%'))));
+        };
+        el.appendChild(btn);
+      }
       box.appendChild(el);
     });
   }
@@ -2808,6 +2947,8 @@
         S.me.color = msg.you.color;
         S.me.isOwner = !!msg.you.isOwner;
         S.joined = true;
+        // 「他人笔触」要靠这个判断哪些笔是自己的
+        engine.setMeId(S.me.userId);
         S.myUndo = []; S.myRedo = [];
         clearCursors();
 
@@ -4819,6 +4960,8 @@
     bindPanelDnD();
     bindQuickBar();
     bindRefWindow();
+    loadDimPrefs();
+    applyDimView();
     // 侧栏收拉：把手 / 窄条 / F4（菜单里那项也走同一个函数）
     $('#btnSideCollapse').addEventListener('click', function () { setSideCollapsed(true); });
     $('#sideRail').addEventListener('click', function () { setSideCollapsed(false); });
@@ -5361,6 +5504,7 @@
       setSymmetry(next);
     });
     on('#qbRef', function () { pickReferenceImage(); });
+    on('#qbDimOthers', cycleDimMode);
 
     // 缩放 / 旋转可以直接输入：回车或失焦生效
     function commitZoom() {
@@ -6164,6 +6308,8 @@
     openExportDialog: openExportDialog, exportAs: exportAs, syncExportNote: syncExportNote,
     armRuler: armRuler, clearRuler: clearRuler, toggleRulerVisible: toggleRulerVisible, commitRuler: commitRuler,
     toggleQuickBarSteadier: toggleQuickBarSteadier,
+    setDimMode: setDimMode, cycleDimMode: cycleDimMode, setUserDim: setUserDim,
+    toggleLocalHideActive: toggleLocalHideActive, clearLocalHiddenUi: clearLocalHidden,
     openTextDialog: openTextDialog, commitText: commitText, placeTextAt: placeTextAt, textOpts: textOpts,
     bindQuickBar: bindQuickBar, updateQuickBar: updateQuickBar,
     loadReferenceImage: loadReferenceImage, clearReferenceImage: clearReferenceImage

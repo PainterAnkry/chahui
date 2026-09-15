@@ -128,6 +128,25 @@
   // 两点式工具：只保留首尾点，实时预览画在 overlay 上
   function isTwoPoint(stroke) { return isShape(stroke) || isGradient(stroke); }
 
+  /* ---------------- 协作视图：别人的笔迹可以淡一点 / 藏起来 ----------------
+   *
+   * 纯**显示**效果：文档（layer.canvas）永远是原样，导出 / 固化 / 合并 / 上传
+   * 走的还是 layer.canvas；屏幕上要显示的那一份放在 layer.viewCanvas 里。
+   *
+   * 为什么非得单独一张画布：笔迹一旦画进图层，像素就分不出是谁的了，
+   * 事后没有任何办法「只把某几个人的调淡」。
+   *
+   * 这几个「破坏类」笔迹不是「画上去的东西」：橡皮 / 模糊 / 涂抹 / 液化。
+   * 淡化它们没有意义，而且会让「我屏幕上看到的」和「文档里真实的」差太多，
+   * 所以它们一律按原样生效。
+   */
+  var DIM_LEVELS = { soft: 0.45, faint: 0.14, hide: 0 };
+  function isDestructive(stroke) {
+    return isEraser(stroke) || isBlur(stroke) || isSmudge(stroke) || isLiquify(stroke);
+  }
+  // 选区笔不进笔迹历史，也就谈不上「谁的笔触」
+  function isSelectStroke(stroke) { return isSelectTool(stroke); }
+
   /* ============================================================ 笔尖形态 */
 
   // 笔压 → 直径
@@ -794,6 +813,12 @@
 
     this.replayMode = false;
     this.replayCanvas = null;
+
+    /* 协作视图（纯本机显示，不同步、不进文档） */
+    this.dimMode = 'off';          // 'off' | 'soft' | 'faint' | 'hide'
+    this.dimUsers = {};            // userId -> 0..1，成员面板里单独设的
+    this.meId = null;              // 我自己的 userId
+    this.localHidden = new Set();  // 「只对我隐藏」的图层 id
     this.replayStrokes = [];
     this.replayCursor = 0;
 
@@ -1170,6 +1195,7 @@
     e.layer.strokes.push(stroke);
     this.baseDirty = true;
     this.markLayerThumb(e.layer);
+    this.mirrorToView(e.layer, stroke);
     this.emit('strokeEnd', stroke);
     this.clearOverlay();
     this.invalidate();
@@ -1219,12 +1245,18 @@
     layer.strokes.push(stroke);
     this.markLayerThumb(layer);
     this.baseDirty = true;
+    this.mirrorToView(layer, stroke);
     this.invalidate();
     return stroke;
   };
 
   CanvasEngine.prototype.applyStrokeToLayer = function (layer, stroke) {
     if (isFill(stroke)) { this.applyFill(layer, stroke); return; }
+    // 渐变和涂抹以前漏在这里 —— 撤销重做（重放历史）时它们会消失，
+    // 别人画过来的渐变也落不下来。补上之后重放才和「刚画完」一致。
+    if (isGradient(stroke)) { this.applyGradient(layer, stroke); return; }
+    if (isSmudge(stroke)) { this.applySmudge(layer, stroke, null); return; }
+    if (isSelectStroke(stroke)) return;
     var sc = this.takeScratch();
     this.paintToScratch(sc.ctx, stroke);
     if (isBlur(stroke)) {
@@ -1371,7 +1403,212 @@
     }
     layerCommit(layer);
     this.markLayerThumb(layer);
+    // 历史被改写（撤销 / 清除 / 换底图）—— 显示用的那份必须整层重建
+    if (this.dimOn()) this.rebuildView(layer);
   };
+
+  /* ================================================================
+   * 协作视图：别人的笔迹淡一点 / 直接藏起来（纯本机显示效果）
+   * ================================================================ */
+
+  CanvasEngine.prototype.dimOn = function () {
+    // 全局档位是「原样」，但成员面板里单独给某个人设过 → 也算开着，
+    // 否则「我只想把某一个人的笔迹藏起来」这件事在默认档位下根本不起作用。
+    if (this.dimMode && this.dimMode !== 'off') return true;
+    return !!(this.dimUsers && Object.keys(this.dimUsers).length);
+  };
+
+  /** 这一笔在本机显示时该用多少透明度（1 = 原样，0 = 根本不显示） */
+  CanvasEngine.prototype.authorAlpha = function (stroke) {
+    if (!this.dimOn() || !stroke) return 1;
+    if (isDestructive(stroke) || isSelectStroke(stroke)) return 1;
+    var who = stroke.userId;
+    if (!who || !this.meId || who === this.meId) return 1;
+    var per = this.dimUsers ? this.dimUsers[who] : null;
+    if (per != null) return clamp(per, 0, 1);
+    if (!this.dimMode || this.dimMode === 'off') return 1;   // 只有针对某个人的设置，全局是原样
+    var lv = DIM_LEVELS[this.dimMode];
+    return lv == null ? 1 : lv;
+  };
+
+  /** 影响显示的所有设置的指纹 —— 变了就得重建 baseComposite 缓存 */
+  CanvasEngine.prototype.dimKey = function () {
+    var ks = Object.keys(this.dimUsers || {}).sort();
+    var s = this.dimMode + '|' + (this.meId || '');
+    for (var i = 0; i < ks.length; i++) s += '|' + ks[i] + '=' + this.dimUsers[ks[i]];
+    return s + '|' + Array.from(this.localHidden).sort().join(',');
+  };
+
+  CanvasEngine.prototype.isLocallyHidden = function (layer) {
+    return !!(layer && this.localHidden.has(layer.id));
+  };
+
+  /** 显示用的那份图层画布（没有开协作视图时就是文档本身，零开销） */
+  CanvasEngine.prototype.displayCanvas = function (layer) {
+    if (!this.dimOn()) return layer.canvas;
+    this.syncView(layer);
+    return layer.viewCanvas || layer.canvas;
+  };
+
+  CanvasEngine.prototype.ensureView = function (layer) {
+    if (!layer.viewCanvas || layer.viewCanvas.width !== this.width ||
+        layer.viewCanvas.height !== this.height) {
+      var c = mkCanvas(this.width, this.height, false);
+      layer.viewCanvas = c.canvas;
+      layer.viewCtx = c.ctx;
+      layer.viewN = -1;
+      layer.viewKill = true;
+    }
+    return layer.viewCtx;
+  };
+
+  /** 标成「显示那份作废」，下次合成时整层重建（变换 / 合并这类绕开笔迹流程的操作要调） */
+  CanvasEngine.prototype.killView = function (layer) {
+    if (!layer) return;
+    layer.viewN = -1;
+    layer.viewKill = true;
+  };
+
+  /**
+   * 把一笔按「作者透明度」画进显示用的 viewCanvas。
+   *
+   * 实现上就是**把 layer.ctx / layer.canvas 临时换成 viewCanvas，再调一次
+   * applyStrokeToLayer** —— 绘制代码一行都不用改，也就不会出现
+   * 「文档一套算法、视图另一套算法」的偏差（橡皮、混色、选区裁剪、
+   * 渐变、涂抹、文字这些全都自动跟着走）。
+   *
+   * 半透明的情况不能直接把目标画布整体调 alpha（那样别人的笔和我的笔一起变淡），
+   * 要的是「这一笔本身淡」。做法：先在临时画布上按原样画一遍，再把它按 alpha
+   * 混回 viewCanvas —— 于是橡皮这种「读目标画布」的笔也语义正确（等比例擦掉一点）。
+   */
+  CanvasEngine.prototype.applyStrokeToView = function (layer, stroke) {
+    var a = this.authorAlpha(stroke);
+    if (a <= 0) return;                    // 完全隐藏：这一笔当不存在
+    var self = this;
+    var oc = layer.ctx, ov = layer.canvas;
+    var runOn = function (ctx, canvas) {
+      layer.ctx = ctx; layer.canvas = canvas;
+      try { self.applyStrokeToLayer(layer, stroke); }
+      finally { layer.ctx = oc; layer.canvas = ov; }
+    };
+    if (a >= 1) { runOn(layer.viewCtx, layer.viewCanvas); return; }
+    var tmp = this.takeScratch();
+    clearCtx(tmp.ctx, this.width, this.height);
+    tmp.ctx.drawImage(layer.viewCanvas, 0, 0);
+    runOn(tmp.ctx, tmp.canvas);
+    var vc = layer.viewCtx;
+    vc.save();
+    vc.setTransform(1, 0, 0, 1, 0, 0);
+    vc.globalAlpha = a;
+    vc.globalCompositeOperation = 'source-over';
+    vc.filter = 'none';
+    vc.drawImage(tmp.canvas, 0, 0);
+    vc.restore();
+    this.releaseScratch(tmp.canvas);
+  };
+
+  /** 刚提交完一笔：顺手往 viewCanvas 上补一笔（不用重放整层，几十笔的图层也不会卡） */
+  CanvasEngine.prototype.mirrorToView = function (layer, stroke) {
+    if (!this.dimOn() || !layer || !stroke) return;
+    if (isSelectStroke(stroke)) return;
+    this.ensureView(layer);
+    this.applyStrokeToView(layer, stroke);
+    layer.viewN = layer.strokes.length;
+  };
+
+  /** 整层重建 viewCanvas（设置变了 / 历史被改写过） */
+  CanvasEngine.prototype.rebuildView = function (layer) {
+    if (!layer) return;
+    if (!this.dimOn()) {
+      if (layer.viewCanvas) { layer.viewCanvas = null; layer.viewCtx = null; layer.viewN = -1; }
+      return;
+    }
+    this.ensureView(layer);
+    clearCtx(layer.viewCtx, this.width, this.height);
+    if (layer.baseImage) layer.viewCtx.drawImage(layer.baseImage, 0, 0, this.width, this.height);
+    layer.viewN = 0;
+    layer.viewBaseSeq = layer.baseSeq || 0;
+    layer.viewKill = false;
+    for (var i = 0; i < layer.strokes.length; i++) {
+      var s = layer.strokes[i];
+      if (s.seq && layer.viewBaseSeq && s.seq <= layer.viewBaseSeq) continue;
+      this.applyStrokeToView(layer, s);
+    }
+    layer.viewN = layer.strokes.length;
+  };
+
+  /** 需要时把 viewCanvas 补齐（只补新增的那几笔；作废了就整层重建） */
+  CanvasEngine.prototype.syncView = function (layer) {
+    if (!layer) return;
+    if (!this.dimOn()) {
+      if (layer.viewCanvas) { layer.viewCanvas = null; layer.viewCtx = null; layer.viewN = -1; layer.viewKill = false; }
+      return;
+    }
+    var baseSeq = layer.baseSeq || 0;
+    if (layer.viewKill || !layer.viewCanvas || layer.viewN < 0 ||
+        layer.viewN > layer.strokes.length || layer.viewBaseSeq !== baseSeq) {
+      this.rebuildView(layer);
+      return;
+    }
+    if (layer.viewN === layer.strokes.length) return;
+    for (var i = layer.viewN; i < layer.strokes.length; i++) {
+      var s = layer.strokes[i];
+      if (s.seq && baseSeq && s.seq <= baseSeq) continue;
+      this.applyStrokeToView(layer, s);
+    }
+    layer.viewN = layer.strokes.length;
+  };
+
+  CanvasEngine.prototype.setDimMode = function (mode) {
+    this.dimMode = DIM_LEVELS[mode] != null || mode === 'off' ? mode : 'off';
+    if (!this.dimOn()) {
+      this.layers.forEach(function (l) { l.viewCanvas = null; l.viewCtx = null; l.viewN = -1; l.viewKill = false; });
+    } else {
+      this.layers.forEach(this.killView.bind(this));
+    }
+    this.baseDirty = true; this.baseKey = '';
+    this.invalidate();
+  };
+
+  CanvasEngine.prototype.setUserDim = function (userId, alpha) {
+    if (!userId) return;
+    if (alpha == null) delete this.dimUsers[userId];
+    else this.dimUsers[userId] = clamp(alpha, 0, 1);
+    if (this.dimOn()) this.layers.forEach(this.killView.bind(this));
+    this.baseDirty = true; this.baseKey = '';
+    this.invalidate();
+  };
+
+  CanvasEngine.prototype.setMeId = function (id) {
+    if (this.meId === id) return;
+    this.meId = id || null;
+    if (this.dimOn()) this.layers.forEach(this.killView.bind(this));
+    this.baseDirty = true; this.baseKey = '';
+    this.invalidate();
+  };
+
+  CanvasEngine.prototype.setLocalHidden = function (layerId, on) {
+    if (on) this.localHidden.add(layerId);
+    else this.localHidden.delete(layerId);
+    this.baseDirty = true; this.baseKey = '';
+    this.invalidate();
+    this.emit('layerVis', { layerId: layerId, localHidden: !!on });
+  };
+
+  CanvasEngine.prototype.toggleLocalHidden = function (layerId) {
+    this.setLocalHidden(layerId, !this.localHidden.has(layerId));
+    return this.localHidden.has(layerId);
+  };
+
+  CanvasEngine.prototype.clearLocalHidden = function () {
+    if (!this.localHidden.size) return;
+    this.localHidden.clear();
+    this.baseDirty = true; this.baseKey = '';
+    this.invalidate();
+    this.emit('layerVis', {});
+  };
+
+  CanvasEngine.prototype.localHiddenCount = function () { return this.localHidden.size; };
 
   CanvasEngine.prototype.clearScope = function (scope, layerId) {
     var self = this;
@@ -1381,6 +1618,7 @@
         l.strokes = [];
         clearCtx(l.ctx, self.width, self.height);
         l.thumb = null;
+        self.killView(l);
         // 缩略图必须一起刷新：只把 thumb 置空的话，图层条上会一直挂着清除前的旧图，
         // 看上去就像「清除按钮没生效」。
         self.markLayerThumb(l);
@@ -1790,6 +2028,7 @@
     }
     layerCommit(layer);
     this.markLayerThumb(layer);
+    this.killView(layer);
 
     this.transform = new global.ChaTransform.Session(this, {
       buf: buf.canvas, rect: rect, layerId: layer.id, saved: saved.canvas
@@ -1823,6 +2062,7 @@
       layer.ctx.drawImage(t.saved, 0, 0);
       layerCommit(layer);
       this.markLayerThumb(layer);
+      this.killView(layer);
     }
 
     this.baseDirty = true;
@@ -1849,6 +2089,7 @@
     layer.strokes = [];
     layerCommit(layer);
     this.markLayerThumb(layer);
+    this.killView(layer);
     this.strokes = this.strokes.filter(function (s) {
       if (s.layerId === layerId) { self.byId.delete(s.id); return false; }
       return true;
@@ -2173,6 +2414,7 @@
   CanvasEngine.prototype.rebuildBase = function () {
     var active = this.replayMode ? new Set() : this.activeLayerIds();
     var key = active.size + '|' + this.width + 'x' + this.height + '|' + this.background + '|' +
+      'dim:' + this.dimKey() + '|' +
       this.layers.map(function (l) {
         return l.id + (l.visible ? '1' : '0') + l.opacity + l.blend + ':' +
           l.strokes.length + '/' + (l.baseSeq || 0) + '/' + (l.alphaLock ? 1 : 0);
@@ -2192,10 +2434,10 @@
     ctx.fillRect(0, 0, this.width, this.height);
     for (var i = 0; i < this.layers.length; i++) {
       var l = this.layers[i];
-      if (!l.visible || active.has(l.id)) continue;
+      if (!l.visible || this.isLocallyHidden(l) || active.has(l.id)) continue;
       ctx.globalAlpha = l.opacity;
       ctx.globalCompositeOperation = blendOp(l.blend);
-      ctx.drawImage(l.canvas, 0, 0);
+      ctx.drawImage(this.displayCanvas(l), 0, 0);
     }
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
@@ -2227,7 +2469,7 @@
       dstCtx.globalCompositeOperation = 'source-over';
       return;
     }
-    tmpCtx.drawImage(layer.canvas, 0, 0);
+    tmpCtx.drawImage(this.displayCanvas(layer), 0, 0);
     this.pending.forEach(function (e) {
       if (e.layer !== layer) return;
       var s = e.stroke;
@@ -2285,7 +2527,7 @@
         var tmp = this.takeTmp();
         for (var i = 0; i < this.layers.length; i++) {
           var l = this.layers[i];
-          if (!l.visible || !active.has(l.id)) continue;
+          if (!l.visible || this.isLocallyHidden(l) || !active.has(l.id)) continue;
           this.composeLayer(ctx, tmp.ctx, tmp.canvas, l);
         }
         this.releaseScratch(tmp.canvas);

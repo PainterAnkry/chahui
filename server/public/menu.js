@@ -152,6 +152,15 @@
         def('layer', 'layer.mergeVisible', '合并可见图层', { mnemonic: 'V', run: function () { A().mergeVisible(); } }),
         def('layer', 'layer.bake', '固化当前图层', { mnemonic: 'F', run: function () { A().bake(); } }),
         SEP,
+        // 「只对我隐藏」和上面那个「显示 / 隐藏」是两件事：
+        // 前者只在你这块屏幕上生效（看底稿用），后者会同步给所有人。
+        def('layer', 'layer.localHide', '只对我隐藏这一层', {
+          mnemonic: 'H', run: function () { A().toggleLocalHideActive(); }
+        }),
+        def('layer', 'layer.localShowAll', '取消所有「只对我隐藏」', {
+          run: function () { A().clearLocalHiddenUi(); }
+        }),
+        SEP,
         off('layer', '图层属性', 'R')
       ]
     },
@@ -290,6 +299,29 @@
         }),
         def('window', 'window.panelReset', '恢复默认面板布局', {
           run: function () { A().resetPanels(); }
+        }),
+        SEP,
+        // 「他人笔触」= 别人的笔迹在本机显示得多清楚。只改自己这块屏幕，
+        // 不同步、不影响导出 —— 画布上人多的时候一眼分清哪笔是自己画的。
+        def('window', 'window.dimOthers', '他人笔触', {
+          mnemonic: 'O', sub: [
+            sub('window', 'window.dim.off', '原样显示', {
+              run: function () { A().setDimMode('off'); },
+              check: function () { var s = A().state; return !!s && s.dimMode === 'off'; }
+            }),
+            sub('window', 'window.dim.soft', '淡一点（45%）', {
+              run: function () { A().setDimMode('soft'); },
+              check: function () { var s = A().state; return !!s && s.dimMode === 'soft'; }
+            }),
+            sub('window', 'window.dim.faint', '很淡（14%）', {
+              run: function () { A().setDimMode('faint'); },
+              check: function () { var s = A().state; return !!s && s.dimMode === 'faint'; }
+            }),
+            sub('window', 'window.dim.hide', '不显示别人的笔迹', {
+              run: function () { A().setDimMode('hide'); },
+              check: function () { var s = A().state; return !!s && s.dimMode === 'hide'; }
+            })
+          ]
         }),
         def('window', 'window.detach', '分离操作面板', {
           mnemonic: 'P', sub: [{ label: '（网页版不支持分离窗口）', disabled: true }]
