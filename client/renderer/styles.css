@@ -1880,3 +1880,291 @@ body.panel-dragging * { cursor: grabbing !important; }
     box-shadow: -8px 0 24px rgba(20, 30, 50, .12);
   }
 }
+
+/* ==================== 你画我猜 ==================== */
+.game-hud {
+  position: absolute;
+  top: 54px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 35;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 8px 5px 12px;
+  background: rgba(255, 255, 255, .96);
+  border: 1px solid #d5dce6;
+  border-radius: 12px;
+  box-shadow: 0 6px 20px rgba(20, 30, 50, .12);
+  backdrop-filter: blur(4px);
+  font-size: 12.5px;
+  color: var(--text);
+  max-width: calc(100% - 24px);
+}
+.game-hud .gh-phase {
+  font-weight: 600;
+  color: var(--accent);
+  white-space: nowrap;
+}
+.game-hud .gh-timer {
+  font-family: var(--mono);
+  font-size: 17px;
+  font-weight: 600;
+  min-width: 40px;
+  text-align: center;
+  color: var(--text);
+}
+.game-hud .gh-timer.warn { color: var(--danger); }
+.game-hud .gh-word {
+  color: var(--text-dim);
+  white-space: nowrap;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.game-hud .gh-word b {
+  color: var(--text);
+  letter-spacing: 3px;
+  font-size: 13.5px;
+}
+.game-hud .gh-round {
+  color: var(--text-dim);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.game-score {
+  position: absolute;
+  top: 92px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 36;
+  width: 250px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.gs-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 12.5px;
+}
+.gs-list { padding: 4px 0; max-height: 240px; overflow-y: auto; }
+.gs-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  font-size: 12.5px;
+}
+.gs-row.me { background: var(--accent-soft); }
+.gs-row .gs-rank {
+  width: 18px;
+  text-align: center;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+.gs-row .gs-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gs-row .gs-name .dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 5px;
+  vertical-align: middle;
+}
+.gs-row .gs-score { font-family: var(--mono); font-weight: 600; }
+.gs-row .gs-tag {
+  font-size: 10.5px;
+  color: #fff;
+  background: var(--accent);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+.gs-row.offline { opacity: .5; }
+
+.round-card {
+  position: absolute;
+  top: 54px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 37;
+  min-width: 230px;
+  max-width: calc(100% - 24px);
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, .97);
+  border: 1px solid #d5dce6;
+  border-radius: 12px;
+  box-shadow: 0 8px 26px rgba(20, 30, 50, .16);
+  text-align: center;
+}
+.round-card .rc-title {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  margin-bottom: 2px;
+}
+.round-card .rc-word {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 2px;
+  margin-bottom: 6px;
+}
+.round-card .rc-list {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.7;
+}
+.round-card .rc-list .yes { color: var(--ok); }
+.round-card .rc-next {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  margin-top: 6px;
+  min-height: 14px;
+}
+
+/* 选词弹窗底部：左边是说明，右边是「换一组」 */
+.modal.pick .modal-foot {
+  justify-content: space-between;
+  align-items: center;
+}
+.modal.pick .modal-foot .foot-hints {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.modal.pick .modal-foot .hint { text-align: left; line-height: 1.4; }
+.modal.pick .modal-foot .foot-hints .hint.hidden { display: none; }
+
+.pick-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+.pick-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 13px 12px;
+  font: inherit;
+  font-size: 16px;
+  letter-spacing: 2px;
+  color: var(--text);
+  background: #fbfcfe;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  cursor: pointer;
+}
+.pick-btn:hover {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: #1d5dad;
+}
+.pick-btn .len {
+  font-size: 11px;
+  letter-spacing: 0;
+  color: var(--text-dim);
+}
+.pick-timer {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--accent);
+}
+.modal.pick { max-width: 360px; }
+.modal.game { max-width: 460px; }
+.modal.over { max-width: 400px; }
+.game-rule {
+  margin: 0 0 12px;
+  font-size: 12.5px;
+  line-height: 1.75;
+  color: var(--text-dim);
+}
+.game-rule b { color: var(--text); }
+.game-state {
+  margin: 12px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.game-state b { color: var(--accent); }
+
+.rank-list { display: flex; flex-direction: column; gap: 6px; }
+.rank-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  background: #f8fafc;
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  font-size: 13px;
+}
+.rank-row.top {
+  background: #fff8e8;
+  border-color: #f0d9a8;
+}
+.rank-row .rank-no {
+  width: 22px;
+  text-align: center;
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.rank-row.top .rank-no { color: #b07b17; }
+.rank-row .rank-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rank-row .rank-score {
+  font-family: var(--mono);
+  font-weight: 600;
+}
+
+/* 轮到你画 / 只能看着的时候，画布上给一个明确的提示条 */
+.game-lock-tip {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 34;
+  padding: 5px 14px;
+  font-size: 12px;
+  color: #7a5a17;
+  background: rgba(255, 246, 224, .96);
+  border: 1px solid #f0d9a8;
+  border-radius: 20px;
+  box-shadow: 0 4px 14px rgba(20, 30, 50, .10);
+  pointer-events: none;
+}
+
+.tag-game {
+  font-style: normal;
+  font-size: 9.5px;
+  font-weight: 600;
+  color: #1d5dad;
+  background: var(--accent-soft);
+  border: 0.5px solid var(--accent-line);
+  border-radius: 3px;
+  padding: 0 4px;
+  margin-left: 3px;
+  vertical-align: 1px;
+}

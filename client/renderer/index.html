@@ -29,6 +29,7 @@
 
   <div class="topbar-actions">
     <button class="btn ghost" id="btnRooms" title="房间列表">房间</button>
+    <button class="btn ghost" id="btnGame" title="你画我猜（房主可以开局）">游戏</button>
     <button class="btn ghost" id="btnCanvas" title="画布设置：分辨率与底纸">画布</button>
     <button class="btn ghost" id="btnTransform" title="变换选区内（或整层）的图像 —— Ctrl+T">变换</button>
     <button class="btn ghost" id="btnReplay" title="回放所有人的作画过程">回放</button>
@@ -406,6 +407,33 @@
       <button class="qb-btn" id="qbRef" title="参考图（只有自己看得见）">🖼</button>
     </div>
   </div>
+
+    <!-- 你画我猜：画布上沿的状态条。不在游戏模式时整条隐藏。 -->
+    <div class="game-hud hidden" id="gameHud">
+      <span class="gh-phase" id="ghPhase">等待开始</span>
+      <b class="gh-timer" id="ghTimer">--</b>
+      <span class="gh-word" id="ghWord">—</span>
+      <span class="gh-round" id="ghRound"></span>
+      <button class="mini" id="ghScore" title="查看计分板">计分</button>
+    </div>
+
+    <!-- 计分板（点 HUD 上的「计分」浮出来） -->
+    <div class="game-score hidden" id="gameScore">
+      <div class="gs-head">
+        <b>计分板</b>
+        <span class="spacer"></span>
+        <button class="mini" id="gsClose">收起</button>
+      </div>
+      <div class="gs-list" id="gsList"></div>
+    </div>
+
+    <!-- 回合结算小卡片（自动消失，不挡着看画） -->
+    <div class="round-card hidden" id="roundCard">
+      <div class="rc-title" id="rcTitle">回合结束</div>
+      <div class="rc-word" id="rcWord"></div>
+      <div class="rc-list" id="rcList"></div>
+      <div class="rc-next" id="rcNext"></div>
+    </div>
 
   <div class="canvas-wrap" id="canvasWrap">
       <canvas id="view"></canvas>
@@ -935,6 +963,78 @@
         <button class="btn tiny ghost" id="btnCSizeZero">取消</button>
         <button class="btn tiny primary" id="btnCSizeOk">确定</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 你画我猜 ============ -->
+<div class="modal-mask hidden" id="gameMask">
+  <div class="modal game">
+    <div class="modal-head">
+      <h3>你画我猜</h3>
+      <button class="icon-btn" id="btnGameClose">×</button>
+    </div>
+    <div class="modal-body">
+      <p class="game-rule" id="gameRule">
+        轮流当画手：<b>画手</b>从三个词里挑一个，只能用画的；
+        其他人在<b>聊天框</b>里打字猜。猜得越快分越高，画手也会因为别人猜出来而得分。
+        回合之间画布会自动清空。
+      </p>
+      <div class="form-row">
+        <label>回合数</label>
+        <select id="gameRounds">
+          <option value="2">2 回合</option>
+          <option value="4">4 回合</option>
+          <option value="6" selected>6 回合</option>
+          <option value="8">8 回合</option>
+          <option value="12">12 回合</option>
+        </select>
+        <span class="hint">每位画手出场的次数由回合数与人数共同决定</span>
+      </div>
+      <p class="game-state" id="gameState">当前：自由绘画</p>
+    </div>
+    <div class="modal-foot">
+      <button class="btn danger hidden" id="btnGameStop">结束游戏</button>
+      <span class="spacer"></span>
+      <button class="btn" id="btnGameCancel">关闭</button>
+      <button class="btn primary" id="btnGameStart">开始游戏</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask hidden" id="pickMask">
+  <div class="modal pick">
+    <div class="modal-head">
+      <h3>选一个词来画</h3>
+      <span class="pick-timer" id="pickTimer">20</span>
+    </div>
+    <div class="modal-body">
+      <p class="hint">你是这一回合的画手。别人只知道字数，猜中了会广播「谁猜对了」。</p>
+      <div class="pick-list" id="pickList"></div>
+    </div>
+    <div class="modal-foot">
+      <div class="foot-hints">
+        <span class="hint" id="repickHint">都不好画？可以换一组（每回合 1 次）</span>
+        <span class="hint">超时会随机替你选一个</span>
+      </div>
+      <button class="btn ghost" id="btnRepick" title="换一组候选词（每回合限一次）">换一组</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask hidden" id="overMask">
+  <div class="modal over">
+    <div class="modal-head">
+      <h3>本局结束</h3>
+      <button class="icon-btn" id="btnOverClose">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="rank-list" id="rankList"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" id="btnOverStop">结束游戏</button>
+      <span class="spacer"></span>
+      <button class="btn primary" id="btnOverAgain">再来一局</button>
     </div>
   </div>
 </div>

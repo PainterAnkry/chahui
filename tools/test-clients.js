@@ -174,6 +174,13 @@ async function main() {
   B.send(P.C2S.CHAT, { text: '一起来画吧！' });
   await sleep(200);
   ok('A 收到聊天', A.chat.some(m => m.text === '一起来画吧！'));
+  // 发送者自己只能收到一份。广播没排除发送者、又单独 send 一次的话，
+  // 每个人都会看到自己发的消息出现两遍（聊天是游戏中「猜词」的唯一通道，尤其显眼）
+  {
+    const mine = B.chat.filter(m => m.text === '一起来画吧！');
+    ok('发送者自己只收到一份（不会被广播 + 回执发两遍）', mine.length === 1, '收到 ' + mine.length + ' 份');
+    ok('其他人也只收到一份', A.chat.filter(m => m.text === '一起来画吧！').length === 1);
+  }
 
   console.log('\n[8] 迟到者快照同步');
   const C = Client('伽马');
@@ -238,6 +245,74 @@ async function main() {
   const list2 = C.log.filter(m => m.t === P.S2C.ROOM_LIST).pop();
   ok('房间已从列表移除', removed,
     'roomId2=' + roomId2 + ' 列表=[' + ((list2 && list2.rooms) || []).map(r => r.id).join(',') + ']');
+
+  /* 「解散」和「删除」是两条不同的路径，服务端都会通知房内的人：
+       解散 = 在房间里点（ROOM_DESTROY → room:destroyed）
+       删除 = 在房间列表里点（ROOM_DEL → room:deleted）
+     前端少接一条，收到那条的人就会停在一个已经不存在的房间里。这里把两条都验一遍。 */
+  console.log('\n[13b] 从房间列表删除房间（成员要收到 room:deleted）');
+  const F = Client('福克斯');
+  await F.ready();
+  const roomId3 = 'del_' + Date.now().toString(36);
+  F.send(P.C2S.ROOM_CREATE, { id: roomId3, name: '待删房间', user: '福克斯', width: 1280, height: 800 });
+  await sleep(300);
+  ok('F 建房成功', !!F.room && F.room.id === roomId3);
+
+  const G = Client('高尔夫');
+  await G.ready();
+  G.send(P.C2S.ROOM_JOIN, { roomId: roomId3, user: '高尔夫' });
+  await sleep(300);
+  ok('G 加入待删房间', !!G.room && G.room.id === roomId3);
+
+  F.send(P.C2S.ROOM_DEL, { roomId: roomId3 });
+  ok('删除方收到成功回执', await waitFor(() => F.log.some(m => m.t === P.S2C.OK && m.deleted === roomId3)));
+  ok('房内其他人收到 room:deleted', await waitFor(() => G.log.some(m => m.t === P.S2C.ROOM_DELETED)),
+    'G=[' + G.log.map(m => m.t).join(',') + ']');
+
+  // 被请出的人必须能立刻继续用 —— 如果服务端没把 ws._roomId 摘干净，
+  // 他的连接会一直指向那个已被丢弃的房间，之后发什么都被静默丢掉
+  const roomId4 = 'after_' + Date.now().toString(36);
+  G.send(P.C2S.ROOM_CREATE, { id: roomId4, name: '删后新建', user: '高尔夫', width: 800, height: 600 });
+  ok('被请出的人可以立刻建新房间', await waitFor(() => !!G.room && G.room.id === roomId4),
+    'G.room=' + (G.room && G.room.id) + ' err=' + JSON.stringify(G.got.errors || []));
+  F.ws.close(); G.ws.close();
+
+  /* 房主退房后房主必须转移：所有「仅房主」的操作（结束游戏 / 解散房间 / 固化底图 /
+     改分辨率）都是按 ownerId 判的。不移交的话房间还在、人还在，但没人有权限 ——
+     尤其是游戏：画手走了、猜手被锁着，谁都没法按「结束游戏」，全员卡死。 */
+  console.log('\n[13c] 房主退房后房主自动转移');
+  const H = Client('房主甲');
+  await H.ready();
+  const roomId5 = 'own_' + Date.now().toString(36);
+  H.send(P.C2S.ROOM_CREATE, { id: roomId5, name: '房主转移', user: '房主甲', width: 1024, height: 768 });
+  await sleep(300);
+  ok('H 建房并成为房主', !!H.room && !!H.you && H.you.isOwner === true);
+
+  const I2 = Client('接任者');
+  await I2.ready();
+  I2.send(P.C2S.ROOM_JOIN, { roomId: roomId5, user: '接任者' });
+  await sleep(350);
+  ok('I2 刚进来时不是房主', !!I2.you && I2.you.isOwner === false);
+
+  H.send(P.C2S.ROOM_LEAVE, {});
+  const became = await waitFor(() => {
+    const me = I2.members.filter(x => x.userId === I2.you.userId)[0];
+    return !!me && me.isOwner === true;
+  });
+  ok('房主离开后，房内剩下的人接任房主', became,
+    '成员=' + JSON.stringify(I2.members.map(m => m.name + ':' + m.isOwner)));
+  ok('有「成为新房主」的系统播报',
+    I2.chat.some(m => m.system && /新房主/.test(m.text)),
+    I2.chat.map(m => m.text).join(' | '));
+
+  // 光标记 isOwner 不算数，得真的能执行仅房主的操作
+  I2.send(P.C2S.ROOM_RESIZE, { width: 900, height: 700 });
+  ok('接任者真的拿到了仅房主的权限（改分辨率成功）',
+    await waitFor(() => {
+      const r = I2.log.filter(m => m.t === P.S2C.ROOM_RESIZED).pop();
+      return !!r && r.width === 900 && r.height === 700;
+    }), 'err=' + JSON.stringify(I2.got.errors || []));
+  H.ws.close(); I2.ws.close();
 
   A.ws.close(); B.ws.close(); C.ws.close(); D.ws.close(); E.ws.close(); D2.ws.close();
   await sleep(200);

@@ -52,6 +52,12 @@
     myUndo: [],
     myRedo: [],
     joinCount: 0,
+    // 你画我猜：服务端推来的最新一份快照（已按我裁剪过 —— 猜手拿到的 word 恒为空）
+    // skew 是「服务端时钟 - 本机时钟」，倒计时按它换算，免得各端显示不一致
+    game: null,
+    gameSkew: 0,
+    gameRoundKey: '',     // 「第几回合 + 阶段」去重，用来判断要不要弹结算卡片
+    gameWordShown: '',    // 已经提示过的词，避免每次状态同步都再弹一次
     tool: 'brush',
     color: '#2b2b2b',
     bgColor: '#ffffff',
@@ -2230,8 +2236,10 @@
     rooms.forEach(function (r) {
       var el = document.createElement('div');
       el.className = 'room-item' + (r.blank ? ' blank' : '');
+      var gameOn = r.game && r.game !== 'off';
       var html = '<div class="rn"><b>' + esc(r.name) + (r.hasPassword ? ' 🔒' : '') +
-        (r.blank ? ' <i class="tag-blank">空房</i>' : '') + '</b>' +
+        (r.blank ? ' <i class="tag-blank">空房</i>' : '') +
+        (gameOn ? ' <i class="tag-game">游戏中</i>' : '') + '</b>' +
         '<span>' + r.width + '×' + r.height + ' · ' + r.strokes + ' 笔' +
         (r.ownerName ? ' · ' + esc(r.ownerName) + ' 创建' : '') + '</span></div>' +
         '<div class="cnt"><i></i>' + r.online + '</div>';
@@ -2452,6 +2460,8 @@
   function beginLocal(px, py, pressure, pointerType) {
     var layer = engine.activeLayer();
     if (!layer || !S.joined) return;
+    // 你画我猜：非画手不许落笔。这里只是「别让人白画一笔」，真正的拦截在服务端。
+    if (gameLocked()) { toast('这一回合只有画手能画', 'err', 1600); return; }
     if (layer.locked) { toast('图层「' + layer.name + '」已锁定'); return; }
 
     var usePressure = S.pressure && pointerType && pointerType !== 'mouse';
@@ -2783,6 +2793,7 @@
   function startTransform() {
     if (engine.transform) return;
     if (!S.joined) { openEntry(true); return; }
+    if (gameLocked()) { toast('游戏进行中只有画手能改画布', 'err', 1800); return; }
     var layer = engine.activeLayer();
     if (!layer) return;
     if (layer.locked) { toast('图层「' + layer.name + '」已锁定', 'err'); return; }
@@ -2967,6 +2978,8 @@
         renderMembers();
         $('#chatList').innerHTML = '';
         (msg.chat || []).forEach(function (m) { renderChatMsg(m); });
+        // 游戏状态随入房一起来：新进来的人立刻能看到 HUD（可能还要接着画）
+        applyGameState(msg.game || null);
 
         S.historyQueue = [];
         S.historyTotal = (msg.history && msg.history.count) || 0;
@@ -2993,6 +3006,8 @@
         S.members = msg.members || [];
         var ids = S.members.map(function (m) { return m.userId; });
         S.cursors.forEach(function (v, k) { if (ids.indexOf(k) < 0) removeCursor(k); });
+        // 房主可能已经转移（原房主退房了），每次成员变动都要重新对一次自己的身份
+        refreshMyRole();
         renderMembers();
         renderRoomChip();
         break;
@@ -3079,6 +3094,10 @@
       case P.S2C.STROKE_REMOVED: {
         if (msg.reason === 'clear') {
           engine.clearScope(msg.scope || 'layer', msg.layerId);
+          // 游戏里的回合清空是服务端发起的，它会顺带推进 seq。
+          // 这里必须把水位抬到服务端那一档，否则之后画的笔会被当成「已固化」跳过
+          // （表现：画上去看不见，这是本项目最隐蔽的一类 bug）。
+          if (msg.seq) engine.seq = Math.max(engine.seq, msg.seq);
           renderLayers();
           // 整片内容被清掉，撤销栈 / 重做栈里的笔迹都已失效
           pruneUndo();
@@ -3103,12 +3122,32 @@
         updateCursor(msg);
         break;
 
+      /* ---- 你画我猜 ---- */
+      case P.S2C.GAME_STATE:
+        applyGameState(msg.game);
+        break;
+
+      case P.S2C.GAME_WORD:
+        onGameWord(msg.word);
+        break;
+
+      case P.S2C.GAME_CORRECT:
+        onGameCorrect(msg);
+        break;
+
       case P.S2C.ROOM_LEFT:
         resetRoomUi('');
         break;
 
       case P.S2C.ROOM_DESTROYED:
         resetRoomUi('房主解散了房间' + (msg.by ? '（' + msg.by + '）' : '') + '，你已被请出');
+        break;
+
+      // 房间被「从列表里删掉」时走这条（和解散是两件事：解散是在房间里点，删除是在列表里点）。
+      // 服务端两条都会发给房内的人，前端就得两条都认 —— 只认一条的话，
+      // 收到本条的人界面会停在那个已经不存在的房间里，之后画什么都没反应。
+      case P.S2C.ROOM_DELETED:
+        resetRoomUi('这个房间已被删除，你已被请出');
         break;
 
       case P.S2C.OK:
@@ -3553,6 +3592,7 @@
   function bake() {
     if (!S.room) return;
     if (!S.me.isOwner) { toast('只有房主可以固化底图', 'err'); return; }
+    if (gameLocked()) { toast('游戏进行中不能固化底图', 'err', 1800); return; }
     if (!engine.strokes.length) { toast('没有需要固化的笔迹'); return; }
     var upToSeq = engine.seq;
     var pngs = {};
@@ -4242,6 +4282,10 @@
   function resetRoomUi(reason) {
     // 掉线 / 换房时把没提交的变换丢掉，免得图层一直停在「被挖空」的状态
     if (engine.transform) { engine.endTransform(false); endTransformUi(); }
+    closeGameUi();
+    S.game = null;
+    S.gameRoundKey = '';
+    S.gameWordShown = '';
     S.joined = false;
     S.room = null;
     S.members = [];
@@ -4817,6 +4861,29 @@
     $('#btnShare').addEventListener('click', doShare);
     $('#btnBake').addEventListener('click', bake);
     $('#btnCanvas').addEventListener('click', openCanvasDialog);
+
+    /* ---- 你画我猜 ---- */
+    $('#btnGame').addEventListener('click', openGameDialog);
+    $('#btnGameClose').addEventListener('click', function () { $('#gameMask').classList.add('hidden'); });
+    $('#btnGameCancel').addEventListener('click', function () { $('#gameMask').classList.add('hidden'); });
+    $('#btnGameStart').addEventListener('click', startGame);
+    $('#btnGameStop').addEventListener('click', function () {
+      confirmDialog('结束这一局？分数不会保留，画布会留在当前画面。', {
+        title: '结束游戏', yes: '结束游戏', danger: true
+      }).then(function (yes) { if (yes) stopGame(); });
+    });
+    $('#ghScore').addEventListener('click', toggleScore);
+    $('#gsClose').addEventListener('click', toggleScore);
+    $('#btnRepick').addEventListener('click', function () {
+      if (this.disabled) return;
+      net.send(P.C2S.GAME_REPICK, {});
+    });
+    $('#btnOverClose').addEventListener('click', closeOver);
+    $('#btnOverStop').addEventListener('click', function () { stopGame(); });
+    $('#btnOverAgain').addEventListener('click', function () {
+      closeOver();
+      net.send(P.C2S.GAME_START, { rounds: Number($('#gameRounds').value) || P.GAME.DEFAULT_ROUNDS });
+    });
     $('#btnRecord').addEventListener('click', toggleRecord);
     $('#btnReplay').addEventListener('click', function () {
       if (engine.replayMode) stopReplay(); else startReplay();
@@ -4922,6 +4989,381 @@
     el.style.height = 'auto';
   }
 
+  /* ============================================================ 你画我猜 */
+
+  /**
+   * 重新对一次「我是不是房主」。
+   * 房主不是终身制：原房主退房时服务端会把房主交给另一个人（否则「结束游戏」这类
+   * 仅房主的操作就永久锁死了），这里跟着更新，顺带提示本人一声。
+   */
+  function refreshMyRole() {
+    var mine = S.members.filter(function (m) { return m.userId === S.me.userId; })[0];
+    var was = !!S.me.isOwner;
+    S.me.isOwner = !!(mine && mine.isOwner);
+    if (S.joined && S.me.isOwner && !was) toast('原房主离开了，现在你是房主', 'ok', 3200);
+    updateGameDialog();
+    renderGameHud();
+  }
+
+  var PHASE_TEXT = {
+    off: '自由绘画', lobby: '等待开始', pick: '选词中',
+    draw: '作画中', round_end: '回合结束', over: '本局结束'
+  };
+
+  function gameActive() { return !!(S.game && S.game.phase && S.game.phase !== 'off'); }
+
+  /**
+   * 我现在能不能改画布？
+   * 注意这只是「别让交互误导人」——真正的权限在服务端（非画手的笔迹根本不会被广播）。
+   */
+  function gameLocked() { return !!(S.game && S.game.locked && S.joined); }
+
+  function gameImDrawer() { return !!(S.game && S.game.isDrawer); }
+
+  function gameGuessedMe() {
+    if (!S.game || !S.game.guessed) return false;
+    return S.game.guessed.some(function (x) { return x.userId === S.me.userId; });
+  }
+
+  function applyGameState(g) {
+    var prev = S.game;
+    var prevPhase = prev ? prev.phase : 'off';
+    var prevRound = prev ? prev.round : -1;
+    if (g) S.gameSkew = (g.serverNow || Date.now()) - Date.now();
+    S.game = g || null;
+    var phase = S.game ? S.game.phase : 'off';
+
+    renderGameHud();
+    renderGameScore();
+    renderGameLockTip();
+    syncChatUi();
+    updateGameDialog();
+    updateRepickUi();
+
+    // 选词弹窗：只有画手会拿到 choices，所以其他端天然打不开
+    if (phase === 'pick' && gameImDrawer()) openPick(S.game.choices || []);
+    else closePick();
+
+    // 回合结算卡片只在「刚进入 round_end」时弹一次
+    if (phase === 'round_end' && prevPhase !== 'round_end' && S.game.roundResult) {
+      showRoundCard(S.game.roundResult);
+    }
+    if (phase !== 'round_end') hideRoundCard();
+
+    if (phase === 'over' && prevPhase !== 'over') openOver(S.game.scores || []);
+    if (phase !== 'over') closeOver();
+
+    // 阶段变化时的提示
+    if (phase !== prevPhase || (S.game && S.game.round !== prevRound)) {
+      if (phase === 'lobby' && prevPhase === 'off') toast('已进入游戏模式，够 ' + S.game.minPlayers + ' 人就可以开局', 'ok', 3000);
+      if (phase === 'pick') toast(gameImDrawer() ? '轮到你当画手，先选一个词' : gameName(S.game.drawerName) + ' 正在选词…', 'ok', 2600);
+      if (phase === 'draw') {
+        toast(gameImDrawer() ? '开始画吧！' : gameName(S.game.drawerName) + ' 开始作画，快猜', 'ok', 2600);
+      }
+      if (phase === 'off' && prevPhase !== 'off') toast('游戏结束，回到自由绘画', 'ok', 2600);
+    }
+
+    // 画手的词：只在「本回合第一次拿到」时提示，避免每次状态同步都弹一次
+    if (phase === 'draw' && gameImDrawer() && S.game.word) {
+      var key = S.game.round + ':' + S.game.word;
+      if (S.gameWordShown !== key) {
+        S.gameWordShown = key;
+        toast('你要画的是「' + S.game.word + '」', 'ok', 4500);
+      }
+    }
+  }
+
+  function gameName(n) { return n || '某人'; }
+
+  function renderGameHud() {
+    var hud = $('#gameHud');
+    if (!hud) return;
+    if (!gameActive()) { hud.classList.add('hidden'); return; }
+    hud.classList.remove('hidden');
+    var g = S.game;
+    $('#ghPhase').textContent = g.phaseLabel || PHASE_TEXT[g.phase] || '';
+    $('#ghRound').textContent = '第 ' + Math.max(1, Math.min(g.round, g.rounds)) + ' / ' + g.rounds + ' 回合';
+
+    var wordEl = $('#ghWord');
+    if (g.phase === 'draw') {
+      if (g.isDrawer) {
+        wordEl.innerHTML = '你要画：<b>' + esc(g.word || '') + '</b>';
+      } else {
+        // 过半还没人猜出时服务端会给一个「露字」提示：把那一位从 □ 换成真字
+        var hint = g.hint;
+        var blanks = '';
+        for (var i = 0; i < (g.wordLen || 0); i++) {
+          blanks += (hint && hint.index === i) ? esc(hint.char) : '□';
+        }
+        wordEl.innerHTML = '答案：<b>' + blanks + '</b>（' + (g.guessed || []).length + '/' + g.guessersTotal + ' 已猜出）';
+      }
+    } else if (g.phase === 'pick') {
+      wordEl.textContent = g.isDrawer ? '请挑一个词' : gameName(g.drawerName) + ' 正在选词…';
+    } else if (g.phase === 'lobby') {
+      wordEl.textContent = S.me.isOwner ? '点顶栏「游戏」开始' : '等房主开局';
+    } else if (g.phase === 'round_end') {
+      wordEl.textContent = '本回合结束';
+    } else if (g.phase === 'over') {
+      wordEl.textContent = '本局结束';
+    } else {
+      wordEl.textContent = '';
+    }
+    updateGameTimer();
+  }
+
+  /** 倒计时用「服务端 deadline − 本机时间（经过时钟偏差校正）」算，各端显示才一致 */
+  function updateGameTimer() {
+    var el = $('#ghTimer');
+    if (!el) return;
+    if (!gameActive() || !S.game.deadline) {
+      el.textContent = '--';
+      el.classList.remove('warn');
+      return;
+    }
+    var left = Math.max(0, Math.ceil((S.game.deadline - (Date.now() + S.gameSkew)) / 1000));
+    el.textContent = left + '秒';
+    el.classList.toggle('warn', left <= 10 && left > 0);
+    if (S.game.phase === 'pick') {
+      var pt = $('#pickTimer');
+      if (pt) pt.textContent = left;
+    }
+    var next = $('#rcNext');
+    if (next) {
+      next.textContent = (S.game.phase === 'round_end' && left > 0)
+        ? left + ' 秒后继续' : '';
+    }
+  }
+
+  function renderGameScore() {
+    var box = $('#gameScore');
+    if (!box) return;
+    if (box.classList.contains('hidden')) return;   // 收起时不白算
+    var list = $('#gsList');
+    var g = S.game;
+    if (!g || !g.scores || !g.scores.length) {
+      list.innerHTML = '<div class="gs-row"><span class="gs-name">还没有分数</span></div>';
+      return;
+    }
+    var html = '';
+    g.scores.forEach(function (s) {
+      var me = s.userId === S.me.userId;
+      var mem = S.members.filter(function (m) { return m.userId === s.userId; })[0] || { color: '#9aa0a8' };
+      var tags = '';
+      if (g.phase === 'draw' && s.userId === g.drawerId) tags += '<span class="gs-tag">画手</span>';
+      if ((g.guessed || []).some(function (x) { return x.userId === s.userId; })) tags += '<span class="gs-tag">已猜出</span>';
+      html += '<div class="gs-row' + (me ? ' me' : '') + (s.online ? '' : ' offline') + '">' +
+        '<span class="gs-rank">' + s.rank + '</span>' +
+        '<span class="gs-name"><i class="dot" style="background:' + esc(mem.color) + '"></i>' +
+        esc(s.name) + (me ? '（我）' : '') + '</span>' +
+        (tags ? '<span>' + tags + '</span>' : '') +
+        '<span class="gs-score">' + s.score + '</span></div>';
+    });
+    list.innerHTML = html;
+  }
+
+  /** 只能看着的时候，在画布下方给一个明确的说明，免得对着画布狂点还以为卡了 */
+  function renderGameLockTip() {
+    var el = $('#gameLockTip');
+    var show = gameLocked();
+    if (!show) { if (el) el.remove(); return; }
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'gameLockTip';
+      el.className = 'game-lock-tip';
+      $('#stage').appendChild(el);
+    }
+    var g = S.game;
+    if (g.phase === 'pick') el.textContent = '正在选词，稍等片刻';
+    else if (g.phase === 'round_end') el.textContent = '本回合结束，看答案';
+    else el.textContent = gameName(g.drawerName) + ' 正在作画 —— 这一回合你只能在聊天框里猜';
+  }
+
+  function syncChatUi() {
+    var input = $('#chatInput');
+    if (!input) return;
+    var hint = '说点什么…（Enter 发送，Shift+Enter 换行）';
+    if (gameActive() && S.game.phase === 'draw') {
+      if (gameImDrawer()) hint = '你是画手，这里说的话不会发出去';
+      else if (gameGuessedMe()) hint = '你已经猜对了，再说话会剧透（不会发出去）';
+      else hint = '输入你的猜测…（Enter 发送）';
+    }
+    input.placeholder = hint;
+  }
+
+  function openPick(choices) {
+    var mask = $('#pickMask');
+    if (!mask) return;
+    if (!choices || !choices.length) { mask.classList.add('hidden'); return; }
+    // 同一个回合已经开着就别重建（否则点一下又被同步覆盖回列表）
+    if (!mask.classList.contains('hidden') && mask.dataset.round === String(S.game.round)) {
+      updateRepickUi();
+      return;
+    }
+    var box = $('#pickList');
+    box.innerHTML = '';
+    choices.forEach(function (w, i) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'pick-btn';
+      b.innerHTML = '<span>' + esc(w) + '</span><span class="len">' + w.length + ' 字</span>';
+      b.addEventListener('click', function () {
+        net.send(P.C2S.GAME_PICK, { index: i });
+        mask.classList.add('hidden');
+        mask.dataset.round = '';
+      });
+      box.appendChild(b);
+    });
+    mask.dataset.round = String(S.game.round);
+    mask.classList.remove('hidden');
+    updateRepickUi();
+    updateGameTimer();
+  }
+
+  /** 「换一组」按钮的状态：不是选词阶段的画手就藏起来，换过就禁用 */
+  function updateRepickUi() {
+    var btn = $('#btnRepick');
+    if (!btn) return;
+    var hint = $('#repickHint');
+    var g = S.game;
+    var show = !!(g && g.phase === 'pick' && g.isDrawer);
+    btn.classList.toggle('hidden', !show);
+    if (hint) hint.classList.toggle('hidden', !show);
+    if (!show) return;
+    var n = g.repickLeft || 0;
+    btn.disabled = n <= 0;
+    btn.textContent = n > 0 ? '换一组' : '已换过';
+    if (hint) {
+      hint.textContent = n > 0
+        ? '都不好画？可以换一组（还剩 ' + n + ' 次）'
+        : '这一回合已经换过了';
+    }
+  }
+
+  function closePick() {
+    var mask = $('#pickMask');
+    if (!mask) return;
+    mask.classList.add('hidden');
+    mask.dataset.round = '';
+  }
+
+  function showRoundCard(rr) {
+    var card = $('#roundCard');
+    if (!card || !rr) return;
+    var why = rr.reason === 'timeout' ? '（时间到）' : rr.reason === 'drawer_left' ? '（画手掉线）' : '';
+    $('#rcTitle').textContent = '第 ' + rr.round + ' 回合结束' + why;
+    $('#rcWord').textContent = rr.word ? '答案是「' + rr.word + '」' : '本回合作废';
+    var html = '';
+    (rr.guessed || []).forEach(function (x) {
+      html += '<div class="yes">✓ ' + esc(x.name) + ' 猜对了（第 ' + x.rank + ' 名）</div>';
+    });
+    (rr.missed || []).forEach(function (x) {
+      html += '<div>· ' + esc(x.name) + ' 没猜出来</div>';
+    });
+    $('#rcList').innerHTML = html || '<div>这一回合没人猜出来</div>';
+    card.classList.remove('hidden');
+    // 停留多久由服务端说了算（GAME.ROUND_END_MS），别在前端写死 ——
+    // 写死的话改了服务端时长就会和下一回合的开场对不上
+    clearTimeout(showRoundCard._t);
+    var left = (S.game && S.game.deadline) ? S.game.deadline - (Date.now() + S.gameSkew) : 0;
+    showRoundCard._t = setTimeout(hideRoundCard, Math.max(600, left + 200));
+    updateGameTimer();
+  }
+
+  function hideRoundCard() {
+    var card = $('#roundCard');
+    if (card) card.classList.add('hidden');
+  }
+
+  function openOver(scores) {
+    var mask = $('#overMask');
+    if (!mask) return;
+    var html = '';
+    (scores || []).forEach(function (s, i) {
+      html += '<div class="rank-row' + (i === 0 ? ' top' : '') + '">' +
+        '<span class="rank-no">' + (s.rank || i + 1) + '</span>' +
+        '<span class="rank-name">' + esc(s.name) + (s.userId === S.me.userId ? '（我）' : '') + '</span>' +
+        '<span class="rank-score">' + s.score + ' 分</span></div>';
+    });
+    $('#rankList').innerHTML = html || '<p class="hint">这一局没有人得分</p>';
+    $('#btnOverAgain').classList.toggle('hidden', !S.me.isOwner);
+    $('#btnOverStop').classList.toggle('hidden', !S.me.isOwner);
+    mask.classList.remove('hidden');
+  }
+
+  function closeOver() {
+    var mask = $('#overMask');
+    if (mask) mask.classList.add('hidden');
+  }
+
+  function onGameWord(word) {
+    // 私有通道：词只发给画手一个人，不进广播流
+    if (S.game && S.game.isDrawer && word) {
+      S.game.word = word;
+      renderGameHud();
+    }
+  }
+
+  function onGameCorrect(msg) {
+    if (!msg || msg.userId === S.me.userId) return;   // 自己的由服务端单独回执
+    toast(msg.name + ' 猜对了（第 ' + msg.rank + ' 名）', 'ok', 2400);
+  }
+
+  /** 顶栏「游戏」按钮：打开设置弹窗 */
+  function updateGameDialog() {
+    var state = $('#gameState');
+    if (!state) return;
+    var g = S.game;
+    if (gameActive()) {
+      state.innerHTML = '当前：<b>' + (g.phaseLabel || PHASE_TEXT[g.phase]) + '</b>' +
+        (g.drawerName ? '　画手：' + esc(g.drawerName) : '') +
+        '　第 ' + Math.max(1, Math.min(g.round, g.rounds)) + ' / ' + g.rounds + ' 回合';
+    } else {
+      state.textContent = '当前：自由绘画';
+    }
+    $('#btnGameStart').classList.toggle('hidden', !S.me.isOwner || gameActive());
+    $('#btnGameStop').classList.toggle('hidden', !S.me.isOwner || !gameActive());
+    $('#gameRounds').disabled = !S.me.isOwner;
+  }
+
+  function openGameDialog() {
+    if (!S.joined) { toast('先进一个茶绘室再开局', 'err'); return; }
+    updateGameDialog();
+    $('#gameMask').classList.remove('hidden');
+  }
+
+  function startGame() {
+    var rounds = Number($('#gameRounds').value) || P.GAME.DEFAULT_ROUNDS;
+    net.send(P.C2S.GAME_START, { rounds: rounds });
+    $('#gameMask').classList.add('hidden');
+  }
+
+  function stopGame() {
+    net.send(P.C2S.GAME_STOP, {});
+    $('#gameMask').classList.add('hidden');
+    closeOver();
+  }
+
+  function toggleScore() {
+    var box = $('#gameScore');
+    box.classList.toggle('hidden');
+    renderGameScore();
+  }
+
+  function closeGameUi() {
+    closePick();
+    hideRoundCard();
+    closeOver();
+    $('#gameMask').classList.add('hidden');
+    var hud = $('#gameHud');
+    if (hud) hud.classList.add('hidden');
+    var box = $('#gameScore');
+    if (box) box.classList.add('hidden');
+    var tip = $('#gameLockTip');
+    if (tip) tip.remove();
+    var input = $('#chatInput');
+    if (input) input.placeholder = '说点什么…（Enter 发送，Shift+Enter 换行）';
+  }
+
   /* ============================================================ 启动 */
 
   function buildEffectSelects() {
@@ -4971,6 +5413,9 @@
     $$('.about-tabs .tab').forEach(function (t) { t.addEventListener('click', function () { showAboutTab(t.dataset.atab); }); });
     $('#refFileInput').addEventListener('change', function () { loadReferenceImage(this.files[0]); });
     bindTransformPanel();
+    // 你画我猜的倒计时：本地每 250ms 按服务端 deadline 刷新一次，
+    // 不靠服务端逐秒推送（那样每条消息都要过一遍压缩，纯属浪费）
+    setInterval(updateGameTimer, 250);
     engine.attach($('#view'), $('#overlay'));
 
     loadBrush(S.brushId);
@@ -6035,9 +6480,9 @@
 
   /** 点画布上的位置 → 记下来，等用户在对话框里点「放到画布上」 */
   function placeTextAt(dp) {
+    if (gameLocked()) { toast('这一回合只有画手能改画布', 'err', 1600); return; }
     S.textAt = { x: dp.x, y: dp.y };
     buildTextFamilies();
-    $('#textNote') && ($('#textNote').textContent = '');
     $('#textMask').classList.remove('hidden');
     setTimeout(function () { $('#textInput').focus(); }, 60);
     var el = document.querySelector('#textMask .hint');

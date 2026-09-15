@@ -129,6 +129,12 @@ class Room {
     this.chat = meta.chat || [];
     this.members = new Map(); // connId -> member
     this.dirty = false;
+    /**
+     * 你画我猜的状态机（见 game.js），**刻意不落盘**。
+     * save() 是显式拼 payload 的，所以这里挂了也不会被写进 room.json ——
+     * 服务端一重启就是一局结束，不会出现「半局游戏」这种脏状态。
+     */
+    this.game = null;
   }
 
   get online() { return this.members.size; }
@@ -166,6 +172,8 @@ class Room {
       width: m.width, height: m.height,
       strokes: m.strokeCount, hasPassword: m.hasPassword,
       ownerName: m.ownerName, createdAt: m.createdAt,
+      // 房间列表上标一个「游戏中」的小标签，别让人一头雾水地闯进别人的对局
+      game: this.game && this.game.active ? this.game.phase : 'off',
       // 「空房」= 没人在线 + 一笔没画 + 没有底图。客户端用它来算「清理空房」的条数，
       // 免得按钮文案和服务端实际会删的东西对不上。
       blank: this.online === 0 && this.strokes.length === 0 &&

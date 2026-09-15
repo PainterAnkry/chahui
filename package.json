@@ -1,6 +1,6 @@
 {
   "name": "chahui",
-  "version": "1.5.5",
+  "version": "1.6.0",
   "private": true,
   "description": "茶绘 · 多人实时协作绘画聊天室（桌面端 + 公网服务端，SAI2 风格笔刷体系）",
   "scripts": {
@@ -8,7 +8,7 @@
     "server": "node server/src/index.js",
     "expose": "node tools/expose.js",
     "client": "npm --prefix client start",
-    "check": "node tools/check-css.js client/renderer/styles.css && node tools/check-defs.js",
+    "check": "node tools/check-css.js client/renderer/styles.css && node tools/check-defs.js && node tools/check-ids.js && node tools/check-proto.js",
     "test": "node tools/test-clients.js",
     "test:browser": "node tools/test-browser.js",
     "test:public": "node tools/test-public.js",
@@ -49,7 +49,8 @@
     "video:build": "node tools/video/build.js",
     "video:verify": "node tools/video/verify.js \"video/茶绘-介绍.mp4\"",
     "video:frames": "node tools/video/grab.js",
-    "test:collab": "node tools/test-collab-view.js"
+    "test:collab": "node tools/test-collab-view.js",
+    "test:game": "node tools/test-game.js"
   },
   "license": "MIT",
   "repository": {

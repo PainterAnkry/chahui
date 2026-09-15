@@ -12,6 +12,17 @@
  *   - 笔刷新增「纸纹比例 grainScale」与「纸张质感 paper / 特殊效果 fx」
  *   - 图层混合模式扩充到 SAI2 的完整列表
  *   - 聊天支持表情图（img，dataURL）
+ *
+ * v4 变更（你画我猜）：
+ *   - 房间多出一个「游戏模式」：房主开局后由服务端主持回合制对局
+ *   - 答案只私发给画手（S2C.GAME_WORD），其他人永远收不到明文
+ *   - 游戏模式下的聊天即「猜词」：服务端先比对答案，再决定广播什么
+ *   - 回合进行中只有画手能落笔（服务端强制，不是前端禁用）
+ *
+ * v5 变更（你画我猜完善）：
+ *   - 作画过半还没人猜出时，服务端自动「露一个字」当提示（走 GAME_STATE 的 hint 字段）
+ *   - 画手在选词阶段可以「换一组」候选词（C2S.GAME_REPICK，每回合限次）
+ *   - isNearGuess 不再把单字答案判成「很接近」——一个字的答案没有「接近」可言
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
@@ -19,7 +30,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var PROTOCOL_VERSION = 3;
+  var PROTOCOL_VERSION = 5;
 
   // 客户端 -> 服务端
   var C2S = {
@@ -53,10 +64,16 @@
     LAYER_MERGE: 'layer:merge',     // { srcId, dstId, png } 向下合并（结果像素由客户端渲染）
     LAYER_FLATTEN: 'layer:flatten', // { png, name? } 合并可见图层为一层
 
-    CHAT: 'chat',                   // { text, img? }
+    CHAT: 'chat',                   // { text, img? } —— 游戏中时 text 会被当成猜词
     CURSOR: 'cursor',               // { x, y, active, tool }
     RESYNC: 'resync',
-    PING: 'ping'                    // { at }
+    PING: 'ping',                   // { at }
+
+    // ---- 你画我猜 ----
+    GAME_START: 'game:start',       // { rounds? } 房主开局
+    GAME_STOP: 'game:stop',         // 房主结束本局（回到自由绘画）
+    GAME_PICK: 'game:pick',         // { index } 画手从候选词里挑一个
+    GAME_REPICK: 'game:repick'      // 画手换一组候选词（每回合限次，见 GAME.REPICK_LIMIT）
   };
 
   // 服务端 -> 客户端
@@ -85,7 +102,15 @@
     LAYERS: 'layers',                   // { layers, baseImages? }
     CHAT: 'chat',                       // { id, userId, name, color, text, img?, ts }
     CURSOR: 'cursor',                   // { userId, x, y, active }
-    PONG: 'pong'                        // { t0 }
+    PONG: 'pong',                       // { t0 }
+
+    // ---- 你画我猜 ----
+    // 只有这三条是真正会发出去的。回合结算与最终排名都并进 GAME_STATE（靠 phase 变化触发），
+    // 不另外开消息 —— 少一条消息就少一处「前端接了个永远不触发的 handler」。
+    // GAME_STATE 是「按收件人裁剪过」的完整快照：猜手拿到的版本里没有 word 字段。
+    GAME_STATE: 'game:state',           // { game }  含 phase / wordLen / deadline / roundResult / scores
+    GAME_WORD: 'game:word',             // { word, choices? } 只发给画手
+    GAME_CORRECT: 'game:correct'        // { userId, name, rank, points } 有人猜对了
   };
 
   var HISTORY_CHUNK_SIZE = 400;
@@ -95,6 +120,31 @@
     height: 1000,
     background: '#ffffff',
     roomName: '无名茶绘室'
+  };
+
+  /**
+   * 你画我猜的参数。**时长与计分全部以服务端为准** ——
+   * 客户端只拿 deadline 做倒计时显示，不参与裁定。
+   */
+  var GAME = {
+    MIN_PLAYERS: 2,          // 少于两人开不了局
+    MAX_ROUNDS: 20,
+    DEFAULT_ROUNDS: 6,       // 默认打 6 回合（每人当一次画手，人数多于回合数则轮流）
+    CHOICES: 3,              // 选词时给画手几个候选
+    PICK_MS: 20000,          // 选词时限
+    ROUND_MS: 80000,         // 每回合作画时限
+    ROUND_END_MS: 6000,      // 回合结算展示时长
+    // 第 1、2、3… 个猜对的人分别得多少分（超出的按最后一档）
+    GUESS_POINTS: [100, 80, 60, 50, 40],
+    // 画手：每被猜出一个词得多少分（防止「故意画得没人猜得出」）
+    DRAWER_POINT_PER_GUESS: 20,
+    NEAR_DISTANCE: 1,        // 编辑距离 ≤ 这个值就提示「接近了」（不判定为对）
+    MAX_GUESS_LEN: 40,       // 猜词长度上限（超过直接当普通聊天）
+    // 作画过半还没人猜出时露一个字当提示。少于 HINT_MIN_LEN 个字的答案不给
+    // —— 两个字露一个等于给一半，反而没意思了
+    HINT_RATIO: 0.5,
+    HINT_MIN_LEN: 3,
+    REPICK_LIMIT: 1          // 选词阶段画手可以「换一组」几次
   };
 
   // 用户配色（新成员按顺序取色）
@@ -285,11 +335,60 @@
     return img;
   }
 
+  /**
+   * 猜词归一化：比较答案之前先把「看起来不一样、其实是同一个词」的差异抹平。
+   *
+   * 处理：全角转半角、去空白、去常见标点、统一小写。
+   * 不做同义词 / 繁简转换 —— 那需要词表，属于后期的事。
+   */
+  function normGuess(s) {
+    if (typeof s !== 'string') return '';
+    var t = s.trim().toLowerCase();
+    // 全角 ASCII（！到～）转半角
+    t = t.replace(/[\uff01-\uff5e]/g, function (c) {
+      return String.fromCharCode(c.charCodeAt(0) - 0xfee0);
+    });
+    t = t.replace(/\u3000/g, ' ');
+    // 空白 + 中英文常见标点
+    t = t.replace(/[\s.,!?;:'"`~^&*_\-+=<>|/\\()[\]{}·、。，！？；：""''《》〈〉【】（）…—]/g, '');
+    return t;
+  }
+
+  /** Levenshtein 编辑距离（只用来提示「接近了」，不参与判定） */
+  function editDistance(a, b) {
+    if (a === b) return 0;
+    if (!a.length) return b.length;
+    if (!b.length) return a.length;
+    var prev = [], cur = [];
+    for (var j = 0; j <= b.length; j++) prev[j] = j;
+    for (var i = 1; i <= a.length; i++) {
+      cur = [i];
+      for (var k = 1; k <= b.length; k++) {
+        var cost = a.charAt(i - 1) === b.charAt(k - 1) ? 0 : 1;
+        cur[k] = Math.min(cur[k - 1] + 1, prev[k] + 1, prev[k - 1] + cost);
+      }
+      prev = cur;
+    }
+    return prev[b.length];
+  }
+
+  /** 猜得「很接近」但不对：给个提示，别让玩家干瞪眼 */
+  function isNearGuess(guess, answer) {
+    var g = normGuess(guess), w = normGuess(answer);
+    if (!g || !w || g === w) return false;
+    // 一个字的答案没有「接近」可言：任何一个字与它的编辑距离都是 1，
+    // 不拦掉的话猜什么都会回一句「很接近了」，等于谎报兼泄题
+    if (w.length < 2) return false;
+    if (Math.abs(g.length - w.length) > GAME.NEAR_DISTANCE + 1) return false;
+    return editDistance(g, w) <= GAME.NEAR_DISTANCE;
+  }
+
   return {
     PROTOCOL_VERSION: PROTOCOL_VERSION,
     C2S: C2S,
     S2C: S2C,
     DEFAULTS: DEFAULTS,
+    GAME: GAME,
     HISTORY_CHUNK_SIZE: HISTORY_CHUNK_SIZE,
     USER_COLORS: USER_COLORS,
     TOOLS: TOOLS,
@@ -312,6 +411,9 @@
     qp: qp,
     normalizeBrush: normalizeBrush,
     normalizeSticker: normalizeSticker,
+    normGuess: normGuess,
+    editDistance: editDistance,
+    isNearGuess: isNearGuess,
     newSeed: newSeed
   };
 });

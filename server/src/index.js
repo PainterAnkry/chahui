@@ -8,6 +8,8 @@ const { WebSocketServer } = require('ws');
 
 const P = require('./protocol');
 const { RoomStore } = require('./rooms');
+const { Game, PHASE, CFG: GAME_CFG } = require('./game');
+const { WORDS } = require('./words');
 
 const PORT = parseInt(process.env.PORT || '8437', 10);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -117,7 +119,15 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
   if (url.pathname === '/health') return json(res, 200, { ok: true, rooms: store.rooms.size, uptime: process.uptime() });
   if (url.pathname === '/api/rooms') return json(res, 200, { rooms: store.list() });
-  if (url.pathname === '/api/share') return json(res, 200, { publicUrl: currentPublicUrl(), lanUrls: lanUrls() });
+  // 附带「这台服务端到底是什么配置」——自动化测试靠它判断端口上挂着的
+  // 是不是自己刚起的那个进程（旧进程残留会静默顶替，测试就白跑了）。
+  if (url.pathname === '/api/share') return json(res, 200, {
+    publicUrl: currentPublicUrl(),
+    lanUrls: lanUrls(),
+    pid: process.pid,
+    game: { PICK_MS: GAME_CFG.PICK_MS, ROUND_MS: GAME_CFG.ROUND_MS, ROUND_END_MS: GAME_CFG.ROUND_END_MS },
+    words: WORDS.length
+  });
   if (!fs.existsSync(PUBLIC_DIR)) {
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
     return res.end('茶绘服务端运行中（端口 ' + PORT + '）。桌面客户端可直接连接 /ws。');
@@ -174,6 +184,91 @@ function broadcastLayers(room, baseImages) {
   const payload = { layers: room.layerList() };
   if (baseImages && Object.keys(baseImages).length) payload.baseImages = baseImages;
   roomBroadcast(room, P.S2C.LAYERS, payload);
+}
+
+/* ------------------------------------------------------------------ 你画我猜 */
+
+/** 取房间的游戏状态机（首次访问时挂上去；状态不落盘，重启即结束） */
+function gameOf(room) {
+  if (!room) return null;
+  if (!room.game) room.game = new Game(room, makeGameApi(room));
+  return room.game;
+}
+
+function makeGameApi(room) {
+  return {
+    sync() { syncGame(room); },
+    systemChat(text) { gameChat(room, text); },
+    resetCanvas() { resetGameCanvas(room); }
+  };
+}
+
+/**
+ * 把当前游戏状态推给房间里每个人。
+ * **逐人发送**（而不是一次广播）的唯一理由是：快照要按收件人裁剪 ——
+ * 猜手拿到的版本里 word 必须是空的。词另走一条私有消息，压根不进广播流。
+ */
+function syncGame(room) {
+  const g = room.game;
+  if (!g) return;
+  for (const m of room.members.values()) {
+    if (m.ws.readyState !== m.ws.OPEN) continue;
+    send(m.ws, P.S2C.GAME_STATE, { game: g.snapshotFor(m.userId) });
+    if (g.phase === PHASE.DRAW && m.userId === g.drawerId && g.word) {
+      send(m.ws, P.S2C.GAME_WORD, { word: g.word });
+    }
+  }
+}
+
+/** 游戏相关的系统播报（进聊天记录，重启后还看得见） */
+function gameChat(room, text, onlyUserId) {
+  const entry = {
+    id: P.rid('m'), userId: 'system', name: '系统', color: '#8b8b8b',
+    text, ts: Date.now(), system: true
+  };
+  room.addChat(entry);
+  store.markDirty(room);
+  if (onlyUserId) {
+    for (const m of room.members.values()) {
+      if (m.userId === onlyUserId) send(m.ws, P.S2C.CHAT, entry);
+    }
+    return;
+  }
+  roomBroadcast(room, P.S2C.CHAT, entry);
+}
+
+/**
+ * 回合之间的「清空画布」。
+ *
+ * 与房主手动清空（STROKE_CLEAR）的区别：
+ *   ① 由服务端发起，不需要房主身份；
+ *   ② 必须掐掉所有进行中的笔迹 —— 否则回合结束后才提交的那一笔会落到新回合的画布上；
+ *   ③ 推进一次 seq 并把新水位告诉客户端，保证 engine.seq 与 service seq 始终对齐
+ *      （水位错位的表现很隐蔽：之后画的笔会被当成「已固化」而跳过，画上去看不见）。
+ */
+function resetGameCanvas(room) {
+  for (const m of room.members.values()) {
+    const st = m.ws && m.ws._activeStroke;
+    if (!st) continue;
+    m.ws._activeStroke = null;
+    m.drawing = false;
+    roomBroadcast(room, P.S2C.STROKE_CANCEL, { id: st.id });
+  }
+  room.clear('all');
+  room.seq += 1;
+  store.markDirty(room);
+  roomBroadcast(room, P.S2C.STROKE_REMOVED, {
+    ids: [], reason: 'clear', scope: 'all', by: 'system', removed: true, seq: room.seq
+  });
+  broadcastLayers(room);
+}
+
+/** 游戏进行中，非画手的写操作一律挡在服务端（前端禁用只是「提示」，不是权限） */
+function gameBlocked(ws, room, member) {
+  if (!room || !member || !room.game) return false;
+  if (!room.game.lockedFor(member.userId)) return false;
+  send(ws, P.S2C.ERROR, { code: 'game_locked', message: '这一回合只有画手能改画布' });
+  return true;
 }
 
 /** 笔迹的公共字段（笔刷参数全部落库，保证所有客户端渲染结果一致） */
@@ -237,7 +332,7 @@ function strokeHeader(stroke) {
   };
 }
 
-function joinRoom(ws, room, name, avatar, asOwner) {
+function joinRoom(ws, room, name, avatar) {
   colorCursor.i += 1;
   const member = {
     connId: ws._connId,
@@ -253,7 +348,9 @@ function joinRoom(ws, room, name, avatar, asOwner) {
   room.members.set(ws._connId, member);
   ws._roomId = room.id;
   ws._userId = member.userId;
-  if (asOwner && !room.ownerId) { room.ownerId = member.userId; room.ownerName = member.name; }
+  // 建房的人当然是房主。另外，房主退房后房间会暂时「没有主」（见 transferOwnerIfNeeded），
+  // 这时第一个进来的人接管 —— 否则房间会永久失去所有「仅房主」操作的权限。
+  if (!room.ownerId) { room.ownerId = member.userId; room.ownerName = member.name; }
   room.touch();
 
   send(ws, P.S2C.ROOM_JOINED, {
@@ -262,6 +359,8 @@ function joinRoom(ws, room, name, avatar, asOwner) {
     members: room.memberList(),
     chat: room.chat,
     you: { userId: member.userId, name: member.name, color: member.color, isOwner: member.userId === room.ownerId },
+    // 游戏状态随入房一起给：新进来的人立刻就能看到 HUD，不用等下一次状态同步
+    game: room.game && room.game.active ? room.game.snapshotFor(member.userId) : null,
     history: {
       count: room.strokes.length,
       lastSeq: room.seq,
@@ -279,7 +378,30 @@ function joinRoom(ws, room, name, avatar, asOwner) {
     text: member.name + ' 进入了茶绘室', ts: Date.now(), system: true
   });
   store.markDirty(room);
+  // 放在最后：让新人先拿到完整历史，再收到游戏状态（否则 HUD 会先于画布出现）
+  if (room.game && room.game.active) room.game.onJoin(member);
   console.log('[room] ' + member.name + ' 加入 ' + room.id + '（在线 ' + room.online + '）');
+}
+
+/**
+ * 房主退房时把房主交给还在房间里、最早进来的那个人。
+ *
+ * 不移交的话，所有「仅房主」的操作（结束游戏 / 解散房间 / 固化底图 / 改分辨率）
+ * 就永久锁死了 —— 房间还在、人还在，但没有任何人有权限，尤其是游戏：
+ * 画手走了、猜手被锁着，没人能按「结束游戏」，全员卡死。
+ *
+ * 房间空了就把 ownerId 清成 null，交给下一个进来的人接管（见 joinRoom）。
+ */
+function transferOwnerIfNeeded(room, leaving) {
+  if (!room.ownerId || leaving.userId !== room.ownerId) return null;
+  let next = null;
+  for (const m of room.members.values()) {
+    if (!next || m.joinedAt < next.joinedAt) next = m;
+  }
+  if (!next) { room.ownerId = null; room.ownerName = ''; return null; }
+  room.ownerId = next.userId;
+  room.ownerName = next.name;
+  return next;
 }
 
 function leaveRoom(ws, silent) {
@@ -289,6 +411,7 @@ function leaveRoom(ws, silent) {
   room.members.delete(ws._connId);
   ws._roomId = null;
   if (!member) return;
+  const newOwner = transferOwnerIfNeeded(room, member);
   roomBroadcast(room, P.S2C.MEMBERS, { members: room.memberList() });
   if (!silent) {
     roomBroadcast(room, P.S2C.CHAT, {
@@ -296,8 +419,16 @@ function leaveRoom(ws, silent) {
       text: member.name + ' 离开了茶绘室', ts: Date.now(), system: true
     });
   }
+  if (newOwner) {
+    roomBroadcast(room, P.S2C.CHAT, {
+      id: P.rid('m'), userId: 'system', name: '系统', color: '#8b8b8b',
+      text: '房主 ' + member.name + ' 离开了，' + newOwner.name + ' 成为新房主', ts: Date.now(), system: true
+    });
+  }
   room.lastActiveAt = Date.now();
   store.markDirty(room);
+  // 先把他从成员表里摘掉再通知游戏状态机：onLeave 里的「还剩几个人」必须是最新的
+  if (room.game && room.game.active) room.game.onLeave(member);
 }
 
 wss.on('connection', (ws, req) => {
@@ -349,6 +480,7 @@ function handle(ws, msg) {
         room: room.meta(), layers: room.layerList(), members: room.memberList(),
         chat: room.chat,
         you: { userId: member.userId, name: member.name, color: member.color, isOwner: member.userId === room.ownerId },
+        game: room.game && room.game.active ? room.game.snapshotFor(member.userId) : null,
         history: {
           count: room.strokes.length, lastSeq: room.seq,
           baseImages: room.baseImageMap()
@@ -357,6 +489,8 @@ function handle(ws, msg) {
       const chunks = historyChunks(room);
       if (!chunks.length) send(ws, P.S2C.HISTORY_CHUNK, { strokes: [], done: true });
       else chunks.forEach((c, i) => send(ws, P.S2C.HISTORY_CHUNK, { strokes: c, done: i === chunks.length - 1 }));
+      // 重连的人可能是画手，得把词补发给他
+      if (room.game && room.game.active) syncGame(room);
       return;
     }
 
@@ -379,7 +513,7 @@ function handle(ws, msg) {
         ownerName: user,
         password: sanitizeText(msg.password, 32)
       });
-      joinRoom(ws, room, user, msg.avatar, true);
+      joinRoom(ws, room, user, msg.avatar);
       send(ws, P.S2C.ROOM_UPDATED, { patch: room.meta() });
       return;
     }
@@ -405,6 +539,7 @@ function handle(ws, msg) {
 
     case P.C2S.ROOM_INFO: {
       if (!room) return;
+      if (gameBlocked(ws, room, member)) return;
       if (member.userId !== room.ownerId) {
         return send(ws, P.S2C.ERROR, { code: 'not_owner', message: '只有房主可以修改房间设置' });
       }
@@ -418,6 +553,7 @@ function handle(ws, msg) {
 
     case P.C2S.ROOM_RESIZE: {
       if (!room || !member) return;
+      if (gameBlocked(ws, room, member)) return;
       if (member.userId !== room.ownerId) {
         return send(ws, P.S2C.ERROR, { code: 'not_owner', message: '只有房主可以调整画布分辨率' });
       }
@@ -443,10 +579,15 @@ function handle(ws, msg) {
       if (!isOwner && !isEmpty) {
         return send(ws, P.S2C.ERROR, { code: 'room_busy', message: '房间内还有人，无法删除' });
       }
-      // 先把还在线的成员请出（仅房主时会有）
+      // 先把还在线的成员请出（房主删自己的房间时会有），并把他们从连接上摘掉。
+      // 不摘的话 ws._roomId 会指着一个已被 store.drop 丢弃的房间 ——
+      // 之后他们发上来的任何消息都会在 store.get() 处拿到 undefined 被静默丢掉。
       target.members.forEach(function (m) {
         try { send(m.ws, P.S2C.ROOM_DELETED, { id: id, by: member ? member.userId : null }); } catch (e) { /* ignore */ }
+        m.ws._roomId = null;
+        m.ws._userId = null;
       });
+      target.members.clear();
       store.drop(id);
       console.log('[room] ' + id + ' 被 ' + (member ? member.name : 'GC') + ' 删除');
       send(ws, P.S2C.OK, { ok: true, deleted: id });
@@ -466,6 +607,45 @@ function handle(ws, msg) {
           try { send(c, P.S2C.ROOM_LIST, { rooms: store.list() }); } catch (e) { /* ignore */ }
         }
       }
+      return;
+    }
+
+    /* ---------------- 你画我猜 ---------------- */
+    case P.C2S.GAME_START: {
+      if (!room || !member) return;
+      if (member.userId !== room.ownerId) {
+        return send(ws, P.S2C.ERROR, { code: 'not_owner', message: '只有房主可以开局' });
+      }
+      const g = gameOf(room);
+      const r = g.start(msg.rounds);
+      if (!r.ok) return send(ws, P.S2C.ERROR, { code: r.code || 'game_start', message: r.message });
+      console.log('[game] ' + room.id + ' 开局（' + g.rounds + ' 回合，' + room.online + ' 人）');
+      return;
+    }
+
+    case P.C2S.GAME_STOP: {
+      if (!room || !member) return;
+      if (member.userId !== room.ownerId) {
+        return send(ws, P.S2C.ERROR, { code: 'not_owner', message: '只有房主可以结束游戏' });
+      }
+      if (!room.game) return;
+      room.game.stop();
+      gameChat(room, '房主结束了游戏，回到自由绘画');
+      return;
+    }
+
+    case P.C2S.GAME_PICK: {
+      if (!room || !member || !room.game) return;
+      const r = room.game.pick(member.userId, msg.index);
+      if (!r.ok) return send(ws, P.S2C.ERROR, { code: 'game_pick', message: r.message });
+      return;
+    }
+
+    // 画手觉得这组不好画，换一组候选（每回合限次，上限在 game.js 里判）
+    case P.C2S.GAME_REPICK: {
+      if (!room || !member || !room.game) return;
+      const r = room.game.repick(member.userId);
+      if (!r.ok) return send(ws, P.S2C.ERROR, { code: 'game_repick', message: r.message });
       return;
     }
 
@@ -526,6 +706,7 @@ function handle(ws, msg) {
 
     case P.C2S.STROKE_UNDO: {
       if (!room || !member || !Array.isArray(msg.ids)) return;
+      if (gameBlocked(ws, room, member)) return;
       const ids = msg.ids.filter(id => room.strokes.some(s => s.id === id && s.userId === member.userId));
       if (!ids.length) return;
       room.removeStrokes(ids);
@@ -537,6 +718,7 @@ function handle(ws, msg) {
 
     case P.C2S.STROKE_REDO: {
       if (!room || !member || !msg.stroke || typeof msg.stroke !== 'object') return;
+      if (gameBlocked(ws, room, member)) return;
       const s = msg.stroke;
       if (!s.id || !Array.isArray(s.points) || !s.points.length) return;
       if (room.strokes.some(k => k.id === s.id)) return;
@@ -553,6 +735,7 @@ function handle(ws, msg) {
     case P.C2S.STROKE_CLEAR: {
       if (!room || !member) return;
       const scope = msg.scope === 'all' ? 'all' : 'layer';
+      if (gameBlocked(ws, room, member)) return;
       if (scope === 'all' && member.userId !== room.ownerId) {
         return send(ws, P.S2C.ERROR, { code: 'not_owner', message: '只有房主可以清空整个画布' });
       }
@@ -566,6 +749,7 @@ function handle(ws, msg) {
     /* ---------------- 图层 ---------------- */
     case P.C2S.LAYER_ADD: {
       if (!room || !member) return;
+      if (gameBlocked(ws, room, member)) return;
       if (room.layers.length >= MAX_LAYERS) {
         return send(ws, P.S2C.ERROR, { code: 'layer_limit', message: '图层数量上限为 ' + MAX_LAYERS });
       }
@@ -577,6 +761,7 @@ function handle(ws, msg) {
 
     case P.C2S.LAYER_DEL: {
       if (!room || !member) return;
+      if (gameBlocked(ws, room, member)) return;
       const l = room.getLayer(sanitizeText(msg.layerId, 40));
       if (!l) return;
       if (!room.layerIsSolo(l.id, member.userId) && member.userId !== room.ownerId) {
@@ -591,6 +776,7 @@ function handle(ws, msg) {
 
     case P.C2S.LAYER_UPD: {
       if (!room || !member) return;
+      if (gameBlocked(ws, room, member)) return;
       room.updateLayer(sanitizeText(msg.layerId, 40), msg.patch || {});
       store.markDirty(room);
       broadcastLayers(room);
@@ -599,6 +785,7 @@ function handle(ws, msg) {
 
     case P.C2S.LAYER_MOVE: {
       if (!room || !member) return;
+      if (gameBlocked(ws, room, member)) return;
       room.moveLayer(sanitizeText(msg.layerId, 40), Number(msg.to) || 0);
       store.markDirty(room);
       broadcastLayers(room);
@@ -607,6 +794,7 @@ function handle(ws, msg) {
 
     case P.C2S.LAYER_DUP: {
       if (!room || !member) return;
+      if (gameBlocked(ws, room, member)) return;
       if (room.layers.length >= MAX_LAYERS) {
         return send(ws, P.S2C.ERROR, { code: 'layer_limit', message: '图层数量上限为 ' + MAX_LAYERS });
       }
@@ -621,6 +809,7 @@ function handle(ws, msg) {
 
     case P.C2S.LAYER_CLEAR: {
       if (!room || !member) return;
+      if (gameBlocked(ws, room, member)) return;
       const l = room.getLayer(sanitizeText(msg.layerId, 40));
       if (!l) return;
       if (!room.layerIsSolo(l.id, member.userId) && member.userId !== room.ownerId) {
@@ -646,6 +835,7 @@ function handle(ws, msg) {
      */
     case P.C2S.LAYER_PIXELS: {
       if (!room || !member) return;
+      if (gameBlocked(ws, room, member)) return;
       const l = room.getLayer(sanitizeText(msg.layerId, 40));
       if (!l) return;
       if (!room.layerIsSolo(l.id, member.userId) && member.userId !== room.ownerId) {
@@ -663,6 +853,7 @@ function handle(ws, msg) {
 
     case P.C2S.LAYER_MERGE: {
       if (!room || !member) return;
+      if (gameBlocked(ws, room, member)) return;
       const srcId = sanitizeText(msg.srcId, 40);
       const dstId = sanitizeText(msg.dstId, 40);
       if (!room.layerIsSolo(srcId, member.userId) || !room.layerIsSolo(dstId, member.userId)) {
@@ -679,6 +870,7 @@ function handle(ws, msg) {
 
     case P.C2S.LAYER_FLATTEN: {
       if (!room || !member) return;
+      if (gameBlocked(ws, room, member)) return;
       if (member.userId !== room.ownerId) {
         return send(ws, P.S2C.ERROR, { code: 'not_owner', message: '只有房主可以合并所有图层' });
       }
@@ -691,6 +883,7 @@ function handle(ws, msg) {
     /* ---------------- 固化底图 ---------------- */
     case P.C2S.ROOM_COMPRESS: {
       if (!room || !member) return;
+      if (gameBlocked(ws, room, member)) return;
       if (member.userId !== room.ownerId) {
         return send(ws, P.S2C.ERROR, { code: 'not_owner', message: '只有房主可以固化底图' });
       }
@@ -723,6 +916,9 @@ function handle(ws, msg) {
       });
       for (const m of Array.from(room.members.values())) {
         if (m.ws.readyState === m.ws.OPEN) send(m.ws, P.S2C.ROOM_DESTROYED, { by: member.name });
+        // 连接上也要摘干净，理由同 ROOM_DEL：否则 ws._roomId 还指着一个已被丢弃的房间
+        m.ws._roomId = null;
+        m.ws._userId = null;
       }
       room.members.clear();
       store.drop(room.id);
@@ -739,12 +935,54 @@ function handle(ws, msg) {
       const text = sanitizeText(msg.text, 500).trim();
       const img = P.normalizeSticker(msg.img);
       if (!text && !img) return;
+
+      const g = room.game;
+      const playing = !!(g && g.isPlaying());
+
+      /* 游戏进行中：这句话先当「猜词」处理，由服务端决定它能不能公开 */
+      if (playing && text) {
+        const res = g.handleGuess(member, text);
+        if (res && res.kind === 'correct') {
+          // 猜对了 —— 原话绝不出房间，只广播「谁猜对了第几名」
+          roomBroadcast(room, P.S2C.GAME_CORRECT, {
+            userId: member.userId, name: member.name, rank: res.rank, points: res.points
+          });
+          send(ws, P.S2C.CHAT, {
+            id: P.rid('m'), userId: 'system', name: '系统', color: '#8b8b8b', system: true,
+            ts: now, text: '你猜对了！第 ' + res.rank + ' 名，+' + res.points + ' 分'
+          });
+          gameChat(room, member.name + ' 猜对了！第 ' + res.rank + ' 名 +' + res.points + ' 分');
+          g.afterCorrect();
+          return;
+        }
+        if (res && res.kind === 'near') {
+          // 很接近：私下提醒，同时这条猜测照常公开（猜歪的过程本来就该让大家看见）
+          send(ws, P.S2C.CHAT, {
+            id: P.rid('m'), userId: 'system', name: '系统', color: '#8b8b8b', system: true,
+            ts: now, text: '很接近了，再想想！'
+          });
+        }
+      }
+
+      // 防剧透：画手发言必然泄题；已经猜对的人再说话也会把答案说出去。
+      // 这两种人的文字消息不外发（表情图没有泄题风险，照发）。
+      if (playing && text && g.chatLeaksAnswer(member.userId)) {
+        send(ws, P.S2C.CHAT, {
+          id: P.rid('m'), userId: 'system', name: '系统', color: '#8b8b8b', system: true,
+          ts: now,
+          text: (member.userId === g.drawerId ? '你是画手' : '你已经猜对了')
+            + '，这句话不会发出去（免得剧透）'
+        });
+        if (!img) return;
+      }
+
       const entry = { id: P.rid('m'), userId: member.userId, name: member.name, color: member.color, text, ts: now };
       if (img) entry.img = img;
       room.addChat(entry);
       store.markDirty(room);
+      // 不带 exceptId：发送者也在 room.members 里，会一起收到。
+      // 这里绝对不能再 send(ws, ...) 补一次 —— 那样发送者自己会看到两条同样的消息
       roomBroadcast(room, P.S2C.CHAT, entry);
-      send(ws, P.S2C.CHAT, entry);
       return;
     }
 
@@ -771,6 +1009,9 @@ function handle(ws, msg) {
 function canDraw(room, member) {
   if (!member) return false;
   if (member.readonly) return false;
+  // 游戏进行中只有画手能落笔。这里拦的是**服务端**：前端禁用工具只是提示，
+  // 谁改一下前端就能绕过去。
+  if (room && room.game && room.game.lockedFor(member.userId)) return false;
   return true;
 }
 
@@ -810,10 +1051,33 @@ const sweeper = setInterval(() => {
 }, 30 * 1000);
 sweeper.unref && sweeper.unref();
 
+/**
+ * 你画我猜的回合时钟。
+ *
+ * 唯一的「时钟」是这一个全局定时器 —— 不为每个房间各起一个，免得房间一多
+ * 就是几十个 setInterval 抢事件循环。tick 里只做「到点了就换阶段」，
+ * 一次遍历的代价可以忽略。
+ *
+ * 也**不要**在 tick 里碰同步 IO（存盘 / 删目录）：本机实测过一次
+ * fs.rmSync 把事件循环堵了 978ms，整个房间的笔迹与心跳全部停摆。
+ */
+const gameTimer = setInterval(() => {
+  if (!store.rooms.size) return;
+  const now = Date.now();
+  for (const room of store.rooms.values()) {
+    const g = room.game;
+    if (!g || !g.active) continue;
+    try { g.tick(now); } catch (e) { console.error('[game] tick 失败', e.message); }
+  }
+}, 500);
+gameTimer.unref && gameTimer.unref();
+
 function shutdown() {
   console.log('\n[server] 正在保存房间并退出…');
   clearInterval(heartbeat);
   clearInterval(sweeper);
+  clearInterval(gcTimer);
+  clearInterval(gameTimer);
   store.saveAll();
   try { wss.close(); } catch (e) { /* ignore */ }
   server.close(() => process.exit(0));
