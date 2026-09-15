@@ -408,13 +408,15 @@
     </div>
   </div>
 
-    <!-- 你画我猜：画布上沿的状态条。不在游戏模式时整条隐藏。 -->
+    <!-- 你画我猜 / 接龙：画布上沿的状态条。不在游戏模式时整条隐藏。 -->
     <div class="game-hud hidden" id="gameHud">
       <span class="gh-phase" id="ghPhase">等待开始</span>
       <b class="gh-timer" id="ghTimer">--</b>
       <span class="gh-word" id="ghWord">—</span>
       <span class="gh-round" id="ghRound"></span>
       <button class="mini" id="ghScore" title="查看计分板">计分</button>
+      <!-- 接龙专用：房主的「推进 / 立刻结算」 -->
+      <button class="mini hidden" id="ghNext" title="跳过没交的人，直接进入下一步">立刻推进</button>
     </div>
 
     <!-- 计分板（点 HUD 上的「计分」浮出来） -->
@@ -433,6 +435,23 @@
       <div class="rc-word" id="rcWord"></div>
       <div class="rc-list" id="rcList"></div>
       <div class="rc-next" id="rcNext"></div>
+    </div>
+
+    <!-- 接龙：我这一步的题面。只有当事者看得到（词 / 别人的画）。
+         放在画布左下角，不挡着作画。 -->
+    <div class="chain-task hidden" id="chainTask">
+      <div class="ct-head">
+        <span class="ct-step" id="ctStep">写词</span>
+        <span class="spacer"></span>
+        <button class="mini" id="ctCollapse" title="收起 / 展开">–</button>
+      </div>
+      <div class="ct-body" id="ctBody"></div>
+    </div>
+
+    <!-- 接龙：链条进度（每条链走到第几格，不含内容） -->
+    <div class="chain-progress hidden" id="chainProgress">
+      <div class="cp-head">链条进度</div>
+      <div class="cp-list" id="cpList"></div>
     </div>
 
   <div class="canvas-wrap" id="canvasWrap">
@@ -975,6 +994,13 @@
       <button class="icon-btn" id="btnGameClose">×</button>
     </div>
     <div class="modal-body">
+      <div class="form-row">
+        <label>玩法</label>
+        <div class="seg" id="gameModeSeg">
+          <button class="seg-btn active" id="gmClassic" data-mode="classic">你画我猜</button>
+          <button class="seg-btn" id="gmChain" data-mode="chain">接龙</button>
+        </div>
+      </div>
       <p class="game-rule" id="gameRule">
         轮流当画手：<b>画手</b>从三个词里挑一个，只能用画的；
         其他人在<b>聊天框</b>里打字猜。猜得越快分越高，画手也会因为别人猜出来而得分。
@@ -1035,6 +1061,113 @@
       <button class="btn" id="btnOverStop">结束游戏</button>
       <span class="spacer"></span>
       <button class="btn primary" id="btnOverAgain">再来一局</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 接龙 ============ -->
+<div class="modal-mask hidden" id="chainMask">
+  <div class="modal game">
+    <div class="modal-head">
+      <h3>接龙（绘画版「拷贝不走样」）</h3>
+      <button class="icon-btn" id="btnChainClose">×</button>
+    </div>
+    <div class="modal-body">
+      <p class="game-rule">
+        每人先给自己那条链写一个词 → 下一个人照着画 → 再下一个人看着画猜词 → 下下一个人照着新词再画……
+        绕圈传到每个人都做过一遍，然后把整条链摊开看：<b>一个「爱丽丝」是怎么变成「怪物卡车」的</b>。
+        最后大家投票判断每条链首尾是否还对得上，对得上的给起词的人一个奖杯。
+      </p>
+      <div class="form-row">
+        <label>圈数</label>
+        <select id="chainRounds">
+          <option value="3" selected>3 圈（写词 → 作画 → 猜词，推荐）</option>
+          <option value="4">4 圈（多一次作画）</option>
+          <option value="5">5 圈（多一次猜词）</option>
+          <option value="6">6 圈（最长的链条）</option>
+        </select>
+        <span class="hint" id="chainRoundsHint">圈数 = 每条链传几次；3 圈就能看到一次完整的「画→猜」</span>
+      </div>
+      <div class="form-row">
+        <label>主题词库</label>
+        <select id="chainTheme"></select>
+        <span class="hint" id="chainThemeHint">选词时会优先给这个主题的词</span>
+      </div>
+      <p class="game-state" id="chainState">当前：自由绘画</p>
+      <p class="hint" id="chainPlayers">需要 4 ~ 16 人</p>
+    </div>
+    <div class="modal-foot">
+      <button class="btn danger hidden" id="btnChainStop">结束游戏</button>
+      <span class="spacer"></span>
+      <button class="btn" id="btnChainCancel">关闭</button>
+      <button class="btn primary" id="btnChainStart">开始接龙</button>
+    </div>
+  </div>
+</div>
+
+<!-- 接龙：猜词的输入框 -->
+<div class="modal-mask hidden" id="chainInputMask">
+  <div class="modal pick">
+    <div class="modal-head">
+      <h3 id="ciTitle">这幅画画的是什么？</h3>
+      <span class="pick-timer" id="ciTimer">60</span>
+    </div>
+    <div class="modal-body">
+      <p class="hint" id="ciHint">猜一个词（别人看不到你猜的）</p>
+      <div class="form-row ci-custom">
+        <input type="text" id="ciInput" maxlength="20" placeholder="你猜这幅画的是什么…" autocomplete="off">
+        <button class="btn primary" id="ciSubmit">提交答案</button>
+      </div>
+      <div class="ci-preview" id="ciPreview"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 接龙：回放 + 投票（一条链一张卡片） -->
+<div class="modal-mask hidden" id="replayMask">
+  <div class="modal replay">
+    <div class="modal-head">
+      <h3 id="rpTitle">回放</h3>
+      <span class="chain-nav">
+        <button class="mini" id="rpPrev" title="上一条链">‹</button>
+        <b id="rpIndex">1 / 1</b>
+        <button class="mini" id="rpNext" title="下一条链">›</button>
+      </span>
+      <span class="pick-timer" id="rpTimer">90</span>
+    </div>
+    <div class="modal-body">
+      <div class="rp-chain-head" id="rpChainHead"></div>
+      <div class="rp-strip" id="rpStrip"></div>
+      <div class="rp-verdict" id="rpVerdict"></div>
+      <div class="rp-vote" id="rpVote">
+        <span class="hint">这条链首尾对得上吗？（说不通就投「对不上」）</span>
+        <button class="btn ghost" id="rpVoteBad">对不上</button>
+        <button class="btn primary" id="rpVoteOk">对得上</button>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn hidden" id="btnRpNext">立刻结算</button>
+      <span class="spacer"></span>
+      <button class="btn" id="btnRpExit">收起（不影响别人）</button>
+    </div>
+  </div>
+</div>
+
+<!-- 接龙：本局结算（首尾对照 + 奖杯榜） -->
+<div class="modal-mask hidden" id="trophyMask">
+  <div class="modal over">
+    <div class="modal-head">
+      <h3>接龙结算</h3>
+      <button class="icon-btn" id="btnTrophyClose">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="tr-summary" id="trSummary"></div>
+      <div class="rank-list" id="trophyList"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" id="btnTrophyStop">结束游戏</button>
+      <span class="spacer"></span>
+      <button class="btn primary" id="btnTrophyAgain">再来一局</button>
     </div>
   </div>
 </div>

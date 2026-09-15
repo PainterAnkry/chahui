@@ -58,6 +58,13 @@
     gameSkew: 0,
     gameRoundKey: '',     // 「第几回合 + 阶段」去重，用来判断要不要弹结算卡片
     gameWordShown: '',    // 已经提示过的词，避免每次状态同步都再弹一次
+    // 接龙：这一步轮到我做什么（服务端 GAME_TASK 单发，只有我能收到）
+    // 我拿到的是「答案」而不是「题面」时（作画/猜词那两步），聊天要闭嘴，免得剧透
+    chainTask: null,
+    replayIndex: 0,           // 回放翻到第几格（客户端算，服务端不关心）
+    chainInputSubmitted: false, // 猜词框已提交（挡住重复提交 + 显示「已提交」）
+    chainTaskToast: '',       // 「轮到你…」通知去重（同一圈同一步只弹一次）
+    themes: null,             // 接龙主题列表（{id,name}），从 /api/share 或快照拿
     tool: 'brush',
     color: '#2b2b2b',
     bgColor: '#ffffff',
@@ -3122,9 +3129,15 @@
         updateCursor(msg);
         break;
 
-      /* ---- 你画我猜 ---- */
+      /* ---- 你画我猜 / 接龙 ---- */
       case P.S2C.GAME_STATE:
         applyGameState(msg.game);
+        break;
+
+      /* 接龙专用：这一步的题面只发给我一个人（别人收到的 task 完全不同）。
+         绝不能走广播 —— 那等于把答案贴到每个猜手脸上。 */
+      case P.S2C.GAME_TASK:
+        applyChainTask(msg.task);
         break;
 
       case P.S2C.GAME_WORD:
@@ -3698,6 +3711,9 @@
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (j) {
         if (!j) return;
+        // 顺手把「接龙主题列表」缓存下来 —— 开局前 S.game 是 null，
+        // 那时候接龙面板拿不到快照里的 themes，只能靠这里先垫上
+        if (j.themeList && j.themeList.length) S.themes = j.themeList;
         var next = (j.publicUrl || '').replace(/\/+$/, '');
         if (next === S.publicUrl) return;
         S.publicUrl = next;
@@ -4884,6 +4900,56 @@
       closeOver();
       net.send(P.C2S.GAME_START, { rounds: Number($('#gameRounds').value) || P.GAME.DEFAULT_ROUNDS });
     });
+
+    /* ---- 玩法切换（你画我猜 / 接龙） ---- */
+    $('#gmClassic').addEventListener('click', function () { setGameDialogMode('classic'); });
+    $('#gmChain').addEventListener('click', function () { setGameDialogMode('chain'); });
+
+    /* ---- 接龙开局面板 ---- */
+    $('#btnChainClose').addEventListener('click', function () { $('#chainMask').classList.add('hidden'); });
+    $('#btnChainCancel').addEventListener('click', function () { $('#chainMask').classList.add('hidden'); });
+    $('#btnChainStart').addEventListener('click', startChainGame);
+    $('#btnChainStop').addEventListener('click', function () {
+      confirmDialog('结束接龙？这一局的奖杯不会保留。', {
+        title: '结束接龙', yes: '结束接龙', danger: true
+      }).then(function (yes) { if (yes) { stopGame(); $('#chainMask').classList.add('hidden'); } });
+    });
+
+    /* ---- 接龙题面面板 ---- */
+    $('#ctCollapse').addEventListener('click', function () {
+      var box = $('#chainTask');
+      box.classList.toggle('collapsed');
+      this.textContent = box.classList.contains('collapsed') ? '▸' : '▾';
+    });
+
+    /* ---- 接龙猜词输入 ---- */
+    $('#ciSubmit').addEventListener('click', doChainGuessSubmit);
+    $('#ciInput').addEventListener('keydown', function (ev) {
+      if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); doChainGuessSubmit(); }
+    });
+    $('#ciInput').addEventListener('input', updateChainInputPreview);
+
+    /* ---- 回放 + 投票 ---- */
+    $('#rpPrev').addEventListener('click', function () { stepReplay(-1); });
+    $('#rpNext').addEventListener('click', function () { stepReplay(1); });
+    $('#rpVoteBad').addEventListener('click', function () { voteChain(false); });
+    $('#rpVoteOk').addEventListener('click', function () { voteChain(true); });
+    $('#btnRpNext').addEventListener('click', function () { net.send(P.C2S.GAME_NEXT, {}); });
+    $('#btnRpExit').addEventListener('click', function () { $('#replayMask').classList.add('hidden'); });
+
+    /* ---- 奖杯结算 ---- */
+    $('#btnTrophyClose').addEventListener('click', closeTrophy);
+    $('#btnTrophyStop').addEventListener('click', function () { stopGame(); closeTrophy(); });
+    $('#btnTrophyAgain').addEventListener('click', function () {
+      closeTrophy();
+      var rounds = Number($('#chainRounds').value) || P.GAME.CHAIN_ROUNDS;
+      var theme = $('#chainTheme').value || 'default';
+      net.send(P.C2S.GAME_START, { mode: 'chain', rounds: rounds, theme: theme });
+    });
+
+    /* ---- 顶栏「立刻推进」（接龙里房主用来跳过没交的人 / 提前结算投票） ---- */
+    $('#ghNext').addEventListener('click', function () { net.send(P.C2S.GAME_NEXT, {}); });
+
     $('#btnRecord').addEventListener('click', toggleRecord);
     $('#btnReplay').addEventListener('click', function () {
       if (engine.replayMode) stopReplay(); else startReplay();
@@ -5040,6 +5106,24 @@
     updateGameDialog();
     updateRepickUi();
 
+    /* 接龙走另一套 UI（题面面板 / 回放投票 / 奖杯）。
+     * 两套互斥：服务端一次只挂一种玩法，所以这里按 mode 分派，不会同时出现。 */
+    if (S.game && S.game.mode === 'chain') {
+      closePick();
+      hideRoundCard();
+      closeOver();
+      applyChainState(S.game, prevPhase);
+      return;
+    }
+    // 从接龙切回自由绘画 / 经典：把接龙的浮层收干净
+    if (!S.game || S.game.mode !== 'chain') {
+      if (prev && prev.mode === 'chain') closeChainUi();
+      else {
+        var tsk = $('#chainTask'); if (tsk) tsk.classList.add('hidden');
+        var cp = $('#chainProgress'); if (cp) cp.classList.add('hidden');
+      }
+    }
+
     // 选词弹窗：只有画手会拿到 choices，所以其他端天然打不开
     if (phase === 'pick' && gameImDrawer()) openPick(S.game.choices || []);
     else closePick();
@@ -5081,11 +5165,21 @@
     if (!gameActive()) { hud.classList.add('hidden'); return; }
     hud.classList.remove('hidden');
     var g = S.game;
+    var chain = g.mode === 'chain';
     $('#ghPhase').textContent = g.phaseLabel || PHASE_TEXT[g.phase] || '';
-    $('#ghRound').textContent = '第 ' + Math.max(1, Math.min(g.round, g.rounds)) + ' / ' + g.rounds + ' 回合';
+
+    // 接龙按「圈」数（每条链传几手），经典按「回合」数
+    if (chain) {
+      $('#ghRound').textContent = '第 ' + Math.max(1, Math.min(g.round, g.rounds)) + ' / ' + g.rounds + ' 圈'
+        + (g.stepTotal ? '（' + g.stepDone + '/' + g.stepTotal + ' 已完成）' : '');
+    } else {
+      $('#ghRound').textContent = '第 ' + Math.max(1, Math.min(g.round, g.rounds)) + ' / ' + g.rounds + ' 回合';
+    }
 
     var wordEl = $('#ghWord');
-    if (g.phase === 'draw') {
+    if (chain) {
+      renderChainHudWord(wordEl, g);
+    } else if (g.phase === 'draw') {
       if (g.isDrawer) {
         wordEl.innerHTML = '你要画：<b>' + esc(g.word || '') + '</b>';
       } else {
@@ -5108,7 +5202,41 @@
     } else {
       wordEl.textContent = '';
     }
+
+    // 「立刻推进」：接龙专用，只有房主看得见。
+    // 用途是「有人挂了 / 交不了，别干等」—— 写词/画/猜 跳过没交的人，投票直接结算。
+    var next = $('#ghNext');
+    if (next) {
+      var canNext = chain && S.me.isOwner && (
+        chainStepActive() || g.phase === 'chain_vote'
+      );
+      next.classList.toggle('hidden', !canNext);
+    }
+
     updateGameTimer();
+  }
+
+  /** 接龙的 HUD 文案：这一步我在做什么 / 全场的进度 */
+  function renderChainHudWord(el, g) {
+    if (!el) return;
+    var t = S.chainTask;
+    if (g.phase === 'lobby') {
+      el.textContent = S.me.isOwner ? '点「开始接龙」' : '等房主开局';
+      return;
+    }
+    if (g.phase === 'chain_write') {
+      el.textContent = t && t.step === 'write' ? '给你的链写一个词' : '大家在写词…';
+    } else if (g.phase === 'chain_draw') {
+      el.textContent = t && t.step === 'draw' ? '轮到你作画' : '其他人正在作画…';
+    } else if (g.phase === 'chain_guess') {
+      el.textContent = t && t.step === 'guess' ? '轮到你猜词' : '其他人正在猜词…';
+    } else if (g.phase === 'chain_vote') {
+      el.textContent = '来看这一局跑偏成什么样（可投票）';
+    } else if (g.phase === 'over') {
+      el.textContent = '本局结束 —— 看奖杯';
+    } else {
+      el.textContent = '';
+    }
   }
 
   /** 倒计时用「服务端 deadline − 本机时间（经过时钟偏差校正）」算，各端显示才一致 */
@@ -5126,6 +5254,13 @@
     if (S.game.phase === 'pick') {
       var pt = $('#pickTimer');
       if (pt) pt.textContent = left;
+    }
+    // 接龙的倒计时同时喂给「猜词输入框」和「回放投票」两个面板
+    if (S.game.mode === 'chain') {
+      var ci = $('#ciTimer');
+      if (ci) ci.textContent = left;
+      var rp = $('#rpTimer');
+      if (rp) rp.textContent = left;
     }
     var next = $('#rcNext');
     if (next) {
@@ -5173,6 +5308,16 @@
       $('#stage').appendChild(el);
     }
     var g = S.game;
+    if (g.mode === 'chain') {
+      var t = S.chainTask;
+      if (g.phase === 'chain_write') el.textContent = '写词阶段 —— 画布先留着，等有人要作画';
+      else if (g.phase === 'chain_guess') el.textContent = '猜词阶段 —— 画布上放的是上家的画，别动它';
+      else if (g.phase === 'chain_draw') el.textContent = '这一手不是你在画，先看着';
+      else if (g.phase === 'chain_vote') el.textContent = '回放 / 投票中 —— 画布暂时不能动';
+      else if (t && t.step === 'draw') el.textContent = '轮到你作画';
+      else el.textContent = '接龙进行中';
+      return;
+    }
     if (g.phase === 'pick') el.textContent = '正在选词，稍等片刻';
     else if (g.phase === 'round_end') el.textContent = '本回合结束，看答案';
     else el.textContent = gameName(g.drawerName) + ' 正在作画 —— 这一回合你只能在聊天框里猜';
@@ -5182,7 +5327,15 @@
     var input = $('#chatInput');
     if (!input) return;
     var hint = '说点什么…（Enter 发送，Shift+Enter 换行）';
-    if (gameActive() && S.game.phase === 'draw') {
+    if (gameActive() && S.game.mode === 'chain') {
+      // 接龙的猜词走独立输入框（因为题目是「一幅画」），聊天就是普通聊天。
+      // 但手里攥着答案的人发言会被服务端拦掉，这里先把话说清楚。
+      if (chainStepActive() && S.chainTask && S.chainTask.step !== 'write') {
+        hint = '你手上正拿着这一步的答案，这里说的话不会发出去';
+      } else {
+        hint = '说点什么…（接龙的猜词请用画布左下角的输入框）';
+      }
+    } else if (gameActive() && S.game.phase === 'draw') {
       if (gameImDrawer()) hint = '你是画手，这里说的话不会发出去';
       else if (gameGuessedMe()) hint = '你已经猜对了，再说话会剧透（不会发出去）';
       else hint = '输入你的猜测…（Enter 发送）';
@@ -5308,6 +5461,9 @@
     toast(msg.name + ' 猜对了（第 ' + msg.rank + ' 名）', 'ok', 2400);
   }
 
+  /** 顶栏「游戏」弹窗里当前选中的玩法（纯粹是弹窗内的状态，和房间真正在玩什么无关） */
+  var gameDialogMode = 'classic';
+
   /** 顶栏「游戏」按钮：打开设置弹窗 */
   function updateGameDialog() {
     var state = $('#gameState');
@@ -5325,15 +5481,52 @@
     $('#gameRounds').disabled = !S.me.isOwner;
   }
 
+  /** 切玩法：换文案、按玩法显隐「回合数」那一行 */
+  function setGameDialogMode(mode) {
+    gameDialogMode = mode === 'chain' ? 'chain' : 'classic';
+    var seg = $('#gameModeSeg');
+    if (seg) {
+      var btns = seg.querySelectorAll('.seg-btn');
+      for (var i = 0; i < btns.length; i++) {
+        btns[i].classList.toggle('active', btns[i].getAttribute('data-mode') === gameDialogMode);
+      }
+    }
+    var rule = $('#gameRule');
+    if (rule) {
+      rule.innerHTML = gameDialogMode === 'chain'
+        ? '每人先想一个词并画出来，画作匿名传给下一个人去猜；猜出来的词再传给下一个人去画，'
+          + '一路传下去。最后所有人一起看回放，投票「首尾对得上吗」。'
+          + '需要 <b>4～16 人</b>，至少走 3 圈才有猜词环节。'
+        : '轮流当画手：<b>画手</b>从三个词里挑一个，只能用画的；'
+          + '其他人在<b>聊天框</b>里打字猜。猜得越快分越高，画手也会因为别人猜出来而得分。'
+          + '回合之间画布会自动清空。';
+    }
+    var row = $('#gameRounds').closest('.form-row');
+    if (row) row.classList.toggle('hidden', gameDialogMode === 'chain');
+    var bs = $('#btnGameStart');
+    if (bs) bs.textContent = gameDialogMode === 'chain' ? '开始接龙' : '开始游戏';
+  }
+
   function openGameDialog() {
     if (!S.joined) { toast('先进一个茶绘室再开局', 'err'); return; }
+    // 房间已经在玩接龙 → 直接把接龙面板顶出来（两套玩法不会同时挂在一个房间上，
+    // 所以按「当前玩法」二选一，不用问用户想开哪个）
+    if (gameActive() && S.game.mode === 'chain') { openChainDialog(); return; }
+    setGameDialogMode(gameDialogMode);
     updateGameDialog();
     $('#gameMask').classList.remove('hidden');
   }
 
   function startGame() {
+    // 在「游戏」弹窗里选了接龙 → 转给接龙面板，别拿经典模式的回合数去开接龙
+    // （#gameRounds 是 2/4/6/8/12，接龙的圈数是 3/4/5/6，两者不是一回事）
+    if (gameDialogMode === 'chain') {
+      $('#gameMask').classList.add('hidden');
+      openChainDialog();
+      return;
+    }
     var rounds = Number($('#gameRounds').value) || P.GAME.DEFAULT_ROUNDS;
-    net.send(P.C2S.GAME_START, { rounds: rounds });
+    net.send(P.C2S.GAME_START, { mode: 'classic', rounds: rounds });
     $('#gameMask').classList.add('hidden');
   }
 
@@ -5353,6 +5546,7 @@
     closePick();
     hideRoundCard();
     closeOver();
+    closeChainUi();
     $('#gameMask').classList.add('hidden');
     var hud = $('#gameHud');
     if (hud) hud.classList.add('hidden');
@@ -5362,6 +5556,467 @@
     if (tip) tip.remove();
     var input = $('#chatInput');
     if (input) input.placeholder = '说点什么…（Enter 发送，Shift+Enter 换行）';
+  }
+
+  /* ============================================================ 接龙（chain） */
+
+  /**
+   * 接龙模式下「我这一步」的题面 —— 由服务端通过私密消息 GAME_TASK 单发给我。
+   *
+   * 为什么不放进 GAME_STATE：那条是快照，房间里每个人都会收到一份。
+   * 接龙的题面（要画的词 / 要猜的那幅画）一旦进了广播流就等于把答案摊在桌上 ——
+   * 这是这个玩法唯一的死穴。所以题面走独立的一条私有消息，前端只留在这里。
+   */
+  function isChainMode() { return !!(S.game && S.game.mode === 'chain'); }
+
+  function applyChainTask(t) {
+    var prev = S.chainTask;
+    S.chainTask = t || null;
+    var step = t ? t.step : '';
+    var prevKey = prev ? prev.step + '|' + (prev.word || '') + '|' + (prev.choices || []).join(',') : '';
+    var nowKey = t ? step + '|' + (t.word || '') + '|' + (t.choices || []).join(',') : '';
+    if (prevKey !== nowKey) S.chainInputSubmitted = false;
+    renderChainTask();
+    syncChainInput();
+  }
+
+  function renderChainTask() {
+    var box = $('#chainTask');
+    if (!box) return;
+    var t = S.chainTask;
+    // 只有「做事」的阶段才有题面；回放/投票/结束都不显示这块
+    if (!isChainMode() || !t || !chainStepActive()) {
+      box.classList.add('hidden');
+      return;
+    }
+    box.classList.remove('hidden');
+    var body = $('#ctBody');
+    var label = $('#ctStep');
+    if (t.step === 'write') {
+      label.textContent = '写一个词';
+      body.innerHTML = '';
+      if (S.chainInputSubmitted) {
+        body.innerHTML = '<div class="ct-done">✓ 已提交，等其他人</div>';
+        return;
+      }
+      body.innerHTML = '<div class="ct-note">挑一个词，下一个人要照它作画：</div>' +
+        '<div class="ct-choices"></div>';
+      var list = body.querySelector('.ct-choices');
+      (t.choices || []).forEach(function (w) {
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'ct-choice';
+        b.textContent = w;
+        b.addEventListener('click', function () { submitChainWord({ index: (t.choices || []).indexOf(w) }); });
+        list.appendChild(b);
+      });
+      var own = document.createElement('button');
+      own.type = 'button';
+      own.className = 'ct-choice';
+      own.innerHTML = '<span style="color:var(--text-dim)">✎ 自己写一个…</span>';
+      own.addEventListener('click', function () {
+        net.send(P.C2S.GAME_SUBMIT, { text: prompt('写一个词（2 字以上中文）') || '' });
+      });
+      list.appendChild(own);
+      return;
+    }
+    if (t.step === 'draw') {
+      label.textContent = '照这个词作画';
+      if (S.chainInputSubmitted) {
+        body.innerHTML = '<div class="ct-done">✓ 已交作品</div><div class="ct-word">' + esc(t.word || '') + '</div>';
+        return;
+      }
+      body.innerHTML = '<div class="ct-word">' + esc(t.word || '') + '</div>' +
+        '<div class="ct-note">画得让别人能猜出来就行 —— 不用太精细。</div>' +
+        '<button class="btn primary ct-submit">画好了，交上去</button>';
+      body.querySelector('.ct-submit').addEventListener('click', submitChainArt);
+      return;
+    }
+    if (t.step === 'guess') {
+      label.textContent = '这幅画画的是什么？';
+      if (S.chainInputSubmitted) {
+        body.innerHTML = '<div class="ct-done">✓ 已提交，等其他人</div>';
+        return;
+      }
+      body.innerHTML = (t.image
+        ? '<img class="ct-img" id="ctImg" alt="上家的画">'
+        : '<div class="ct-note">（上一幅是空白 —— 上家没交）</div>') +
+        '<div class="ct-note" style="margin-top:8px">猜一个词，填进下面的输入框。</div>' +
+        '<button class="btn primary ct-guess" style="margin-top:8px;width:100%">回答</button>';
+      if (t.image) {
+        var im = body.querySelector('#ctImg');
+        // 页面侧是同步的，但 dataURL 解码要等一拍 —— 等 decode() 再挂上去，
+        // 否则小图会闪一下、大图会先出白框
+        var probe = new Image();
+        probe.onload = function () { if (im.parentNode) im.src = t.image; };
+        probe.src = t.image;
+      }
+      body.querySelector('.ct-guess').addEventListener('click', function () {
+        openChainGuess();
+      });
+      return;
+    }
+    box.classList.add('hidden');
+  }
+
+  /** 现在是不是「写词 / 画 / 猜」这三种要动手的阶段 */
+  function chainStepActive() {
+    var p = S.game ? S.game.phase : '';
+    return p === 'chain_write' || p === 'chain_draw' || p === 'chain_guess';
+  }
+
+  function submitChainWord(payload) {
+    if (!payload || (payload.text === '' && payload.index == null)) return;
+    S.chainInputSubmitted = true;
+    net.send(P.C2S.GAME_SUBMIT, payload);
+    renderChainTask();
+    closeChainInput();
+  }
+
+  /** 交作品：把当前画布导成 PNG 交给服务端（服务端只做哑存储） */
+  function submitChainArt() {
+    var t = S.chainTask;
+    if (!t || t.step !== 'draw') return;
+    if (S.chainInputSubmitted) return;
+    var png;
+    try { png = engine.exportPNG(); } catch (e) { png = ''; }
+    if (!png) return toast('导出作品失败，再试一次', 'warn', 2600);
+    S.chainInputSubmitted = true;
+    net.send(P.C2S.GAME_ART, { png: png });
+    renderChainTask();
+    toast('作品已交给下一位', 'ok', 2600);
+  }
+
+  /* ---- 写词 / 猜词的输入弹窗 ---- */
+
+  function syncChainInput() {
+    var mask = $('#chainInputMask');
+    if (!mask) return;
+    var t = S.chainTask;
+    var show = !!(t && t.step === 'guess' && chainStepActive() && !S.chainInputSubmitted);
+    mask.classList.toggle('hidden', !show);
+    if (!show) return;
+    var g = S.game;
+    $('#ciTitle').textContent = '这幅画画的是什么？';
+    $('#ciHint').textContent = '猜一个词（2 字以上中文）。猜错也没关系，这条链就是要看它跑偏成什么样。';
+    var inp = $('#ciInput');
+    if (document.activeElement !== inp) inp.focus();
+    updateChainInputPreview();
+    updateGameTimer();
+  }
+
+  function openChainGuess() {
+    S.chainInputSubmitted = false;
+    syncChainInput();
+  }
+
+  function closeChainInput() {
+    var mask = $('#chainInputMask');
+    if (mask) mask.classList.add('hidden');
+  }
+
+  function updateChainInputPreview() {
+    var inp = $('#ciInput');
+    var pv = $('#ciPreview');
+    if (!inp || !pv) return;
+    var v = inp.value.trim();
+    if (!v) { pv.textContent = ''; return; }
+    if (!/[\u4e00-\u9fa5]/.test(v)) { pv.innerHTML = '<span class="bad">请用中文写</span>'; return; }
+    if (v.length > 20) { pv.innerHTML = '<span class="bad">太长了（最多 20 字）</span>'; return; }
+    pv.textContent = v.length + ' 个字';
+  }
+
+  function doChainGuessSubmit() {
+    var inp = $('#ciInput');
+    if (!inp) return;
+    var v = inp.value.trim();
+    if (!v) return;
+    submitChainWord({ text: v });
+    inp.value = '';
+    updateChainInputPreview();
+  }
+
+  /* ---- 链条进度面板 ---- */
+
+  function renderChainProgress() {
+    var box = $('#chainProgress');
+    if (!box) return;
+    if (!isChainMode() || !S.game || !S.game.progress || !S.game.progress.length) {
+      box.classList.add('hidden');
+      return;
+    }
+    box.classList.remove('hidden');
+    var list = $('#cpList');
+    var html = '';
+    S.game.progress.forEach(function (p) {
+      var mine = p.ownerId === S.me.userId;
+      var dots = '';
+      for (var i = 0; i < p.total; i++) {
+        // 用「步」的类型给点上色：写词蓝 / 作画绿 / 猜词黄。
+        // 服务端只给「走到第几格」，具体类型前端按同样的规则推算 ——
+        // 0 是写词，之后奇数作画、偶数猜词。
+        var cls = 'cp-dot';
+        if (i < p.step) cls += (i === 0) ? ' filled' : (i % 2 === 1 ? ' draw' : ' guess');
+        dots += '<i class="' + cls + '"></i>';
+      }
+      html += '<div class="cp-row' + (mine ? ' mine' : '') + '">' +
+        '<span class="cp-name">' + esc(p.ownerName) + (mine ? '（我）' : '') + '</span>' +
+        '<span class="cp-dots">' + dots + '</span></div>';
+    });
+    list.innerHTML = html;
+  }
+
+  /* ---- 回放 + 投票 ---- */
+
+  function renderReplay() {
+    var mask = $('#replayMask');
+    if (!mask) return;
+    var g = S.game;
+    var show = !!(g && g.phase === 'chain_vote' && g.replay && g.replay.length);
+    if (!show) {
+      // 结算阶段改由奖杯面板展示，回放面板收起来
+      mask.classList.add('hidden');
+      return;
+    }
+    mask.classList.remove('hidden');
+    var idx = Math.max(0, Math.min(S.replayIndex | 0, g.replay.length - 1));
+    S.replayIndex = idx;
+    var chain = g.replay[idx];
+    $('#rpIndex').textContent = (idx + 1) + ' / ' + g.replay.length;
+    $('#rpChainHead').innerHTML = '第 ' + (idx + 1) + ' 条链 · 起词人 <b>' + esc(chain.ownerName) + '</b>';
+
+    // 摊平这条链的每一格
+    var strip = $('#rpStrip');
+    strip.innerHTML = '';
+    chain.cells.forEach(function (c, i) {
+      var el = document.createElement('div');
+      el.className = 'rp-cell ' + (c.step || '') +
+        (i === 0 ? ' first' : '') + (i === chain.cells.length - 1 ? ' last' : '');
+      var stepName = c.step === 'write' ? '起词' : c.step === 'draw' ? '作画' : '猜词';
+      var inner;
+      if (c.word) inner = '<div class="rpc-word">' + esc(c.word) + '</div>';
+      else if (c.image) inner = '<img class="rpc-img" alt="第' + (i + 1) + '格">';
+      else inner = '<div class="rpc-empty">（空）</div>';
+      el.innerHTML = '<div class="rpc-head"><span class="rpc-step">' + stepName + '</span>' +
+        '<span>' + esc(c.name || '某人') + '</span></div>' +
+        '<div class="rpc-body">' + inner + '</div>';
+      if (c.image && !c.word) {
+        var im = el.querySelector('.rpc-img');
+        var probe = new Image();
+        probe.onload = (function (node, src) {
+          return function () { if (node.parentNode) node.src = src; };
+        })(im, c.image);
+        probe.src = c.image;
+      }
+      strip.appendChild(el);
+    });
+
+    // 首尾对照 + 我的投票状态
+    // 注意：服务端只把「投了对不上」记进 myVotes（同意是默认值，不留痕），
+    // 所以「有没有投过」要看 myVoted —— 单看 myVotes 会把「投了对得上」当成没投。
+    var votedAlready = (g.myVoted || []).indexOf(chain.id) >= 0;
+    var against = (g.myVotes || []).indexOf(chain.id) >= 0;
+    var myVote = !votedAlready ? '' : (against ? 'bad' : 'ok');
+    var tag = chain.matched
+      ? '<span class="rv-tag ok">首尾对得上</span>'
+      : '<span class="rv-tag bad">首尾对不上</span>';
+    $('#rpVerdict').innerHTML =
+      '<span class="rv-a">' + esc(chain.firstWord || '（空）') + '</span>' +
+      '<span class="rv-arrow">→ 传了 ' + Math.max(0, chain.cells.length - 1) + ' 手 →</span>' +
+      '<span class="rv-b">' + esc(chain.lastWord || '（空）') + '</span>' + tag;
+
+    var vb = $('#rpVoteBad'), vk = $('#rpVoteOk');
+    vb.classList.toggle('primary', myVote === 'bad');
+    vk.classList.toggle('primary', myVote === 'ok');
+    vb.classList.toggle('ghost', myVote !== 'bad');
+    vk.classList.toggle('ghost', myVote !== 'ok');
+    $('#rpVoteBad').textContent = myVote === 'bad' ? '已投：对不上' : '对不上';
+    $('#rpVoteOk').textContent = myVote === 'ok' ? '已投：对得上' : '对得上';
+
+    // 房主才能「立刻结算」
+    var btn = $('#btnRpNext');
+    if (btn) btn.classList.toggle('hidden', !S.me.isOwner);
+    updateGameTimer();
+  }
+
+  function voteChain(agree) {
+    var g = S.game;
+    if (!g || !g.replay || !g.replay.length) return;
+    var chain = g.replay[Math.max(0, Math.min(S.replayIndex | 0, g.replay.length - 1))];
+    if (!chain) return;
+    net.send(P.C2S.GAME_VOTE, { chainId: chain.id, agree: !!agree });
+  }
+
+  function stepReplay(d) {
+    var g = S.game;
+    if (!g || !g.replay || !g.replay.length) return;
+    S.replayIndex = (S.replayIndex + d + g.replay.length) % g.replay.length;
+    renderReplay();
+  }
+
+  /* ---- 奖杯结算 ---- */
+
+  function openTrophy() {
+    var mask = $('#trophyMask');
+    if (!mask) return;
+    var g = S.game;
+    if (!g || !g.voteResult) return;
+    mask.classList.remove('hidden');
+
+    var won = g.voteResult.filter(function (r) { return r.won; });
+    $('#trSummary').innerHTML =
+      '<div class="tr-row' + (won.length ? ' won' : '') + '">' +
+      '<b>' + (won.length ? '🎉 ' + won.length + ' 条链安全到达终点' : '这一局全军覆没') + '</b>' +
+      '<span class="tr-flow">首尾一致的链，起词的人拿一个奖杯</span></div>';
+
+    var rows = '';
+    g.voteResult.forEach(function (r) {
+      rows += '<div class="tr-row ' + (r.won ? 'won' : 'lost') + '">' +
+        '<span class="tr-owner">' + esc(r.ownerName) + '</span>' +
+        '<span class="tr-flow"><b>' + esc(r.firstWord || '（空）') + '</b> → ' +
+        esc(r.lastWord || '（空）') + (r.against ? '（' + r.against + ' 人投了「对不上」）' : '') + '</span>' +
+        '<span class="tr-flag">' + (r.won ? '🏆 +1' : '—') + '</span></div>';
+    });
+    $('#trSummary').innerHTML += rows;
+
+    // 奖杯榜
+    var rank = '';
+    (g.scores || []).forEach(function (s) {
+      var me = s.userId === S.me.userId;
+      var mem = S.members.filter(function (m) { return m.userId === s.userId; })[0] || { color: '#9aa0a8' };
+      rank += '<div class="gs-row' + (me ? ' me' : '') + (s.online ? '' : ' offline') + '">' +
+        '<span class="gs-rank">' + s.rank + '</span>' +
+        '<span class="gs-name"><i class="dot" style="background:' + esc(mem.color) + '"></i>' +
+        esc(s.name) + (me ? '（我）' : '') + '</span>' +
+        '<span class="gs-score">' + s.score + ' 🏆</span></div>';
+    });
+    $('#trophyList').innerHTML = rank || '<div class="gs-row"><span class="gs-name">还没有奖杯</span></div>';
+  }
+
+  function closeTrophy() {
+    var mask = $('#trophyMask');
+    if (mask) mask.classList.add('hidden');
+  }
+
+  /* ---- 接龙开局对话框 ---- */
+
+  function renderChainDialog() {
+    var g = S.game;
+    var sel = $('#chainTheme');
+    // 主题列表随快照下发（服务端只给 id/name，绝不含词）。
+    // 注意：快照里的 themes 只有「接龙开局之后」才有 —— 开局前 g 是 null 或经典模式的快照。
+    // 所以这里不能一看「还没填过」就用兜底列表把下拉锁死（那会永远只有「通用」一项）；
+    // 只有真的拿到服务端的列表才记 data-built。
+    if (sel) {
+      // 优先用快照里的（开局后一定有）；开局前用 probePublicUrl 顺手缓存的 S.themes 垫着
+      var list = (g && g.themes && g.themes.length) ? g.themes : (S.themes || null);
+      if (list && list.length) {
+        var sig = list.map(function (t) { return t.id; }).join(',');
+        if (sel.dataset.built !== sig) {
+          var keep = sel.value;
+          sel.innerHTML = '';
+          list.forEach(function (t) {
+            var o = document.createElement('option');
+            o.value = t.id; o.textContent = t.name;
+            sel.appendChild(o);
+          });
+          if (keep) sel.value = keep;
+          sel.dataset.built = sig;
+        }
+      } else if (!sel.options.length) {
+        // 还没拿到真正的列表 —— 先摆一项占位，等服务端的数据到了再换掉
+        sel.innerHTML = '<option value="default">通用（什么都能画）</option>';
+      }
+    }
+    var online = S.members.length;
+    var min = (g && g.minPlayers) || P.GAME.CHAIN_MIN_PLAYERS;
+    var max = (g && g.maxPlayers) || P.GAME.CHAIN_MAX_PLAYERS;
+    var el = $('#chainPlayers');
+    if (el) {
+      el.textContent = '当前 ' + online + ' 人在线（需要 ' + min + ' ~ ' + max + ' 人）';
+      el.style.color = (online < min || online > max) ? 'var(--danger)' : 'var(--text-dim)';
+    }
+    var st = $('#chainState');
+    if (st) {
+      st.textContent = '当前：' + ((g && g.phaseLabel) || '自由绘画');
+    }
+    var btn = $('#btnChainStart');
+    if (btn) {
+      btn.disabled = online < min || online > max;
+      btn.textContent = online < min ? ('还差 ' + (min - online) + ' 人') : '开始接龙';
+    }
+  }
+
+  function startChainGame() {
+    var rounds = Number($('#chainRounds').value) || P.GAME.CHAIN_ROUNDS;
+    var theme = $('#chainTheme').value || 'default';
+    net.send(P.C2S.GAME_START, { mode: 'chain', rounds: rounds, theme: theme });
+    $('#chainMask').classList.add('hidden');
+  }
+
+  function openChainDialog() {
+    // 还没进过房 / 刚连上时 S.themes 可能还是空的，打开面板顺手再问一次
+    if (!S.themes || !S.themes.length) probePublicUrl();
+    renderChainDialog();
+    $('#chainMask').classList.remove('hidden');
+  }
+
+  /** 接龙相关的所有 UI 一起收起来（切模式 / 结束游戏时用） */
+  function closeChainUi() {
+    ['#chainMask', '#chainInputMask', '#replayMask', '#trophyMask', '#chainTask', '#chainProgress']
+      .forEach(function (id) { var el = $(id); if (el) el.classList.add('hidden'); });
+    S.chainTask = null;
+    S.replayIndex = 0;
+    S.chainInputSubmitted = false;
+  }
+
+  /* ---- 接龙状态应用 ---- */
+
+  function applyChainState(g, prevPhase) {
+    var phase = g ? g.phase : 'off';
+    renderChainTask();
+    renderChainProgress();
+    renderChainDialog();
+
+    // 回放 / 投票面板
+    if (phase === 'chain_vote') {
+      if (prevPhase !== 'chain_vote') S.replayIndex = 0;
+      renderReplay();
+      closeTrophy();
+      if (prevPhase !== 'chain_vote') {
+        toast('全部传递完成！看看这一局跑偏成了什么样', 'ok', 3600);
+      }
+    } else {
+      $('#replayMask').classList.add('hidden');
+    }
+
+    // 结算
+    if (phase === 'over') {
+      if (prevPhase !== 'over') openTrophy();
+    } else {
+      closeTrophy();
+    }
+
+    // 输入框只在猜词阶段开着
+    syncChainInput();
+
+    // 阶段播报
+    if (phase !== prevPhase) {
+      if (phase === 'chain_write') toast('第一圈：给每条链起一个词', 'ok', 3000);
+      else if (phase === 'lobby') toast('接龙已就绪', 'ok', 2400);
+      else if (phase === 'off' && prevPhase !== 'off') toast('接龙结束，回到自由绘画', 'ok', 2600);
+    }
+
+    // 论到我动手时提醒一声（服务端已经用系统播报说了「谁在做什么」，这里只补一句自己的）
+    if (chainStepActive() && S.chainTask && !S.chainInputSubmitted) {
+      var key = g.round + ':' + S.chainTask.step + ':' + (S.chainTask.word || '');
+      if (S.chainTaskToast !== key) {
+        S.chainTaskToast = key;
+        if (S.chainTask.step === 'draw') toast('轮到你作画：' + S.chainTask.word, 'ok', 4200);
+        else if (S.chainTask.step === 'guess') toast('轮到你看图猜词', 'ok', 3600);
+        else if (S.chainTask.step === 'write') toast('给你的链起一个词', 'ok', 3600);
+      }
+    }
   }
 
   /* ============================================================ 启动 */
@@ -6757,6 +7412,13 @@
     toggleLocalHideActive: toggleLocalHideActive, clearLocalHiddenUi: clearLocalHidden,
     openTextDialog: openTextDialog, commitText: commitText, placeTextAt: placeTextAt, textOpts: textOpts,
     bindQuickBar: bindQuickBar, updateQuickBar: updateQuickBar,
-    loadReferenceImage: loadReferenceImage, clearReferenceImage: clearReferenceImage
+    loadReferenceImage: loadReferenceImage, clearReferenceImage: clearReferenceImage,
+
+    /* ---- 接龙（chain）：给测试和控制台留的手柄 ---- */
+    startChainGame: startChainGame, openChainDialog: openChainDialog,
+    submitChainWord: submitChainWord, submitChainArt: submitChainArt,
+    doChainGuessSubmit: doChainGuessSubmit, voteChain: voteChain,
+    stepReplay: stepReplay, openTrophy: openTrophy, closeTrophy: closeTrophy,
+    setGameDialogMode: setGameDialogMode
   };
 })(window);

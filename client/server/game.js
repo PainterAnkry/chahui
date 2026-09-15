@@ -76,6 +76,7 @@ class Game {
   constructor(room, api) {
     this.room = room;
     this.api = api;
+    this.mode = 'classic';       // 房间上可能挂着不同玩法的状态机，靠它区分（见 index.js 的 GAME_MODES）
     this.phase = PHASE.OFF;
     this.rounds = P.GAME.DEFAULT_ROUNDS;
     this.round = 0;
@@ -164,6 +165,7 @@ class Game {
     // 回合结束后答案本来就公开了（结算面板要显示）
     const revealed = this.phase === PHASE.ROUND_END || this.phase === PHASE.OVER;
     return {
+      mode: 'classic',          // 前端靠它决定渲染哪一套 HUD（接龙是 'chain'）
       phase: this.phase,
       phaseLabel: PHASE_LABEL[this.phase] || this.phase,
       rounds: this.rounds,

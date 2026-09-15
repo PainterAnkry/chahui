@@ -2168,3 +2168,319 @@ body.panel-dragging * { cursor: grabbing !important; }
   margin-left: 3px;
   vertical-align: 1px;
 }
+
+/* ==========================================================================
+   接龙模式（chain）
+   与经典「你画我猜」共用 HUD / 计分板，这里只加接龙独有的部分：
+   题面面板、链条进度、写词输入、回放投票、奖杯结算
+   ========================================================================== */
+
+/* ---- 我这一步的题面（写词候选 / 要画的词 / 要猜的那幅画）---- */
+.chain-task {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 34;
+  width: 232px;
+  max-width: 40vw;
+  background: rgba(255, 255, 255, .97);
+  border: 1px solid #d5dce6;
+  border-radius: 12px;
+  box-shadow: 0 6px 20px rgba(20, 30, 50, .14);
+  overflow: hidden;
+}
+.chain-task .ct-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 6px 11px;
+  background: var(--accent-soft);
+  border-bottom: 1px solid var(--accent-line);
+}
+.chain-task .ct-step {
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--accent);
+}
+.chain-task .ct-body { padding: 10px 11px 12px; }
+.chain-task.collapsed .ct-body { display: none; }
+
+.ct-word {
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: 2px;
+  text-align: center;
+  padding: 8px 4px 10px;
+  color: var(--text);
+  word-break: break-all;
+}
+.ct-note { font-size: 11.5px; color: var(--text-dim); line-height: 1.6; }
+.ct-img {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: #fff;
+  image-rendering: auto;
+}
+.ct-done {
+  text-align: center;
+  color: var(--ok);
+  font-weight: 600;
+  padding: 6px 0;
+}
+.ct-choices { display: flex; flex-direction: column; gap: 6px; }
+.ct-choice {
+  text-align: left;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  cursor: pointer;
+}
+.ct-choice:hover { border-color: var(--accent-line); background: var(--accent-soft); }
+
+/* ---- 链条进度（每条链走到第几格，不含内容）---- */
+.chain-progress {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 33;
+  width: 208px;
+  max-height: 40vh;
+  overflow: auto;
+  background: rgba(255, 255, 255, .95);
+  border: 1px solid #d5dce6;
+  border-radius: 12px;
+  box-shadow: 0 6px 20px rgba(20, 30, 50, .1);
+}
+.chain-progress .cp-head {
+  padding: 6px 11px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--line-soft);
+  position: sticky;
+  top: 0;
+  background: rgba(255, 255, 255, .97);
+}
+.chain-progress .cp-list { padding: 6px 8px 8px; }
+.cp-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 3px;
+  font-size: 11.5px;
+}
+.cp-row .cp-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+.cp-row.mine .cp-name { color: var(--text); font-weight: 600; }
+.cp-dots { display: flex; gap: 2px; }
+.cp-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--line);
+}
+.cp-dot.filled { background: var(--accent); }
+.cp-dot.guess { background: #e0a53f; }
+.cp-dot.draw { background: #5fbf6a; }
+
+/* ---- 写词 / 猜词输入弹窗 ---- */
+.ci-custom {
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
+}
+.ci-custom input {
+  flex: 1;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+}
+.ci-custom input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.ci-preview {
+  margin-top: 8px;
+  min-height: 16px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+.ci-preview .bad { color: var(--danger); }
+
+/* ---- 回放 + 投票 ---- */
+.modal.replay { width: min(1040px, 94vw); }
+.chain-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.chain-nav b { font-family: var(--mono); }
+.rp-chain-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+}
+.rp-chain-head b { color: var(--text); }
+.rp-strip {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding: 4px 2px 12px;
+  align-items: flex-start;
+}
+.rp-cell {
+  flex: 0 0 auto;
+  width: 168px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+.rp-cell .rpc-head {
+  padding: 5px 8px;
+  font-size: 11px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line-soft);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-dim);
+}
+.rp-cell .rpc-step {
+  font-weight: 600;
+  border-radius: 3px;
+  padding: 0 4px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.rp-cell.guess .rpc-step { background: #fdf1d8; color: #a8721a; }
+.rp-cell.draw .rpc-step { background: #e2f4e6; color: #2f7d43; }
+.rp-cell .rpc-body {
+  padding: 8px;
+  min-height: 92px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.rp-cell .rpc-word {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  text-align: center;
+  word-break: break-all;
+}
+.rp-cell .rpc-img {
+  width: 100%;
+  display: block;
+  background: #fff;
+  border-radius: 4px;
+}
+.rp-cell .rpc-empty { color: var(--text-dim); font-size: 11.5px; }
+.rp-cell.first { border-color: var(--ok); box-shadow: 0 0 0 2px rgba(47, 158, 95, .14); }
+.rp-cell.last { border-color: #e0a53f; box-shadow: 0 0 0 2px rgba(224, 165, 63, .16); }
+
+/* 首尾对照 */
+.rp-verdict {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 10px;
+  border-radius: 10px;
+  background: var(--panel);
+  font-size: 13.5px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.rp-verdict .rv-a, .rp-verdict .rv-b {
+  font-weight: 600;
+  letter-spacing: 1px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+}
+.rp-verdict .rv-arrow { color: var(--text-dim); }
+.rp-verdict .rv-tag { font-size: 11.5px; padding: 2px 7px; border-radius: 10px; }
+.rp-verdict .rv-tag.ok { background: #e2f4e6; color: #2f7d43; }
+.rp-verdict .rv-tag.bad { background: #fbe9e8; color: var(--danger); }
+.rp-vote {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 4px;
+}
+.rp-vote .hint { flex: 1; font-size: 11.5px; color: var(--text-dim); }
+
+/* ---- 奖杯结算 ---- */
+.tr-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.tr-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: var(--panel);
+  font-size: 12.5px;
+}
+.tr-row.won { background: #eefaf0; border: 1px solid #bfe6c8; }
+.tr-row .tr-owner { font-weight: 600; min-width: 74px; }
+.tr-row .tr-flow {
+  flex: 1;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tr-row .tr-flow b { color: var(--text); }
+.tr-row .tr-flag { font-size: 11.5px; }
+.tr-row.won .tr-flag { color: var(--ok); font-weight: 600; }
+.tr-row.lost .tr-flag { color: var(--danger); }
+
+/* ---- 玩法切换（你画我猜 / 接龙） ---- */
+.seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f1f3f7;
+}
+.seg-btn {
+  min-width: 84px;
+  padding: 5px 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.seg-btn:hover { color: var(--text); }
+.seg-btn.active {
+  background: #fff;
+  color: var(--accent);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0,0,0,.09);
+}

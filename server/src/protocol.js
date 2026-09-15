@@ -23,6 +23,13 @@
  *   - 作画过半还没人猜出时，服务端自动「露一个字」当提示（走 GAME_STATE 的 hint 字段）
  *   - 画手在选词阶段可以「换一组」候选词（C2S.GAME_REPICK，每回合限次）
  *   - isNearGuess 不再把单字答案判成「很接近」——一个字的答案没有「接近」可言
+ *
+ * v6 变更（接龙模式 + 主题词库）：
+ *   - 新增 game mode：'classic'（你画我猜，默认）/'chain'（接龙）。开局时由房主选
+ *   - 接龙的每一步只把「上家的产物」发给当事者（看图猜词 / 给词作画），见 S2C.GAME_TASK
+ *   - 接龙状态里有 chains（整条链的匿名化进度）与 replay（回放用），都由 snapshotFor 裁剪
+ *   - 回放后投票（C2S.GAME_VOTE）决定「起词的人」拿不拿奖杯；奖杯累计 = 该玩家的分数
+ *   - 词库分主题：默认 / 明日方舟 / 鸣潮 / 碧蓝档案（C2S.GAME_START 的 theme）
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
@@ -30,7 +37,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var PROTOCOL_VERSION = 5;
+  var PROTOCOL_VERSION = 6;
 
   // 客户端 -> 服务端
   var C2S = {
@@ -69,11 +76,18 @@
     RESYNC: 'resync',
     PING: 'ping',                   // { at }
 
-    // ---- 你画我猜 ----
-    GAME_START: 'game:start',       // { rounds? } 房主开局
+    // ---- 你画我猜（mode='classic'）----
+    GAME_START: 'game:start',       // { rounds?, mode?, theme? } 房主开局
     GAME_STOP: 'game:stop',         // 房主结束本局（回到自由绘画）
     GAME_PICK: 'game:pick',         // { index } 画手从候选词里挑一个
-    GAME_REPICK: 'game:repick'      // 画手换一组候选词（每回合限次，见 GAME.REPICK_LIMIT）
+    GAME_REPICK: 'game:repick',     // 画手换一组候选词（每回合限次，见 GAME.REPICK_LIMIT）
+
+    // ---- 接龙（mode='chain'）----
+    // 一轮 = 每人各做一步（画或猜），链条逐步往前走。所有裁定都在服务端。
+    GAME_SUBMIT: 'game:submit',     // { text, index? } 写词（带 index 表示选了第几个候选）/ 猜词
+    GAME_ART: 'game:art',           // { png } 作画那一步的成品（客户端渲染好回传，服务端只存）
+    GAME_VOTE: 'game:vote',         // { chainId, agree } 这条链首尾对得上吗（票匿名）
+    GAME_NEXT: 'game:next'          // 房主提前推进：跳过没交的人 / 立刻结算投票
   };
 
   // 服务端 -> 客户端
@@ -110,7 +124,12 @@
     // GAME_STATE 是「按收件人裁剪过」的完整快照：猜手拿到的版本里没有 word 字段。
     GAME_STATE: 'game:state',           // { game }  含 phase / wordLen / deadline / roundResult / scores
     GAME_WORD: 'game:word',             // { word, choices? } 只发给画手
-    GAME_CORRECT: 'game:correct'        // { userId, name, rank, points } 有人猜对了
+    GAME_CORRECT: 'game:correct',       // { userId, name, rank, points } 有人猜对了
+
+    // ---- 接龙 ----
+    // 接龙的快照同样按收件人裁剪：你在猜的时候只能看到「上家那幅画」，
+    // 绝不能看到词；结束前也拿不到别人的图（否则把后面几步的答案都看完了）。
+    GAME_TASK: 'game:task'              // { task } 只发给我：这一步要我做什么（词 / 别人的画）
   };
 
   var HISTORY_CHUNK_SIZE = 400;
@@ -144,7 +163,23 @@
     // —— 两个字露一个等于给一半，反而没意思了
     HINT_RATIO: 0.5,
     HINT_MIN_LEN: 3,
-    REPICK_LIMIT: 1          // 选词阶段画手可以「换一组」几次
+    REPICK_LIMIT: 1,         // 选词阶段画手可以「换一组」几次
+
+    /* ---- 接龙模式（mode = 'chain'）----
+     * 链条：每人起一个词 → 下一人照画猜词 → 再下一人照词作画…… 绕圈推进。
+     * 一圈 = 每人都做过一步；走完 ROUNDS_PER_CHAIN 圈后进回放与投票。
+     */
+    CHAIN_MIN_PLAYERS: 4,    // 少于 4 人链条太短，玩不出「越传越离谱」的效果
+    CHAIN_MAX_PLAYERS: 16,
+    CHAIN_ROUNDS: 3,         // 每条链走几圈。3 圈 = 词→画→词，正好是一轮完整的「起词 / 作画 / 猜词」，
+                             // 也是最能看出「越传越离谱」的最短长度（2 圈只有词→画，还没人猜过）
+    CHAIN_MAX_ROUNDS: 6,
+    CHAIN_PICK_CHOICES: 3,   // 开局给每个起词的人几个候选
+    CHAIN_WRITE_MS: 60000,   // 起词 / 猜词一步的时限（打字不用那么久）
+    CHAIN_DRAW_MS: 120000,   // 作画一步的时限（比经典模式宽松，因为只有一幅参考图）
+    CHAIN_REPLAY_MS: 90000,  // 回放 + 投票的总时限
+    CHAIN_MAX_GUESS_LEN: 20, // 单步猜词长度上限
+    CHAIN_TROPHY_AGREE: 1    // 首尾「对得上」时，起词的人拿几个奖杯
   };
 
   // 用户配色（新成员按顺序取色）

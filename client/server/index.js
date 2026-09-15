@@ -9,7 +9,9 @@ const { WebSocketServer } = require('ws');
 const P = require('./protocol');
 const { RoomStore } = require('./rooms');
 const { Game, PHASE, CFG: GAME_CFG } = require('./game');
-const { WORDS } = require('./words');
+const { ChainGame, CHAIN_PHASE, CHAIN_PHASE_LABEL, CFG: CHAIN_CFG } = require('./chain');
+const THEMES = require('./themes');
+const WORDS = require('./words');
 
 const PORT = parseInt(process.env.PORT || '8437', 10);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -126,7 +128,13 @@ const server = http.createServer((req, res) => {
     lanUrls: lanUrls(),
     pid: process.pid,
     game: { PICK_MS: GAME_CFG.PICK_MS, ROUND_MS: GAME_CFG.ROUND_MS, ROUND_END_MS: GAME_CFG.ROUND_END_MS },
-    words: WORDS.length
+    chain: { WRITE_MS: CHAIN_CFG.WRITE_MS, DRAW_MS: CHAIN_CFG.DRAW_MS, REPLAY_MS: CHAIN_CFG.REPLAY_MS },
+    words: WORDS.length,
+    customWords: WORDS.isCustom(),          // CHAHU_WORDS 是否生效（测试的「身份」判据之一）
+    // 主题词库：给前端拿来填「接龙主题」下拉（含可读名），也给测试当身份判据。
+    // 只给 id / name / 词数 —— 一个词都不下发，免得提前泄题。
+    themes: THEMES.themeList().map(t => t.id),
+    themeList: THEMES.themeList()
   });
   if (!fs.existsSync(PUBLIC_DIR)) {
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -186,13 +194,49 @@ function broadcastLayers(room, baseImages) {
   roomBroadcast(room, P.S2C.LAYERS, payload);
 }
 
-/* ------------------------------------------------------------------ 你画我猜 */
+/* ------------------------------------------------------------------ 你画我猜 / 接龙 */
 
-/** 取房间的游戏状态机（首次访问时挂上去；状态不落盘，重启即结束） */
-function gameOf(room) {
+/** 两种玩法的注册表。**加新玩法只需要在这里添一行**，其余接线全是通用的 */
+const GAME_MODES = {
+  classic: { Cls: Game, phases: PHASE, label: '你画我猜' },
+  chain: { Cls: ChainGame, phases: CHAIN_PHASE, label: '接龙' }
+};
+
+function modeDef(mode) { return GAME_MODES[mode] || GAME_MODES.classic; }
+function modeOf(room) { return (room && room.game && room.game.mode) || 'classic'; }
+
+/**
+ * 取房间的游戏状态机（首次访问时挂上去；状态不落盘，重启即结束）。
+ *
+ * 一个房间同时只跑一种玩法 —— 房间上只挂一个 `room.game`。
+ * 想换玩法必须先把旧的停掉（GAME_START 里统一走 startGameOf 处理这件事）。
+ */
+function gameOf(room, mode) {
   if (!room) return null;
-  if (!room.game) room.game = new Game(room, makeGameApi(room));
+  const want = GAME_MODES[mode] ? mode : 'classic';
+  // 已经在跑同一种玩法 → 直接复用（保留分数、局数）
+  if (room.game && room.game.mode === want) return room.game;
+  // 在跑另一种玩法 → 只有它已经停了才允许换（在跑的局不能被人一脚踢掉）
+  if (room.game && room.game.active) return room.game;
+  const def = GAME_MODES[want];
+  room.game = new def.Cls(room, makeGameApi(room));
   return room.game;
+}
+
+/**
+ * 开一局指定玩法。两种玩法的 start() 签名不同：
+ *   经典：start(rounds)              轮数
+ *   接龙：start({ rounds, theme })   每条链走几圈 + 用哪个主题词库
+ */
+function startGameOf(room, mode, opts) {
+  const g = gameOf(room, mode);
+  if (!g || g.mode !== mode) {
+    const running = room.game;
+    const label = running && GAME_MODES[running.mode] ? GAME_MODES[running.mode].label : '另一局游戏';
+    return { ok: false, code: 'game_busy', message: '现在正在玩「' + label + '」，先点「结束游戏」再换' };
+  }
+  if (g.mode === 'chain') return g.start(opts || {});
+  return g.start(opts ? opts.rounds : undefined);
 }
 
 function makeGameApi(room) {
@@ -207,14 +251,24 @@ function makeGameApi(room) {
  * 把当前游戏状态推给房间里每个人。
  * **逐人发送**（而不是一次广播）的唯一理由是：快照要按收件人裁剪 ——
  * 猜手拿到的版本里 word 必须是空的。词另走一条私有消息，压根不进广播流。
+ *
+ * 两种玩法共用这条通路：
+ *   经典模式 → 额外给画手补一条 GAME_WORD（他丢了状态就画不了）
+ *   接龙     → 额外给「这一步有活的人」补一条 GAME_TASK
+ *              （写词的候选 / 要画的词 / 要猜的那幅画，都只能给他本人）
  */
 function syncGame(room) {
   const g = room.game;
   if (!g) return;
+  const isChain = g.mode === 'chain';
   for (const m of room.members.values()) {
     if (m.ws.readyState !== m.ws.OPEN) continue;
     send(m.ws, P.S2C.GAME_STATE, { game: g.snapshotFor(m.userId) });
-    if (g.phase === PHASE.DRAW && m.userId === g.drawerId && g.word) {
+    if (isChain) {
+      // GAME_TASK 只在「做事」的阶段发；回放 / 投票阶段它自然是 null
+      const task = g.taskFor(m.userId);
+      if (task) send(m.ws, P.S2C.GAME_TASK, { task });
+    } else if (g.phase === PHASE.DRAW && m.userId === g.drawerId && g.word) {
       send(m.ws, P.S2C.GAME_WORD, { word: g.word });
     }
   }
@@ -245,8 +299,14 @@ function gameChat(room, text, onlyUserId) {
  *   ② 必须掐掉所有进行中的笔迹 —— 否则回合结束后才提交的那一笔会落到新回合的画布上；
  *   ③ 推进一次 seq 并把新水位告诉客户端，保证 engine.seq 与 service seq 始终对齐
  *      （水位错位的表现很隐蔽：之后画的笔会被当成「已固化」而跳过，画上去看不见）。
+ *
+ * 经典模式每个回合都要清；接龙则**只在「作画」这一步的开始/结束**清
+ * （写词 / 猜词时画布上放着上家的画当参考，绝不能清掉）。
  */
 function resetGameCanvas(room) {
+  // 接龙模式下，画布上的内容可能是「上家的画」（猜词阶段的参考图）。
+  // 那种情况下不能清 —— 但 chain.js 只会在 DRAW 步的首尾调 resetCanvas()，
+  // 那两处画布本来就是空的/该清空的，所以这里照常执行即可。
   for (const m of room.members.values()) {
     const st = m.ws && m.ws._activeStroke;
     if (!st) continue;
@@ -263,11 +323,14 @@ function resetGameCanvas(room) {
   broadcastLayers(room);
 }
 
-/** 游戏进行中，非画手的写操作一律挡在服务端（前端禁用只是「提示」，不是权限） */
+/** 游戏进行中，非当事者的写操作一律挡在服务端（前端禁用只是「提示」，不是权限） */
 function gameBlocked(ws, room, member) {
   if (!room || !member || !room.game) return false;
   if (!room.game.lockedFor(member.userId)) return false;
-  send(ws, P.S2C.ERROR, { code: 'game_locked', message: '这一回合只有画手能改画布' });
+  const msg = room.game.mode === 'chain'
+    ? '接龙这一步轮不到你动笔'
+    : '这一回合只有画手能改画布';
+  send(ws, P.S2C.ERROR, { code: 'game_locked', message: msg });
   return true;
 }
 
@@ -610,16 +673,22 @@ function handle(ws, msg) {
       return;
     }
 
-    /* ---------------- 你画我猜 ---------------- */
+    /* ---------------- 你画我猜 / 接龙 ---------------- */
     case P.C2S.GAME_START: {
       if (!room || !member) return;
       if (member.userId !== room.ownerId) {
         return send(ws, P.S2C.ERROR, { code: 'not_owner', message: '只有房主可以开局' });
       }
-      const g = gameOf(room);
-      const r = g.start(msg.rounds);
+      const mode = GAME_MODES[msg.mode] ? msg.mode : 'classic';
+      const r = startGameOf(room, mode, msg);
       if (!r.ok) return send(ws, P.S2C.ERROR, { code: r.code || 'game_start', message: r.message });
-      console.log('[game] ' + room.id + ' 开局（' + g.rounds + ' 回合，' + room.online + ' 人）');
+      const g = room.game;
+      if (g.mode === 'chain') {
+        console.log('[game] ' + room.id + ' 接龙开局（' + g.rounds + ' 圈，主题 '
+          + g.theme + '，' + room.online + ' 人）');
+      } else {
+        console.log('[game] ' + room.id + ' 开局（' + g.rounds + ' 回合，' + room.online + ' 人）');
+      }
       return;
     }
 
@@ -636,6 +705,7 @@ function handle(ws, msg) {
 
     case P.C2S.GAME_PICK: {
       if (!room || !member || !room.game) return;
+      if (room.game.mode !== 'classic') return;
       const r = room.game.pick(member.userId, msg.index);
       if (!r.ok) return send(ws, P.S2C.ERROR, { code: 'game_pick', message: r.message });
       return;
@@ -644,8 +714,51 @@ function handle(ws, msg) {
     // 画手觉得这组不好画，换一组候选（每回合限次，上限在 game.js 里判）
     case P.C2S.GAME_REPICK: {
       if (!room || !member || !room.game) return;
+      if (room.game.mode !== 'classic') return;
       const r = room.game.repick(member.userId);
       if (!r.ok) return send(ws, P.S2C.ERROR, { code: 'game_repick', message: r.message });
+      return;
+    }
+
+    /* ---------------- 接龙 ---------------- */
+
+    // 我这一步交东西：写词 / 猜词都走这条（作画的产物走 GAME_ART）
+    case P.C2S.GAME_SUBMIT: {
+      if (!room || !member || !room.game || room.game.mode !== 'chain') return;
+      const g = room.game;
+      const r = g.phase === CHAIN_PHASE.GUESS
+        ? g.submitGuess(member.userId, msg.text)
+        : g.submitWord(member.userId, msg.text, msg.index);
+      if (!r.ok) return send(ws, P.S2C.ERROR, { code: 'game_submit', message: r.message });
+      return;
+    }
+
+    /**
+     * 作画那一步的产物。
+     *
+     * 分工与图层像素完全一致：**像素由客户端渲染，服务端只做哑存储**。
+     * 客户端把画布导成 PNG 回传，这里原样塞进链格子 —— 服务端不碰像素。
+     */
+    case P.C2S.GAME_ART: {
+      if (!room || !member || !room.game || room.game.mode !== 'chain') return;
+      const r = room.game.submitArt(member.userId, msg.png);
+      if (!r.ok) return send(ws, P.S2C.ERROR, { code: 'game_art', message: r.message });
+      return;
+    }
+
+    // 投票：这条链首尾对得上吗（票是匿名的，不广播「谁投了什么」）
+    case P.C2S.GAME_VOTE: {
+      if (!room || !member || !room.game || room.game.mode !== 'chain') return;
+      const r = room.game.vote(member.userId, sanitizeText(msg.chainId, 24), !!msg.agree);
+      if (!r.ok) return send(ws, P.S2C.ERROR, { code: 'game_vote', message: r.message });
+      return;
+    }
+
+    // 房主提前推进：写词/画/猜 → 跳过没交的人；投票 → 立刻结算
+    case P.C2S.GAME_NEXT: {
+      if (!room || !member || !room.game || room.game.mode !== 'chain') return;
+      const r = room.game.next(member.userId);
+      if (!r.ok) return send(ws, P.S2C.ERROR, { code: 'game_next', message: r.message });
       return;
     }
 
@@ -937,10 +1050,12 @@ function handle(ws, msg) {
       if (!text && !img) return;
 
       const g = room.game;
-      const playing = !!(g && g.isPlaying());
+      // 只有**经典模式**把聊天当猜词。接龙的猜词走 GAME_SUBMIT 单发（不进聊天流），
+      // 所以接龙进行中聊天就是普通聊天 —— 但也必须挡掉泄题（见下面的 canChat 判断）。
+      const guessing = !!(g && g.mode === 'classic' && g.isPlaying());
 
       /* 游戏进行中：这句话先当「猜词」处理，由服务端决定它能不能公开 */
-      if (playing && text) {
+      if (guessing && text) {
         const res = g.handleGuess(member, text);
         if (res && res.kind === 'correct') {
           // 猜对了 —— 原话绝不出房间，只广播「谁猜对了第几名」
@@ -964,14 +1079,25 @@ function handle(ws, msg) {
         }
       }
 
-      // 防剧透：画手发言必然泄题；已经猜对的人再说话也会把答案说出去。
+      // 防剧透：经典模式的画手发言必然泄题；已经猜对的人再说话也会把答案说出去。
       // 这两种人的文字消息不外发（表情图没有泄题风险，照发）。
-      if (playing && text && g.chatLeaksAnswer(member.userId)) {
+      if (guessing && text && g.chatLeaksAnswer(member.userId)) {
         send(ws, P.S2C.CHAT, {
           id: P.rid('m'), userId: 'system', name: '系统', color: '#8b8b8b', system: true,
           ts: now,
           text: (member.userId === g.drawerId ? '你是画手' : '你已经猜对了')
             + '，这句话不会发出去（免得剧透）'
+        });
+        if (!img) return;
+      }
+
+      // 接龙的防剧透：**手里攥着秘密的人不许说话**。
+      // 这一步轮到谁「看图猜词」，他就知道答案；轮到谁「照词作画」，他也知道答案 ——
+      // 这两种人一开口，后面几步的悬念就没了。自己那张候选词倒不必管（那本来不是别人的谜面）。
+      if (text && g && g.mode === 'chain' && g.chatLeaks && g.chatLeaks(member.userId)) {
+        send(ws, P.S2C.CHAT, {
+          id: P.rid('m'), userId: 'system', name: '系统', color: '#8b8b8b', system: true,
+          ts: now, text: '你手上正拿着这一步的答案，先别说话（免得剧透）'
         });
         if (!img) return;
       }

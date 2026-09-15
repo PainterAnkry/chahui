@@ -92,4 +92,20 @@ function pickChoices(n, used) {
 
 function size() { return WORDS.length; }
 
-module.exports = { WORDS, pickChoices, size };
+/**
+ * 按主题取词池。
+ *   default / 未知 / 混合题库里没有的词 → 通用词库
+ *   有主题 → 主题词库（见 themes.js）
+ * 注意：`CHAHU_WORDS` 自定义词库**优先级最高** —— 测试靠它把答案固定住，
+ * 如果被主题词库盖掉，所有依赖固定答案的断言都会随机失败。
+ */
+function poolForTheme(themeId) {
+  if (customWords()) return WORDS;                 // 自定义词库压过一切主题
+  const themed = require('./themes').wordsOf(themeId);
+  return themed || WORDS;
+}
+
+/** 自定义词库是否生效（/api/share 的自检字段要如实报告这件事） */
+function isCustom() { return !!customWords(); }
+
+module.exports = { WORDS, pickChoices, size, poolForTheme, isCustom };
