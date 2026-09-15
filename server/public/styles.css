@@ -485,6 +485,19 @@ input[type=range]::-webkit-slider-thumb {
   text-align: center; letter-spacing: .5px;
 }
 .recent { display: flex; gap: 3px; flex-wrap: wrap; }
+.recent-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 10px; color: #9aa2ae;
+  margin-top: 2px;
+}
+.recent-head.hidden { display: none; }
+.recent-clear {
+  padding: 0 3px;
+  font-size: 10px;
+  border: none; background: none;
+  color: #9aa2ae; cursor: pointer;
+}
+.recent-clear:hover { color: var(--accent); text-decoration: underline; }
 .recent i {
   width: 14px; height: 14px; border-radius: 3px;
   border: 1px solid rgba(0,0,0,.12); cursor: pointer; display: block;
@@ -1525,6 +1538,37 @@ body.panel-dragging * { cursor: grabbing !important; }
 .tone-row label { width: 54px; flex: none; color: var(--text-dim); }
 .tone-row input[type=range] { flex: 1; min-width: 0; }
 .tone-row b { width: 40px; flex: none; text-align: right; font-family: var(--mono); font-size: 11.5px; }
+
+/* 画布大小对话框 */
+.csize-row { display: flex; align-items: center; gap: 8px; margin: 8px 0; font-size: 12.5px; }
+.csize-row label { flex: none; color: var(--text-dim); }
+.csize-row input[type=number] {
+  width: 82px; padding: 4px 6px;
+  font-family: var(--mono); font-size: 12.5px; text-align: right;
+}
+.csize-px { color: var(--text-dim); font-size: 11px; }
+.csize-anchor-wrap { display: flex; align-items: center; gap: 10px; margin: 10px 0 6px; }
+.csize-anchor-label { font-size: 12.5px; color: var(--text-dim); flex: none; }
+/* 九宫格锚点：点哪一格，画面就贴到画布的哪一边 */
+.anchor-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 20px);
+  grid-template-rows: repeat(3, 20px);
+  gap: 3px;
+}
+.anchor-grid button {
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--panel-2);
+  cursor: pointer;
+}
+.anchor-grid button:hover { border-color: var(--accent); }
+.anchor-grid button.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 2px #fff;
+}
 
 .modal.text-modal textarea {
   width: 100%;

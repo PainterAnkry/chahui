@@ -965,11 +965,11 @@
   var triCache = null;
 
   /* 三角顶点离色环内沿留多少空隙。
-     9px 太「瘦」了：三角本来就比内圈小一圈，顶点以外的部分又全是弦，
-     实际能点中的面积比看上去小得多（探针画出来的命中图就是一圈大死区），
-     于是「想点三角，结果点到环」——色相被改、环上的小圈直接跳走。
-     缩到 6px：肉眼还是看得出分开，但好点多了。 */
-  var TRI_GAP = 6;
+     留少了看着像连在一起（用户反馈「还是让三角形和环形间隔一段距离」），
+     所以这里给到 11px —— 视觉上明确是两块。
+     注意：命中判定不是按半径切的（见 hitIsRing），空隙的一半会算给三角，
+     所以间距加大**不会**让三角变难点，反而更容易。 */
+  var TRI_GAP = 11;
 
   /**
    * 色轮的几何 —— **绘制和命中判定必须共用这一份**。
@@ -1237,10 +1237,11 @@
       var ctx = cv.getContext('2d');
       var d = sampleTriPixel(ctx, g, x, y);
       if (d[3] < 8) { cv.dataset.pick = 'miss'; return; }
+      var hh = reliableHue(d[0], d[1], d[2]);
+      if (hh !== null) S.hue = hh;
       var hsv = rgbToHsv(d[0], d[1], d[2]);
       // 三角里靠近白角 / 黑角的像素几乎没有彩度，色相是算不出来的（会回 0）。
       // 直接写 S.hue 会让色环上的小圈毫无理由地跳到红色去 —— 只在真的有色相时才更新。
-      if (hsv.s > 0.0001) S.hue = hsv.h;
       S.sv = { s: hsv.s, v: hsv.v };
       setColor(hexOf(d[0], d[1], d[2]), false);
       drawWheel();
@@ -1381,13 +1382,30 @@
      否则「V 拖到 0 变黑，再拖回来」会变成白色，颜色就丢了。 */
   var syncingColor = false;
 
+  /**
+   * 一个像素「算得出色相」吗？算得出就返回色相，算不出返回 null。
+   *
+   * 判断要严一点：色轮三角靠近白角 / 黑角的地方，8 位色深量化会让本来该是灰色的
+   * 像素差出 1~2 级（#F4F5F5 就是这么来的），反推出来的色相纯粹是噪声 ——
+   * 照单全收地写回 S.hue，环上的小圈就会毫无理由地跳走，
+   * 这正是「点一下三角，色相自己变了」的来源。
+   * 所以：通道极差 ≤ 2 的直接算灰；饱和度不到 1% 的也算灰。
+   */
+  function reliableHue(r, g, b) {
+    var mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+    if (mx - mn <= 2) return null;
+    var hsv = rgbToHsv(r, g, b);
+    return hsv.s > 0.01 ? hsv.h : null;
+  }
+
   /** 从 RGB 推 HSV，推不出来的分量沿用 S 里记住的 */
   function hsvOfColor(hex) {
     var rg = global.CanvasEngine.hexToRgb(hex);
     var hsv = rgbToHsv(rg.r, rg.g, rg.b);
+    var hh = reliableHue(rg.r, rg.g, rg.b);
     return {
       rgb: rg,
-      h: hsv.s > 0.0001 ? hsv.h : S.hue,
+      h: hh !== null ? hh : S.hue,
       s: hsv.v > 0.0001 ? hsv.s : S.sv.s,
       v: hsv.v
     };
@@ -1509,7 +1527,8 @@
     //  · 在色轮上拖色相环 → applyHsv 用当前 S/V 合成 → 若当前 S=0 合成出来还是灰 →
     //    setColor 又把 hue 打回 0 —— 用户看到的就是「点环没用」；
     //  · 把 V 拖到 0 变黑再拖回来 → S 被打回 0 → 变成白色，原来的颜色就没了。
-    if (hsv.s > 0.0001) S.hue = hsv.h;
+    var hh = reliableHue(rg.r, rg.g, rg.b);
+    if (hh !== null) S.hue = hh;
     S.sv = { s: hsv.v > 0.0001 ? hsv.s : S.sv.s, v: hsv.v };
     refreshColorSliders();
     // 色轮上的两个指示器（环上的小圈 + 三角里的小圈）都是从 S.hue / S.sv 画的，
@@ -1520,19 +1539,37 @@
     if (remember !== false) pushRecent(hex);
   }
 
-  function pushRecent(hex) {
-    S.recent = S.recent.filter(function (c) { return c.toLowerCase() !== hex.toLowerCase(); });
-    S.recent.unshift(hex);
-    if (S.recent.length > 12) S.recent.length = 12;
+  /* 「最近使用」：换色快的时候全靠它。记在本地，重开还在。 */
+  var RECENT_KEY = 'chahu.recent';
+
+  function loadRecent() {
+    var raw = null;
+    try { raw = JSON.parse(lsGet(RECENT_KEY, 'null')); } catch (e) { raw = null; }
+    if (!Array.isArray(raw)) return [];
+    return raw.filter(function (c) { return typeof c === 'string' && /^#[0-9a-fA-F]{6}$/.test(c); }).slice(0, 12);
+  }
+
+  function renderRecent() {
     var box = $('#recentColors');
+    if (!box) return;
     box.innerHTML = '';
     S.recent.forEach(function (c) {
       var i = document.createElement('i');
       i.style.background = c;
-      i.title = c;
+      i.title = c + '（点一下就用它）';
       i.onclick = function () { setColor(c, false); };
       box.appendChild(i);
     });
+    var head = $('#recentHead');
+    if (head) head.classList.toggle('hidden', S.recent.length === 0);
+  }
+
+  function pushRecent(hex) {
+    S.recent = S.recent.filter(function (c) { return c.toLowerCase() !== hex.toLowerCase(); });
+    S.recent.unshift(hex);
+    if (S.recent.length > 12) S.recent.length = 12;
+    lsSet(RECENT_KEY, JSON.stringify(S.recent));
+    renderRecent();
   }
 
   /* ============================================================ 顶栏 */
@@ -3898,6 +3935,169 @@
   // 兼容旧入口
   function openResizeDialog() { openCanvasDialog(); }
 
+  /**
+   * 改画布尺寸但**画面不缩放** —— 「画布大小」和「裁剪到选区」都走这一条路。
+   *
+   * 每个图层先在旧尺寸下取原始像素，按锚点（或给定偏移）画进新尺寸的画布：
+   * 多出来的地方留透明，画到外面的部分自然被裁掉。
+   * 然后等服务端确认新尺寸、重新同步完，再把这些像素作为图层内容回传
+   * （裁剪过的像素没法用笔迹重放表达，只能走 LAYER_PIXELS）。
+   *
+   * ⚠ 别再拿 scaleArtwork 当裁剪用 —— 那是**缩放**（旧画面会被拉成新尺寸），
+   * 以前的「裁剪」就是这么瞎的：裁完内容全被拉伸，看着完全不对。
+   *
+   * @param {number} w 新宽  @param {number} h 新高
+   * @param {number} ax 水平锚点 0=贴左 0.5=居中 1=贴右
+   * @param {number} ay 垂直锚点 0=贴上 0.5=居中 1=贴下
+   */
+  function resizeCanvasKeepContent(w, h, ax, ay) {
+    if (!S.joined) { toast('先进入一个房间', 'err'); return false; }
+    if (!S.me.isOwner) { toast('只有房主可以改画布尺寸', 'err'); return false; }
+    if (engine.transform) commitTransform();
+    w = Math.round(w); h = Math.round(h);
+    if (!w || !h || w < 320 || w > 4096 || h < 240 || h > 4096) {
+      toast('画布范围是 320-4096 × 240-4096', 'err');
+      return false;
+    }
+    var oldW = engine.width, oldH = engine.height;
+    if (w === oldW && h === oldH) { toast('画布尺寸没变化'); return false; }
+    var dx = Math.round((w - oldW) * ax);
+    var dy = Math.round((h - oldH) * ay);
+    var pngs = {};
+    engine.layers.forEach(function (l) {
+      var src = engine.renderLayerRaw(l.id);          // 旧尺寸的原始像素
+      var c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      var cx2 = c.getContext('2d');
+      cx2.imageSmoothingEnabled = false;
+      // 只平移，不缩放：src 按原大小画在 (dx,dy)，越界的部分自动被裁掉
+      cx2.drawImage(src, dx, dy);
+      pngs[l.id] = c.toDataURL('image/png');
+    });
+    pendingLayerPixels = { pngs: pngs, upToSeq: engine.seq };
+    // 选区是旧坐标系的，画布一动就对不上了，直接清掉
+    if (engine.hasSelection && engine.hasSelection()) {
+      beginSelSnapshot();
+      engine.clearSelection();
+      commitSelSnapshot();
+    }
+    net.send(P.C2S.ROOM_RESIZE, { width: w, height: h });
+    toast('画布已改为 ' + w + ' × ' + h + '（画面未缩放）', 'ok');
+    // 兜底：万一没等到重新同步，也别把状态一直挂着
+    setTimeout(flushPendingPixels, 6000);
+    return true;
+  }
+
+  /* ---------------------------------------------------------- 画布大小对话框 */
+
+  var csizeAnchor = { ax: 0.5, ay: 0.5 };
+
+  /** 某一层「有内容」的范围（不含透明边），用来算「刚好装下内容」 */
+  function layerContentBounds(id) {
+    var src = engine.renderLayerRaw(id);
+    var W = src.width, H = src.height;
+    var d = src.getContext('2d').getImageData(0, 0, W, H).data;
+    var x0 = W, y0 = H, x1 = -1, y1 = -1;
+    for (var y = 0; y < H; y++) {
+      var row = y * W * 4;
+      for (var x = 0; x < W; x++) {
+        if (d[row + x * 4 + 3] > 8) {
+          if (x < x0) x0 = x;
+          if (x > x1) x1 = x;
+          if (y < y0) y0 = y;
+          if (y > y1) y1 = y;
+        }
+      }
+    }
+    if (x1 < 0) return null;
+    return { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+  }
+
+  function openCanvasSizeDialog() {
+    if (!S.joined) { toast('先进入一个房间', 'err'); return; }
+    var mask = $('#csizeMask');
+    if (!mask) return;
+    $('#csizeW').value = engine.width;
+    $('#csizeH').value = engine.height;
+    csizeAnchor = { ax: 0.5, ay: 0.5 };
+    paintAnchor();
+    csizePreview();
+    mask.classList.remove('hidden');
+    setTimeout(function () { $('#csizeW').focus(); $('#csizeW').select(); }, 30);
+  }
+  function closeCanvasSizeDialog() { var m = $('#csizeMask'); if (m) m.classList.add('hidden'); }
+
+  function paintAnchor() {
+    document.querySelectorAll('#csizeAnchor button').forEach(function (b) {
+      b.classList.toggle('on',
+        parseFloat(b.dataset.ax) === csizeAnchor.ax && parseFloat(b.dataset.ay) === csizeAnchor.ay);
+    });
+  }
+
+  function csizePreview() {
+    var el = $('#csizePreview');
+    if (!el) return;
+    var w = Math.round(parseFloat($('#csizeW').value) || 0);
+    var h = Math.round(parseFloat($('#csizeH').value) || 0);
+    var o = engine.width + ' × ' + engine.height;
+    if (!w || !h) { el.textContent = '更改前 ' + o; return; }
+    var d = (w - engine.width) + ' × ' + (h - engine.height);
+    var what = (w > engine.width || h > engine.height) ? '（会多出透明边）' : '';
+    if (w < engine.width || h < engine.height) what = '（超出的画面会被裁掉）';
+    if (w === engine.width && h === engine.height) what = '（没变化）';
+    el.textContent = '更改前 ' + o + '　→　更改后 ' + w + ' × ' + h
+      + '　Δ ' + d + ' ' + what;
+  }
+
+  function bindCanvasSizeDialog() {
+    if (!$('#csizeMask')) return;
+    var mask = $('#csizeMask');
+    $('#csizeW').addEventListener('input', csizePreview);
+    $('#csizeH').addEventListener('input', csizePreview);
+    document.querySelectorAll('#csizeAnchor button').forEach(function (b) {
+      b.addEventListener('click', function () {
+        csizeAnchor = { ax: parseFloat(b.dataset.ax), ay: parseFloat(b.dataset.ay) };
+        paintAnchor();
+      });
+    });
+    $('#btnCSizeSwap').addEventListener('click', function () {
+      var w = $('#csizeW').value, h = $('#csizeH').value;
+      $('#csizeW').value = h; $('#csizeH').value = w;
+      csizePreview();
+    });
+    // 「刚好装下内容」：把画布扩到能放下所有图层内容，一点不裁
+    $('#btnCSizeMax').addEventListener('click', function () {
+      var bb = null;
+      engine.layers.forEach(function (l) {
+        var b = layerContentBounds(l.id);
+        if (!b) return;
+        if (!bb) bb = { x0: b.x, y0: b.y, x1: b.x + b.w, y1: b.y + b.h };
+        else {
+          bb.x0 = Math.min(bb.x0, b.x); bb.y0 = Math.min(bb.y0, b.y);
+          bb.x1 = Math.max(bb.x1, b.x + b.w); bb.y1 = Math.max(bb.y1, b.y + b.h);
+        }
+      });
+      if (!bb) { toast('还没有画任何东西'); return; }
+      // 内容基本都在画布内，所以「装下内容」= 现在这么大；只有贴着边的才需要扩
+      var w = clamp(Math.ceil(Math.max(bb.x1, engine.width)), 320, 4096);
+      var h = clamp(Math.ceil(Math.max(bb.y1, engine.height)), 240, 4096);
+      $('#csizeW').value = w;
+      $('#csizeH').value = h;
+      csizePreview();
+      toast(w === engine.width && h === engine.height
+        ? '内容已经装得下了，不用改'
+        : '已填上刚好装得下的尺寸');
+    });
+    $('#btnCSizeOk').addEventListener('click', function () {
+      var w = Math.round(parseFloat($('#csizeW').value) || 0);
+      var h = Math.round(parseFloat($('#csizeH').value) || 0);
+      if (resizeCanvasKeepContent(w, h, csizeAnchor.ax, csizeAnchor.ay)) closeCanvasSizeDialog();
+    });
+    $('#btnCSizeZero').addEventListener('click', closeCanvasSizeDialog);
+    $('#btnCSizeCancel').addEventListener('click', closeCanvasSizeDialog);
+    mask.addEventListener('click', function (e) { if (e.target === mask) closeCanvasSizeDialog(); });
+  }
+
   function resetRoomUi(reason) {
     // 掉线 / 换房时把没提交的变换丢掉，免得图层一直停在「被挖空」的状态
     if (engine.transform) { engine.endTransform(false); endTransformUi(); }
@@ -3986,6 +4186,13 @@
       if (k === '[') { setSize(S.brush.size - Math.max(1, S.brush.size * 0.15)); return; }
       if (k === ']') { setSize(S.brush.size + Math.max(1, S.brush.size * 0.15)); return; }
       if (k === 'x') { swapColors(); return; }
+      // D = 回到黑前景 / 白背景（和 PS / Krita 一样，X 互换的搭档键）
+      if (k === 'd') {
+        setColor('#000000', false);
+        setBgColor('#ffffff');
+        toast('前景黑 / 背景白');
+        return;
+      }
       if (k === 'h') { engine.flipView(); return; }
       if (k === ',') { engine.rotateBy(-15); return; }
       if (k === '.') { engine.rotateBy(15); return; }
@@ -4316,6 +4523,14 @@
     $('#btnSwap').addEventListener('click', swapColors);
     var bgIn = $('#bgColorInput');
     if (bgIn) bgIn.addEventListener('input', function () { setBgColor(this.value); });
+    var rc = $('#btnRecentClear');
+    if (rc) rc.addEventListener('click', function () {
+      if (!S.recent.length) return;
+      S.recent = [];
+      lsSet(RECENT_KEY, '[]');
+      renderRecent();
+      toast('已清空「最近使用」');
+    });
 
     // 点进十六进制框就全选，直接覆盖输入最省事
     $('#hexInput').addEventListener('focus', function () { this.select(); });
@@ -4396,6 +4611,9 @@
     $('#btnBlurOk').addEventListener('click', function () { closeBlurDialog(true); });
     $('#btnBlurCancel').addEventListener('click', function () { closeBlurDialog(false); });
     $('#btnBlurZero').addEventListener('click', function () { closeBlurDialog(false); });
+
+    // 画布大小
+    bindCanvasSizeDialog();
 
     // 导出
     $('#exportFormat').addEventListener('change', syncExportNote);
@@ -4614,6 +4832,8 @@
 
     loadBrush(S.brushId);
     setBgColor(S.bgColor);
+    S.recent = loadRecent();
+    renderRecent();
     setColor(S.color || '#2b2b2b', false);
     $('#symSelect').value = S.sym;
     $('#cursorStyle').value = S.cursorStyle;
@@ -4725,38 +4945,31 @@
     toast(okMsg, 'ok');
   }
 
+  /**
+   * 裁剪到选区：画布变成选区那么大，画面按选区左上角整体平移。
+   *
+   * 以前这里走的是 scaleArtwork —— 那是**缩放**，等于把整幅画面拉成选区尺寸，
+   * 根本不是裁剪（探针实测：裁完内容被拉伸，位置全不对）。
+   * 现在和「画布大小」共用 resizeCanvasKeepContent，只是锚点由选区决定：
+   * 想让「选区的左上角」落在新画布的 (0,0)，锚点就得是 bb.x/(W-w)。
+   */
   function cropToSelection() {
     if (!S.joined) { toast('先进入一个房间', 'err'); return; }
+    if (!S.me.isOwner) { toast('只有房主可以改画布尺寸', 'err'); return; }
     if (!engine.hasSelection()) { toast('先用选区工具圈一块出来', 'err'); return; }
     var bb = engine.selectionBBox();
     if (!bb) { toast('选区是空的', 'err'); return; }
-    if (!confirm('裁剪到选区？画布会变成 ' + Math.round(bb.w) + ' × ' + Math.round(bb.h) + '，这一步可以撤销。')) return;
-    if (engine.transform) commitTransform();
-    // 先把整幅画面按选区偏移搬一次，再改画布尺寸
+    var w = clamp(Math.round(bb.w), 320, 4096);
+    var h = clamp(Math.round(bb.h), 240, 4096);
+    if (w !== Math.round(bb.w) || h !== Math.round(bb.h)) {
+      toast('选区太小：画布最小 320 × 240，已按最小尺寸裁', 'err', 4200);
+    }
     var W = engine.width, H = engine.height;
-    var tmp = document.createElement('canvas');
-    tmp.width = W; tmp.height = H;
-    var tc = tmp.getContext('2d');
-    engine.renderDocument({}).ctx = null;   // 只是取一下渲染管线，不用它的 ctx
-    var doc = engine.renderDocument({});
-    tc.drawImage(doc.canvas, 0, 0);
-    var out = document.createElement('canvas');
-    out.width = Math.max(1, Math.round(bb.w));
-    out.height = Math.max(1, Math.round(bb.h));
-    out.getContext('2d').drawImage(tmp, -Math.round(bb.x), -Math.round(bb.y));
-    applyCropped(out);
-  }
-
-  /** 把裁剪结果作为新的底图铺回去，然后改画布尺寸 */
-  function applyCropped(canvas) {
-    var b = engine.activeLayer();
-    var png = canvas.toDataURL('image/png');
-    // 走既有的「图像大小」那条路：改尺寸 + 缩放画面，服务端照单全收
-    scaleArtwork(canvas.width, canvas.height, function () {
-      b.baseImage = png;
-      b.baseSeq = engine.seq;
-      b.strokes = [];
-    });
+    // 新画布上 (0,0) 要对应原来的 (bb.x, bb.y)：dx = (w-W)*ax = -bb.x
+    var ax = (W === w) ? 0 : clamp(-bb.x / (w - W), 0, 1);
+    var ay = (H === h) ? 0 : clamp(-bb.y / (h - H), 0, 1);
+    if (!confirm('裁剪到选区？画布会变成 ' + w + ' × ' + h + '，这一步可以撤销。')) return;
+    resizeCanvasKeepContent(w, h, ax, ay);
   }
 
   function selectFromLayer() {
@@ -5920,7 +6133,7 @@
     toggleReplay: function () { if (engine.replayMode) stopReplay(); else startReplay(); },
     leaveRoom: leaveRoom,
     addLayer: addLayer, moveLayer: moveLayer, clearLayer: clearLayer,
-    openCanvasDialog: openCanvasDialog, bake: bake,
+    openCanvasDialog: openCanvasDialog, openCanvasSizeDialog: openCanvasSizeDialog, bake: bake,
     flipImage: flipImage, rotateImage: rotateImage, cropToSelection: cropToSelection,
     selectAll: selectAll, selectNone: selectNone, selectInvert: selectInvert,
     selectFromLayer: selectFromLayer, toggleTransform: toggleTransform, toggleMeshTransform: toggleMeshTransform,

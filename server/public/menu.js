@@ -112,7 +112,7 @@
     {
       id: 'image', name: '图像', mnemonic: 'C', items: [
         def('image', 'image.size', '图像大小', { mnemonic: 'R', run: function () { A().openCanvasDialog(); } }),
-        def('image', 'image.canvasSize', '画布大小', { mnemonic: 'S', run: function () { A().openCanvasDialog(); } }),
+        def('image', 'image.canvasSize', '画布大小', { mnemonic: 'S', run: function () { A().openCanvasSizeDialog(); } }),
         SEP,
         def('image', 'image.crop', '裁剪', { mnemonic: 'T', run: function () { A().cropToSelection(); } }),
         SEP,

@@ -257,6 +257,10 @@
           </div>
           <div class="color-hex">
             <input type="text" id="hexInput" value="#2B2B2B" spellcheck="false" maxlength="7" title="输入十六进制颜色，支持 #abc 简写" />
+            <div class="recent-head" id="recentHead">
+              <span>最近</span>
+              <button class="recent-clear" id="btnRecentClear" title="清空「最近使用」的颜色">清空</button>
+            </div>
             <div class="recent" id="recentColors"></div>
           </div>
         </div>
@@ -881,6 +885,52 @@
         <span class="spacer"></span>
         <button class="btn tiny ghost" id="btnBlurZero">取消</button>
         <button class="btn tiny primary" id="btnBlurOk">确定</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 画布大小：只改画布本身，画面不缩放。多出来的地方透明，裁掉的地方丢。 -->
+<div class="modal-mask hidden" id="csizeMask">
+  <div class="modal tone">
+    <div class="modal-head">
+      <h3>画布大小</h3>
+      <button class="icon-btn" id="btnCSizeCancel">×</button>
+    </div>
+    <div class="modal-body">
+      <p class="hint">
+        只改画布本身，**画面不缩放**。多出来的地方是透明的，裁掉的部分会丢。
+        这一步可以撤销。
+      </p>
+      <div class="csize-row">
+        <label>宽度</label>
+        <input type="number" id="csizeW" min="320" max="4096" step="1" />
+        <span class="csize-px">px</span>
+        <label>高度</label>
+        <input type="number" id="csizeH" min="240" max="4096" step="1" />
+        <span class="csize-px">px</span>
+        <button class="btn tiny ghost" id="btnCSizeSwap" title="宽高互换">⇄</button>
+      </div>
+      <div class="csize-anchor-wrap">
+        <span class="csize-anchor-label">画面往哪边靠</span>
+        <div class="anchor-grid" id="csizeAnchor">
+          <button data-ax="0" data-ay="0" title="左上"></button>
+          <button data-ax="0.5" data-ay="0" title="上中"></button>
+          <button data-ax="1" data-ay="0" title="右上"></button>
+          <button data-ax="0" data-ay="0.5" title="左中"></button>
+          <button data-ax="0.5" data-ay="0.5" title="正中"></button>
+          <button data-ax="1" data-ay="0.5" title="右中"></button>
+          <button data-ax="0" data-ay="1" title="左下"></button>
+          <button data-ax="0.5" data-ay="1" title="下中"></button>
+          <button data-ax="1" data-ay="1" title="右下"></button>
+        </div>
+      </div>
+      <p class="hint" id="csizePreview">—</p>
+      <div class="imp-actions">
+        <button class="btn tiny ghost" id="btnCSizeMax" title="把画布扩到当前内容能放下的最大范围（不裁掉任何东西）">刚好装下内容</button>
+        <span class="spacer"></span>
+        <button class="btn tiny ghost" id="btnCSizeZero">取消</button>
+        <button class="btn tiny primary" id="btnCSizeOk">确定</button>
       </div>
     </div>
   </div>

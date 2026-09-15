@@ -48,7 +48,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
         const b = cv.getBoundingClientRect();
         const SZ = cv.width, cx = SZ / 2, cy = SZ / 2;
         const R = SZ / 2 - 3, ring = 17, r0 = R - ring;
-        const tr = r0 - 6; // 与 app.js 的 TRI_GAP 一致
+        const tr = r0 - 11; // 与 app.js 的 TRI_GAP 一致
         const T3 = Math.sqrt(3) / 2;
         return {
           cv, b, SZ, cx, cy, R, ring, r0, tr,
@@ -472,6 +472,83 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok('#abc 简写能展开成 #AABBCC', shortHex.short === '#AABBCC', shortHex);
   ok('不带 # 的 ff8800 也认', shortHex.noHash === '#FF8800', shortHex);
   ok('乱输入会退回当前颜色（不会写进去一个坏值）', /^#[0-9A-F]{6}$/.test(shortHex.bad), shortHex);
+
+  console.log('\n=== 「最近使用」：记在本地、能清空 ===');
+  const recent = await page.evaluate(async () => {
+    // 先用界面上的「清空」清干净（只删 localStorage 是不够的：内存里那份还在）
+    document.getElementById('btnRecentClear').click();
+    await new Promise(r => setTimeout(r, 200));
+    const empty = document.querySelectorAll('#recentColors i').length;
+    const p = window.__colorProbe;
+    p.setColorViaHex('#112233');
+    await new Promise(r => setTimeout(r, 120));
+    p.setColorViaHex('#445566');
+    await new Promise(r => setTimeout(r, 120));
+    p.setColorViaHex('#778899');
+    await new Promise(r => setTimeout(r, 180));
+    return {
+      empty,
+      count: document.querySelectorAll('#recentColors i').length,
+      hexes: [...document.querySelectorAll('#recentColors i')].map(i => (i.title || '').slice(0, 7).toLowerCase()),
+      stored: localStorage.getItem('chahu.recent'),
+      headShown: !document.getElementById('recentHead').classList.contains('hidden'),
+      hasClear: !!document.getElementById('btnRecentClear')
+    };
+  });
+  console.log('  ' + JSON.stringify(recent));
+  ok('清空按钮真的清干净了', recent.empty === 0, recent.empty);
+  ok('换过的颜色进了「最近使用」', recent.count === 3, recent);
+  ok('最新的排最前，顺序是反的（最近 → 更早）',
+    JSON.stringify(recent.hexes) === JSON.stringify(['#778899', '#445566', '#112233']), recent.hexes);
+  ok('「最近」有小标题和清空按钮', recent.headShown && recent.hasClear, recent);
+  ok('记进了 localStorage', /778899/.test(recent.stored || ''), recent.stored);
+
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => window.ChaApp, { timeout: 15000 });
+  await page.waitForTimeout(500);
+  await installProbe();
+  const recentAfter = await page.evaluate(() => {
+    document.getElementById('entryMask').classList.add('hidden');
+    return {
+      count: document.querySelectorAll('#recentColors i').length,
+      hexes: [...document.querySelectorAll('#recentColors i')].map(i => (i.title || '').slice(0, 7).toLowerCase())
+    };
+  });
+  console.log('  ' + JSON.stringify(recentAfter));
+  ok('刷新之后「最近使用」还在', recentAfter.count === 3, recentAfter);
+  ok('顺序也没乱', recentAfter.hexes[0] === '#778899', recentAfter.hexes);
+
+  const cleared = await page.evaluate(async () => {
+    document.getElementById('btnRecentClear').click();
+    await new Promise(r => setTimeout(r, 200));
+    return {
+      count: document.querySelectorAll('#recentColors i').length,
+      stored: localStorage.getItem('chahu.recent'),
+      headShown: !document.getElementById('recentHead').classList.contains('hidden')
+    };
+  });
+  ok('清空之后一个不剩', cleared.count === 0 && cleared.stored === '[]', cleared);
+  ok('清空之后「最近」那一行自己也收起来', cleared.headShown === false, cleared);
+
+  console.log('\n=== D 键：前景黑 / 背景白（X 互换的搭档键） ===');
+  const dkey = await page.evaluate(() => {
+    const p = window.__colorProbe;
+    p.setColorViaHex('#ff8800');
+    const bgEl = document.getElementById('bgColorInput');
+    bgEl.value = '#00ff00';
+    bgEl.dispatchEvent(new Event('input', { bubbles: true }));
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'd', bubbles: true }));
+    return {
+      fg: document.getElementById('hexInput').value,
+      bg: document.getElementById('bgColorInput').value,
+      fgBlock: getComputedStyle(document.getElementById('colorPreview')).backgroundColor,
+      bgBlock: getComputedStyle(document.getElementById('bgPreview')).backgroundColor
+    };
+  });
+  console.log('  ' + JSON.stringify(dkey));
+  ok('D 键把前景变黑', dkey.fg === '#000000', dkey);
+  ok('D 键把背景变白', dkey.bg === '#ffffff', dkey);
+  ok('两个色块也跟着变', dkey.fgBlock === 'rgb(0, 0, 0)' && dkey.bgBlock === 'rgb(255, 255, 255)', dkey);
 
   console.log('\n=== 页面没报错 ===');
   ok('全程没有 JS 报错', errs.length === 0, errs.slice(0, 4));
