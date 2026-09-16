@@ -678,24 +678,60 @@
   function isBrushItem(it) { return it.type === 'brush'; }
 
   /**
-   * 工具的默认快捷键（PS / SAI 习惯；键位表见全局 keydown 的 map，两处要同步改）。
-   * 显示在格子角上 —— 键位要「看得见」才有人用。
+   * 每支笔/每个工具**自己的**快捷键（按 item id，不再按 tool 家族）。
+   * 右键任意格子可改键 / 清除，覆盖值存 localStorage['chahu.itemKeys']
+   * （注意别用 'chahu.keys' —— 那是菜单栏命令的键位表，menu.js 在用）。
+   * 清除（''）= 真的没有快捷键，不会回落到默认键（槽位数字键 1-9 仍按面板顺序可用）。
+   * 'Alt' = 按住 Alt 临时取色（SAI 习惯，画布按下时生效，见 view pointerdown）。
    */
-  var TOOL_KEYS = {
-    brush: 'B', eraser: 'E', blur: 'U', smudge: 'S', line: 'L',
-    rect: 'R', ellipse: 'O', fill: 'G', gradient: 'N',
-    select: 'Q', selectErase: 'W', picker: 'I'
+  var ITEM_KEYS_DEFAULT = {
+    brush: 'B', eraser: 'E', blur: 'U', smudge: 'S',
+    bucket: 'G', gradient: 'N', line: 'L', rect: 'R', ellipse: 'O',
+    wand: 'W', picker: 'Alt',
+    select: '', selectErase: ''   // 选区类不占字母键：Alt 要留给「减选」
   };
-  /** 数字键 1-9 切到笔刷栏第 1-9 支笔（按当前面板顺序），返回这支笔的键位角标 */
+  var ITEM_KEYS = null;
+  var ITEM_KEYS_STORE = 'chahu.itemKeys';
+
+  function loadKeymap() {
+    ITEM_KEYS = {};
+    for (var id in ITEM_KEYS_DEFAULT) ITEM_KEYS[id] = ITEM_KEYS_DEFAULT[id];
+    var raw = null;
+    try { raw = JSON.parse(lsGet(ITEM_KEYS_STORE, 'null')); } catch (e) { raw = null; }
+    if (raw && typeof raw === 'object') {
+      for (var k in raw) {
+        // 内置 id 直接覆盖默认；导入笔刷的 id 也能存（首次设键时才出现在表里）
+        if (k in ITEM_KEYS || Brushes.get(k)) ITEM_KEYS[k] = String(raw[k] || '');
+      }
+    }
+  }
+  function itemKey(id) {
+    if (!ITEM_KEYS) loadKeymap();
+    var v = ITEM_KEYS[id];
+    return v === undefined ? '' : v;
+  }
+  function saveKeymap() {
+    lsSet(ITEM_KEYS_STORE, JSON.stringify(ITEM_KEYS));
+    renderToolGrid();
+  }
+  /** 按键找笔刷：只认当前面板上看得见的（收起的笔不吃键，避免「隐形抢键」） */
+  function findItemByKey(key) {
+    if (!key) return null;
+    var vis = visibleItems();
+    for (var i = 0; i < vis.length; i++) {
+      if (itemKey(vis[i].id).toUpperCase() === key.toUpperCase()) return vis[i].id;
+    }
+    return null;
+  }
+  /** 格子角上的键位角标：字母/Alt 优先，没设键的笔刷显示槽位号 1-9 */
   function itemKeyBadge(it, list, isBrushList) {
-    // 橡皮 / 油漆桶 / 模糊这些「住在笔刷栏里的工具」有自己的字母键，优先显示字母
-    var letter = TOOL_KEYS[it.tool];
-    if (letter && it.tool !== 'brush') return letter;
+    var k = itemKey(it.id);
+    if (k) return k;
     if (isBrushList) {
       var i = list.indexOf(it);
       return i >= 0 && i < 9 ? String(i + 1) : '';
     }
-    return letter || '';
+    return '';
   }
 
   /**
@@ -733,13 +769,12 @@
         }
         loadBrush(it.id);
       };
-      // 导入的笔刷：右键删掉它（自带的笔刷不给删）
-      if (it.imported) {
-        b.oncontextmenu = function (e) {
-          e.preventDefault();
-          if (confirm('删除导入的笔刷「' + it.name + '」？')) removeImported(it.id);
-        };
-      }
+      // 右键任意格子 → 小弹窗：改快捷键 / 删除（内置笔刷=收起，导入笔刷=真删）
+      b.oncontextmenu = function (e) {
+        e.preventDefault();
+        openItemCtx(it, e.clientX, e.clientY);
+      };
+      if (S.toolEdit) bindGridDrag(b, box);
       box.appendChild(b);
     });
   }
@@ -847,6 +882,94 @@
     saveToolPrefs();
     renderToolGrid();
     toast('工具栏已恢复默认');
+  }
+
+  /**
+   * 编辑模式：按住格子直接拖到目标位置（替代/补充 ◀ ▶）。
+   * 两栏共用一份 order 数组，所以只能在**同类**里换位 ——
+   * 松手时从 DOM 实际顺序反推 order，其他栏 / 收起池的相对位置原样保留。
+   */
+  function bindGridDrag(el, box) {
+    el.addEventListener('pointerdown', function (e) {
+      if (e.button !== 0) return;
+      if (e.target.closest && e.target.closest('.tbadge')) return;  // ◀ ▶ ✕ 还是要能点
+      var startX = e.clientX, startY = e.clientY, dragging = false;
+      var pid = e.pointerId;
+
+      function onMove(ev) {
+        if (!dragging) {
+          if (Math.abs(ev.clientX - startX) + Math.abs(ev.clientY - startY) < 6) return;
+          dragging = true;
+          el.classList.add('drag-ghost');
+          document.body.classList.add('tool-dragging');
+          try { el.setPointerCapture(pid); } catch (err) { /* 老浏览器无所谓 */ }
+        }
+        // 指针压在哪个同类兄弟上，就把被拖的格子实时插到它前/后
+        var kids = [].slice.call(box.children);
+        for (var i = 0; i < kids.length; i++) {
+          var kid = kids[i];
+          if (kid === el) continue;
+          var r = kid.getBoundingClientRect();
+          if (ev.clientY >= r.top && ev.clientY <= r.bottom && ev.clientX >= r.left && ev.clientX <= r.right) {
+            if (ev.clientY < r.top + r.height / 2) box.insertBefore(el, kid);
+            else box.insertBefore(el, kid.nextSibling);
+            break;
+          }
+        }
+        ev.preventDefault();
+      }
+      function finish() {
+        el.removeEventListener('pointermove', onMove);
+        el.removeEventListener('pointerup', finish);
+        el.removeEventListener('pointercancel', finish);
+        el.classList.remove('drag-ghost');
+        document.body.classList.remove('tool-dragging');
+        if (!dragging) return;               // 没拖成 = 普通点击，交给 onclick
+        var ids = [].slice.call(box.children).map(function (c) { return c.dataset.item; });
+        var inGrid = {};
+        ids.forEach(function (id) { inGrid[id] = 1; });
+        var out = [], gi = 0;
+        S.toolPrefs.order.forEach(function (id) {
+          out.push(inGrid[id] ? ids[gi++] : id);
+        });
+        S.toolPrefs.order = out;
+        saveToolPrefs();
+        renderToolGrid();
+      }
+      el.addEventListener('pointermove', onMove);
+      el.addEventListener('pointerup', finish);
+      el.addEventListener('pointercancel', finish);
+    });
+  }
+
+  /* ------------------------------------------------- 右键格子的小弹窗：改键 / 删除 */
+
+  var ctxItem = null;        // 当前右键的 item
+  var ctxCapturing = false;  // 正在等用户按新快捷键
+
+  function openItemCtx(it, x, y) {
+    ctxItem = it; ctxCapturing = false;
+    var m = $('#itemCtxMenu');
+    if (!m) return;
+    $('#icmName').textContent = it.name + (it.imported ? '（导入）' : '');
+    refreshIcmKey();
+    $('#icmDel').textContent = it.imported ? '删除笔刷' : '收起笔刷（编辑模式可放回）';
+    m.classList.remove('hidden');
+    var r = m.getBoundingClientRect();
+    m.style.left = Math.max(4, Math.min(x, window.innerWidth - r.width - 8)) + 'px';
+    m.style.top = Math.max(4, Math.min(y, window.innerHeight - r.height - 8)) + 'px';
+  }
+  function closeItemCtx() {
+    ctxItem = null; ctxCapturing = false;
+    var m = $('#itemCtxMenu');
+    if (m) m.classList.add('hidden');
+  }
+  function refreshIcmKey() {
+    if (!ctxItem) return;
+    var k = itemKey(ctxItem.id);
+    $('#icmKey').textContent = ctxCapturing
+      ? '按下新快捷键…（Esc 取消）'
+      : (k ? '快捷键：' + k + '（点击修改）' : '快捷键：无（点击设置）');
   }
 
   function updateBrushLabel() {
@@ -4536,6 +4659,30 @@
         return;
       }
       if (typing) return;
+      // 右键弹窗的「捕获新快捷键」模式：把下一个字母 / Alt 吃下来，别的键都不响应
+      if (ctxCapturing && ctxItem) {
+        e.preventDefault(); e.stopPropagation();
+        if (e.key === 'Escape') { ctxCapturing = false; refreshIcmKey(); return; }
+        if (e.key === 'Alt') {
+          ITEM_KEYS[ctxItem.id] = 'Alt';
+        } else if (/^[a-zA-Z]$/.test(e.key)) {
+          var up = e.key.toUpperCase();
+          // X 互换色 / D 黑白 / H 翻转 是全局功能键（H 同时还在菜单里），不让笔刷抢
+          if (up === 'X' || up === 'D' || up === 'H') {
+            toast('X / D / H 是全局功能键，换一个吧', 'err');
+            return;
+          }
+          ITEM_KEYS[ctxItem.id] = up;
+        } else {
+          return;  // Shift / F1 这类不理，继续等
+        }
+        saveKeymap();
+        ctxCapturing = false;
+        refreshIcmKey();
+        return;
+      }
+      // 右键小弹窗开着时按 Esc 关掉它
+      if (ctxItem && e.key === 'Escape') { closeItemCtx(); return; }
       // 菜单 / 快捷键先过一遍：键位是可以在「快捷键设置」里改的
       if (global.ChaMenu) {
         var hit = global.ChaMenu.matchEvent(e);
@@ -4574,12 +4721,12 @@
         return;
       }
       var k = e.key.toLowerCase();
-      var map = {
-        b: 'brush', e: 'eraser', u: 'blur', s: 'smudge', l: 'line',
-        r: 'rect', o: 'ellipse', g: 'fill', n: 'gradient',
-        q: 'select', w: 'selectErase', i: 'picker'
-      };
-      if (map[k]) { setTool(map[k]); return; }
+      // 单字母 = 单笔快捷键（右键笔刷可自定义；比旧的「家族切换」更直观 ——
+      // B 永远是「画笔」本人，W 是魔棒。收起的笔不吃键。）
+      if (k.length === 1 && k >= 'a' && k <= 'z') {
+        var hitItem = findItemByKey(k);
+        if (hitItem) { loadBrush(hitItem); return; }
+      }
       if (k === '[') { setSize(S.brush.size - Math.max(1, S.brush.size * 0.15)); return; }
       if (k === ']') { setSize(S.brush.size + Math.max(1, S.brush.size * 0.15)); return; }
       if (k === 'x') { swapColors(); return; }
@@ -4950,12 +5097,44 @@
       S.toolEdit = !S.toolEdit;
       $$('#btnToolEdit, #btnBrushEdit').forEach(function (b) { b.classList.toggle('active', S.toolEdit); });
       renderToolGrid();
-      toast(S.toolEdit ? '编辑中：◀ ▶ 调顺序，✕ 收起' : '已退出编辑');
+      toast(S.toolEdit ? '编辑中：直接拖动调顺序，✕ 收起，右键改快捷键' : '已退出编辑');
       void btn;
     }
     $('#btnToolEdit').addEventListener('click', function () { toggleToolEdit(this); });
     $('#btnBrushEdit').addEventListener('click', function () { toggleToolEdit(this); });
     $('#btnToolReset').addEventListener('click', resetToolPrefs);
+
+    // 右键格子的小弹窗：改快捷键 / 清除 / 删除
+    var icm = $('#itemCtxMenu');
+    if (icm) {
+      $('#icmKey').addEventListener('click', function () {
+        if (!ctxItem) return;
+        ctxCapturing = true;
+        refreshIcmKey();
+      });
+      $('#icmClear').addEventListener('click', function () {
+        if (!ctxItem) return;
+        ITEM_KEYS[ctxItem.id] = '';
+        saveKeymap();
+        refreshIcmKey();   // 弹窗留着，方便接着设别的
+        toast('「' + ctxItem.name + '」已无快捷键');
+      });
+      $('#icmDel').addEventListener('click', function () {
+        if (!ctxItem) return;
+        var it = ctxItem;
+        closeItemCtx();
+        if (it.imported) {
+          if (confirm('删除导入的笔刷「' + it.name + '」？')) removeImported(it.id);
+        } else {
+          hideItem(it.id);  // 内置笔刷收进「已收起」池，编辑模式里能放回来
+        }
+      });
+      // 点弹窗外面就关（右键格子时 e.preventDefault 已经挡住了默认菜单）
+      document.addEventListener('pointerdown', function (e) {
+        if (ctxItem && !icm.contains(e.target)) closeItemCtx();
+      });
+      icm.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+    }
 
     // 笔刷导入（PS .abr / CSP .sut）
     $('#btnBrushImport').addEventListener('click', function (e) { e.stopPropagation(); openBrushImport(); });

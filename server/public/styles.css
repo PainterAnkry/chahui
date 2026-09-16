@@ -403,6 +403,10 @@ input[type=range]::-webkit-slider-thumb {
 }
 .tool.active .tkey { background: var(--accent-soft); color: #1d5dad; }
 .tool-grid.editing .tool .tkey { display: none; }
+/* 编辑模式拖拽：抓起来半透明 + 光标；触屏上 pointermove 不被滚动手势吃掉 */
+.tool-grid.editing .tool { touch-action: none; }
+.tool.drag-ghost { opacity: .45; outline: 2px dashed var(--accent-line); z-index: 2; }
+body.tool-dragging { cursor: grabbing; user-select: none; }
 .tool-grid .tbadge button {
   border: none;
   background: rgba(255,255,255,.9);
@@ -2722,3 +2726,41 @@ body.panel-dragging * { cursor: grabbing !important; }
   padding: 4px 7px;
 }
 #ghSound.off { opacity: .45; }
+
+/* ============================================== 右键格子的小弹窗（改键 / 删除） */
+#itemCtxMenu {
+  position: fixed;
+  z-index: 120;
+  min-width: 176px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+}
+#itemCtxMenu .icm-name {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 4px 8px 6px;
+  border-bottom: 1px solid var(--line-soft);
+  margin-bottom: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#itemCtxMenu .icm-row {
+  border: none;
+  background: transparent;
+  text-align: left;
+  color: var(--text);
+  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+#itemCtxMenu .icm-row:hover { background: var(--accent-soft); }
+#itemCtxMenu .icm-row.danger { color: var(--danger); }
+#itemCtxMenu .icm-row.danger:hover { background: #fdeaea; }

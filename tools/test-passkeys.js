@@ -12,6 +12,9 @@
  *   ④ 侧栏拖动调宽 → CSS 变量变化 + 持久化
  *   ⑤ 快捷菜单自定义：⚙ 面板勾选显隐 → 立即生效 + 刷新记住 + 恢复默认
  *   ⑥ 经典模式主题下拉与接龙同源（快照 themes + /api/share themeList 垫底）
+ *   ⑦ 默认键位：B=画笔本人 / W=魔棒 / 选区笔无键 / 吸管=Alt；槽位数字照旧
+ *   ⑧ 右键笔刷弹小窗：改键（含 Alt、功能键拦截）、清除（清除后真的无键）、内置=收起
+ *   ⑨ 编辑模式按住拖动排序（DOM 顺序 + localStorage 同步）
  */
 'use strict';
 const path = require('path');
@@ -135,21 +138,28 @@ async function waitForPage(page, fn, timeout, label) {
       return a && window.ChaApp.state.brushId === a.dataset.item;
     }));
 
-  // 工具键：B 回到铅笔（brush 家族默认/最近一支），E 橡皮
+  // 工具键：B 现在是「画笔」这支笔本人的快捷键（不再是模糊的家族切换）
   await B.keyboard.press('b');
   await sleep(250);
-  ok('按 B 切到画笔家族',
-    await B.evaluate(() => window.ChaApp.state.tool === 'brush'));
+  ok('按 B 切到「画笔」本人（brushId=brush，不只是家族）',
+    await B.evaluate(() => window.ChaApp.state.tool === 'brush' &&
+      window.ChaApp.state.brushId === 'brush'));
   await B.keyboard.press('e');
   await sleep(250);
   ok('按 E 切到橡皮',
     await B.evaluate(() => window.ChaApp.state.tool === 'eraser'));
   await B.keyboard.press('b');
   await sleep(250);
-  ok('再按 B 回到画笔家族（最近用的那支还在）',
-    await B.evaluate(() => window.ChaApp.state.tool === 'brush'));
+  ok('再按 B 回到画笔本人',
+    await B.evaluate(() => window.ChaApp.state.brushId === 'brush'));
+  await B.keyboard.press('w');
+  await sleep(250);
+  ok('按 W 切到魔棒（默认键新规则）',
+    await B.evaluate(() => window.ChaApp.state.tool === 'wand'));
+  await B.keyboard.press('b');
+  await sleep(200);
 
-  // 键位角标（注意：橡皮擦 / 油漆桶这些 type='brush' 的工具也住在笔刷栏里，显示字母键）
+  // 键位角标：没设字母键的笔刷显示槽位数字；选区笔不设键；吸管是 Alt
   ok('笔刷格子上显示了槽位数字角标',
     await B.evaluate(() => {
       const t = document.querySelectorAll('#brushGrid .tool .tkey');
@@ -160,10 +170,20 @@ async function waitForPage(page, fn, timeout, label) {
       const eraser = document.querySelector('#brushGrid .tool[data-tool="eraser"] .tkey');
       return !!eraser && eraser.textContent === 'E';
     }));
-  ok('工具栏的选区笔显示字母角标 Q',
+  ok('工具栏的选区笔没有快捷键角标（不设键）',
     await B.evaluate(() => {
-      const sel = document.querySelector('#toolGrid .tool[data-tool="select"] .tkey');
-      return !!sel && sel.textContent === 'Q';
+      const sel = document.querySelector('#toolGrid .tool[data-tool="select"]');
+      return !!sel && !sel.querySelector('.tkey');
+    }));
+  ok('魔棒显示 W 角标（工具栏里）',
+    await B.evaluate(() => {
+      const wand = document.querySelector('#toolGrid .tool[data-tool="wand"] .tkey');
+      return !!wand && wand.textContent === 'W';
+    }));
+  ok('吸管显示 Alt 角标',
+    await B.evaluate(() => {
+      const p = document.querySelector('#toolGrid .tool[data-tool="picker"] .tkey');
+      return !!p && p.textContent === 'Alt';
     }));
   ok('悬停提示里也写了快捷键',
     await B.evaluate(() => {
@@ -337,8 +357,167 @@ async function waitForPage(page, fn, timeout, label) {
   await B.click('#btnGameStart', { trial: true }).catch(() => {});
   await B.evaluate(() => document.querySelector('#gameMask').classList.add('hidden'));
 
-  /* ================= [7] 控制台干净 ================= */
-  console.log('\n[7] 控制台干净');
+  /* ================= [7] 右键笔刷：改键 / 清除 / 收起 ================= */
+  console.log('\n[7] 右键笔刷弹小窗（改键 / 清除 / 收起）');
+  // 给「水彩笔」设键 P（它没有默认键，槽位也不靠前，断言干净）
+  const wcSel = '#brushGrid .tool[data-item="watercolor"]';
+  await B.click(wcSel, { button: 'right' });
+  ok('右键笔刷弹出小窗，写上了笔名',
+    await waitForPage(B, () => {
+      const m = document.querySelector('#itemCtxMenu');
+      return !m.classList.contains('hidden') && /水彩笔/.test(document.querySelector('#icmName').textContent);
+    }, 4000, 'itemCtxMenu'));
+  ok('没设键时显示「快捷键：无」',
+    await B.evaluate(() => /快捷键：无/.test(document.querySelector('#icmKey').textContent)));
+  await B.click('#icmKey');
+  ok('点「快捷键」进入捕获模式',
+    await B.evaluate(() => /按下新快捷键/.test(document.querySelector('#icmKey').textContent)));
+  await B.keyboard.press('p');
+  await sleep(300);
+  ok('按 P 完成捕获并写进 localStorage',
+    await B.evaluate(() => {
+      try {
+        const m = JSON.parse(localStorage.getItem('chahu.itemKeys') || '{}');
+        return m.watercolor === 'P';
+      } catch (e) { return false; }
+    }));
+  ok('水彩笔的角标变成 P',
+    await B.evaluate(() => {
+      const t = document.querySelector('#brushGrid .tool[data-item="watercolor"] .tkey');
+      return !!t && t.textContent === 'P';
+    }));
+  await B.keyboard.press('p');
+  await sleep(250);
+  ok('按 P 真的切到水彩笔',
+    await B.evaluate(() => window.ChaApp.state.brushId === 'watercolor'));
+
+  // 功能键拦截：给铅笔设 H 会被拒（全局翻转键）
+  await B.click('#brushGrid .tool[data-item="pencil"]', { button: 'right' });
+  await B.click('#icmKey');
+  await B.keyboard.press('h');
+  await sleep(250);
+  ok('H 被拦截（全局功能键不让笔刷抢）',
+    await B.evaluate(() => {
+      try {
+        const m = JSON.parse(localStorage.getItem('chahu.itemKeys') || '{}');
+        return m.pencil === undefined || m.pencil === '';
+      } catch (e) { return false; }
+    }));
+  await B.keyboard.press('Escape');   // 先退出捕获模式（否则下一个字母会被当成设键）
+  await sleep(150);
+  await B.keyboard.press('b');        // 切回画笔，别停在「水彩笔」上
+  await sleep(250);
+
+  // 清除快捷键 → 真的无键：P 不再切水彩笔
+  await B.click(wcSel, { button: 'right' });
+  await B.click('#icmClear');
+  await sleep(300);
+  ok('清除后 localStorage 里是空串',
+    await B.evaluate(() => {
+      try {
+        const m = JSON.parse(localStorage.getItem('chahu.itemKeys') || '{}');
+        return m.watercolor === '';
+      } catch (e) { return false; }
+    }));
+  await B.keyboard.press('p');
+  await sleep(250);
+  ok('清除后按 P 不再切到水彩笔（不回落默认键）',
+    await B.evaluate(() => window.ChaApp.state.brushId !== 'watercolor'));
+
+  // Alt 设键
+  await B.click(wcSel, { button: 'right' });
+  await B.click('#icmKey');
+  await B.keyboard.press('Alt');
+  await sleep(300);
+  ok('捕获 Alt 存为「Alt」并显示在角标上',
+    await B.evaluate(() => {
+      try {
+        const m = JSON.parse(localStorage.getItem('chahu.itemKeys') || '{}');
+        const t = document.querySelector('#brushGrid .tool[data-item="watercolor"] .tkey');
+        return m.watercolor === 'Alt' && !!t && t.textContent === 'Alt';
+      } catch (e) { return false; }
+    }));
+  await B.keyboard.press('Escape');
+  await sleep(200);
+  ok('Esc 关掉小弹窗',
+    await B.evaluate(() => document.querySelector('#itemCtxMenu').classList.contains('hidden')));
+
+  // 内置笔刷「删除」= 收起（可放回）；关掉弹窗后角标还原
+  await B.click(wcSel, { button: 'right' });
+  ok('内置笔刷的删除按钮叫「收起笔刷」',
+    await B.evaluate(() => /收起笔刷/.test(document.querySelector('#icmDel').textContent)));
+  await B.click('#icmDel');
+  await sleep(300);
+  ok('点收起后水彩笔从笔刷栏消失',
+    await B.evaluate(() => !document.querySelector('#brushGrid .tool[data-item="watercolor"]')));
+  await B.click('#btnBrushEdit');   // 进编辑模式 → 收起池里放回来
+  await sleep(300);
+  ok('编辑模式的收起池里有水彩笔，点一下放回',
+    await B.evaluate(() => {
+      const pool = Array.from(document.querySelectorAll('#toolHiddenPool .tb-item'));
+      const it = pool.find(b => /水彩笔/.test(b.textContent));
+      if (it) { it.click(); return true; }
+      return false;
+    }));
+  await sleep(300);
+  ok('放回后水彩笔回到笔刷栏',
+    await B.evaluate(() => !!document.querySelector('#brushGrid .tool[data-item="watercolor"]')));
+  await B.click('#btnBrushEdit');   // 退出编辑模式
+  await sleep(200);
+  ok('收起/放回不丢键位覆盖（Alt 还在）',
+    await B.evaluate(() => {
+      try {
+        const m = JSON.parse(localStorage.getItem('chahu.itemKeys') || '{}');
+        return m.watercolor === 'Alt';
+      } catch (e) { return false; }
+    }));
+  // 清理现场：把 watercolor 的覆盖清掉，不影响后面的断言
+  await B.evaluate(() => {
+    try {
+      const m = JSON.parse(localStorage.getItem('chahu.itemKeys') || '{}');
+      m.watercolor = '';
+      localStorage.setItem('chahu.itemKeys', JSON.stringify(m));
+    } catch (e) { /* ignore */ }
+  });
+
+  /* ================= [8] 编辑模式拖动排序 ================= */
+  console.log('\n[8] 编辑模式按住拖动排序');
+  await B.click('#btnBrushEdit');
+  await sleep(250);
+  const dragIds0 = await B.evaluate(() =>
+    Array.from(document.querySelectorAll('#brushGrid .tool')).map(b => b.dataset.item));
+  const src = await B.locator('#brushGrid .tool').first().boundingBox();
+  const dst = await B.locator('#brushGrid .tool').nth(1).boundingBox();
+  await B.mouse.move(src.x + src.width / 2, src.y + src.height / 2);
+  await B.mouse.down();
+  // 拖到第二格的下半 → 插到它后面
+  await B.mouse.move(dst.x + dst.width / 2, dst.y + dst.height * 0.8, { steps: 8 });
+  await sleep(120);
+  await B.mouse.up();
+  await sleep(400);
+  const dragIds1 = await B.evaluate(() =>
+    Array.from(document.querySelectorAll('#brushGrid .tool')).map(b => b.dataset.item));
+  ok('拖动后前两支笔换了位置（' + dragIds0[0] + ' ↔ ' + dragIds1[0] + '）',
+    dragIds1[0] === dragIds0[1] && dragIds1[1] === dragIds0[0],
+    JSON.stringify({ before: dragIds0.slice(0, 3), after: dragIds1.slice(0, 3) }));
+  ok('新顺序已持久化到 localStorage（chahu.tools）',
+    await B.evaluate((first) => {
+      try {
+        const o = JSON.parse(localStorage.getItem('chahu.tools') || '{}').order || [];
+        return o[0] === first;
+      } catch (e) { return false; }
+    }, dragIds1[0]));
+  ok('拖完后激活笔刷没被换掉（拖动不触发选中）',
+    await B.evaluate(() => {
+      const a = document.querySelector('#brushGrid .tool.active');
+      return a && window.ChaApp.state.brushId === a.dataset.item;
+    }));
+  await B.click('#btnToolReset');   // 编辑模式里点「恢复默认」：顺序还原，别影响别的测试
+  await sleep(300);
+  await B.click('#btnBrushEdit');   // 退出编辑
+
+  /* ================= [9] 控制台干净 ================= */
+  console.log('\n[9] 控制台干净');
   const realErrs = errs.filter(e => !/favicon|net::ERR_|Download the React/i.test(e) &&
     !expectedErrs.some(x => e.indexOf(x) >= 0));
   ok('整个过程没有 JS 报错', realErrs.length === 0, realErrs.slice(0, 3).join(' | '));

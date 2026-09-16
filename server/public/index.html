@@ -716,6 +716,14 @@
   </div>
 </div>
 
+<!-- 右键笔刷/工具格子的小弹窗：改快捷键 / 清除 / 删除（定位 fixed，JS 控制位置） -->
+<div class="hidden" id="itemCtxMenu">
+  <div class="icm-name" id="icmName">—</div>
+  <button class="icm-row" id="icmKey" type="button">快捷键</button>
+  <button class="icm-row" id="icmClear" type="button">清除快捷键</button>
+  <button class="icm-row danger" id="icmDel" type="button">删除笔刷</button>
+</div>
+
 <div class="modal-mask hidden" id="qbEditMask">
   <div class="modal confirm">
     <div class="modal-head">
