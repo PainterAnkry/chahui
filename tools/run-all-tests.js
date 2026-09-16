@@ -30,6 +30,7 @@ const SUITE = [
   'test-collab-view.js',
   'test-chain-ui.js',
   'test-chain-sim.js',
+  'test-theme-ui.js',
   'verify-issues.js',
   'verify-round2.js',
   'verify-round3.js'

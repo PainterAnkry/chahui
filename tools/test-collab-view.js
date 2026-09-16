@@ -181,11 +181,11 @@ const viewInk = (p, x, y, w, h) => p.evaluate(([a, b, ww, hh]) => {
     return c.length;
   });
   ok('导出还在（能拿到 PNG）', exp > 1000, exp);
-  const blueInExport = await A.evaluate(() => {
-    const e = window.ChaApp.engine;
-    const d = e.renderDocument({}).ctx.getImageData(800, 600, 1, 1).data;
-    return [d[0], d[1], d[2], d[3]];
-  });
+  // 这里必须和 docPx 用同一套采法（13×13 取最深）。
+  // 曾经写的是「取 (800,600) 单个像素」，而 aDoc 取的是小方块里最深的一个 ——
+  // 单像素是不是落在最深那条上全看亚像素栅格化，于是这条断言随机失败
+  // （实测同一份代码 4 次能挂 2 次，报出来的蓝色值每次都不一样）。
+  const blueInExport = await docPx(A, 800, 600);
   ok('★ 导出 / 固化用的还是满强度的别人的笔',
     blueInExport[2] > 100 && blueInExport[2] === aDoc.blue[2], blueInExport);
 

@@ -2450,8 +2450,13 @@
    * 把「图层 + 它的进行中笔迹」合成到 dstCtx。
    * dirty 不为空时，中间那张临时画布也只重画这一块 —— 否则每帧都要全画布 clear+drawImage，
    * 开销与画布面积成正比，画大一点墨迹就跟不上手。
+   *
+   * opts.raw：**要图层自身的像素，不要协作视图那层淡化**。
+   * 导出 / 固化 / 导航器走的是这条路。历史上这里写死了 `displayCanvas`，
+   * 于是「别人的笔迹淡一点」开着的时候，只要对方正好有一笔还没提交，
+   * 导出出来的那一笔就是**淡的** —— 屏幕与成品不一致。（有 test-collab-view 守着）
    */
-  CanvasEngine.prototype.composeLayer = function (dstCtx, tmpCtx, tmpCanvas, layer) {
+  CanvasEngine.prototype.composeLayer = function (dstCtx, tmpCtx, tmpCanvas, layer, opts) {
     var self = this;
     clearCtx(tmpCtx, this.width, this.height);
     tmpCtx.setTransform(1, 0, 0, 1, 0, 0);
@@ -2469,7 +2474,7 @@
       dstCtx.globalCompositeOperation = 'source-over';
       return;
     }
-    tmpCtx.drawImage(this.displayCanvas(layer), 0, 0);
+    tmpCtx.drawImage((opts && opts.raw) ? layer.canvas : this.displayCanvas(layer), 0, 0);
     this.pending.forEach(function (e) {
       if (e.layer !== layer) return;
       var s = e.stroke;
@@ -2567,7 +2572,9 @@
         continue;
       }
       if (includeActive && this.hasPendingOn(l)) {
-        this.composeLayer(out.ctx, tmp.ctx, tmp.canvas, l);
+        // raw：导出 / 固化 / 导航器要的是**成品像素**，不能带上「别人笔迹淡一点」那层
+        // 只影响本机屏幕的效果。（有 test-collab-view 守着）
+        this.composeLayer(out.ctx, tmp.ctx, tmp.canvas, l, { raw: true });
       } else if (opts.rawLayer) {
         // 合并/复制用：只要图层自身像素，不套用图层浓度与混合模式
         out.ctx.drawImage(l.canvas, 0, 0);

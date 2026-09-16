@@ -5,12 +5,13 @@
  */
 window.CHAHU_CONFIG = {
   // 公网服务端地址（部署后填写；本地开发留空即可）
-  publicServer: '',
+  // 已部署到腾讯云 Lighthouse 轻量服务器（2 核 2G / 广州），24 小时在线。
+  publicServer: 'ws://139.199.90.209/ws',
   localServer: 'ws://localhost:8437/ws',
   defaultName: '',
   appName: '茶绘',
   // 版本号：关于页显示 + 和 GitHub 的最新 release 比对
-  appVersion: '1.7.0',
+  appVersion: '1.8.0',
   // 开源仓库（更新检测用）
   repo: 'PainterAnkry/chahui'
 };

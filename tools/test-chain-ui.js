@@ -434,23 +434,59 @@ async function createRoom(page, name) {
   ok('回放面板自动弹出来', rp.visible);
   // 3 圈 = 一条链 3 格（词→画→猜），4 条链逐条翻
   ok('回放里摆出了这条链的每一格（3 圈 = 3 格）', rp.cells === 3, '实际 ' + rp.cells + ' 格');
-  ok('页码显示「1 / N」', /1\s*\/\s*[1-9]/.test(rp.index), '实际「' + rp.index + '」');
-  ok('写明了这条链的起词人', rp.head.indexOf('起词人') >= 0, '实际「' + rp.head + '」');
-  ok('首尾对照带箭头', rp.verdict.indexOf('→') >= 0, '实际「' + rp.verdict + '」');
 
-  // 回放翻页
+  // 回放是「逐格揭晓」的：格子上先挂着 .covered，判定与投票按钮要等演完才出现。
+  // 所以下面所有依赖「揭晓完成」的断言都必须先等这一个条件 —— 用固定 sleep 会随机失败。
+  await host.waitForFunction(() => {
+    const cells = document.querySelectorAll('#rpStrip .rp-cell');
+    const verdict = document.querySelector('#rpVerdict');
+    return cells.length > 0 &&
+      !document.querySelector('#rpStrip .rp-cell.covered') &&
+      verdict && verdict.classList.contains('rp-in') &&
+      verdict.textContent.indexOf('传了') >= 0;
+  }, { timeout: 6000 });
+
+  const rp2 = await host.evaluate(() => ({
+    cells: document.querySelectorAll('#rpStrip .rp-cell').length,
+    covered: document.querySelectorAll('#rpStrip .rp-cell.covered').length,
+    index: (document.querySelector('#rpIndex') || {}).textContent || '',
+    head: (document.querySelector('#rpChainHead') || {}).textContent || '',
+    verdict: (document.querySelector('#rpVerdict') || {}).textContent || '',
+    pills: document.querySelectorAll('#rpChainHead .rp-pill').length,
+    pillOn: document.querySelectorAll('#rpChainHead .rp-pill.on').length,
+    arrows: document.querySelectorAll('#rpStrip .rp-arrow').length
+  }));
+
+  ok('揭晓动画跑完（不再有盖着的格子）', rp2.covered === 0, '实际还有 ' + rp2.covered + ' 格没翻');
+  ok('页码显示「1 / N」', /1\s*\/\s*[1-9]/.test(rp2.index), '实际「' + rp2.index + '」');
+  ok('写明了这条链的起词人', rp2.head.indexOf('起词人') >= 0, '实际「' + rp2.head + '」');
+  ok('进度小点的数量 = 链数（4 人 4 条链）', rp2.pills === 4, '实际 ' + rp2.pills + ' 个点');
+  ok('当前链的小点被点亮', rp2.pillOn === 1, '实际 ' + rp2.pillOn + ' 个点亮');
+  ok('格与格之间有「传下去」的箭头', rp2.arrows === 2, '实际 ' + rp2.arrows + ' 个箭头');
+  ok('首尾对照说明了传了几手', rp2.verdict.indexOf('传了') >= 0, '实际「' + rp2.verdict + '」');
+
+  // 翻页也要等新链的揭晓演完才能断文案
+  const waitReveal = () => host.waitForFunction(() => {
+    const verdict = document.querySelector('#rpVerdict');
+    return !document.querySelector('#rpStrip .rp-cell.covered') &&
+      verdict && verdict.textContent.indexOf('传了') >= 0;
+  }, { timeout: 6000 });
+
   const idxBefore = await host.textContent('#rpIndex');
   await host.click('#rpNext');
-  await sleep(300);
+  await waitReveal();
   const idxAfter = await host.textContent('#rpIndex');
   ok('「下一条」能翻页', idxAfter !== idxBefore, idxBefore + ' → ' + idxAfter);
   await host.click('#rpPrev');
-  await sleep(300);
+  await waitReveal();
   ok('「上一条」翻回来了', (await host.textContent('#rpIndex')) === idxBefore);
 
   // 投票
   await host.click('#rpVoteOk');
-  await sleep(500);
+  await host.waitForFunction(() => {
+    const g = window.ChaApp.state.game || {};
+    return (g.myVoted || []).length >= 1;
+  }, { timeout: 4000 });
   const voted = await host.evaluate(() => {
     const g = window.ChaApp.state.game || {};
     const okBtn = document.querySelector('#rpVoteOk');
@@ -458,17 +494,19 @@ async function createRoom(page, name) {
       myVoted: (g.myVoted || []).length,
       myAgainst: (g.myVotes || []).length,
       label: okBtn.textContent,
-      primary: okBtn.classList.contains('primary')
+      primary: okBtn.classList.contains('primary'),
+      votedMark: okBtn.classList.contains('voted')
     };
   });
   ok('投了「对得上」之后标记为已投（myVoted 有记录）', voted.myVoted >= 1, JSON.stringify(voted));
   ok('「对得上」不算反对票（myVotes 仍为空）', voted.myAgainst === 0, JSON.stringify(voted));
   ok('按钮文案变成「已投：对得上」', /已投/.test(voted.label), '实际「' + voted.label + '」');
   ok('按钮进入选中态（primary）', voted.primary);
+  ok('按钮带上「已投」的记号', voted.votedMark);
 
   // 投「对不上」再切回来，确认两种都能投
   await host.click('#rpVoteBad');
-  await sleep(400);
+  await host.waitForFunction(() => ((window.ChaApp.state.game || {}).myVotes || []).length >= 1, { timeout: 4000 });
   const against = await host.evaluate(() => {
     const g = window.ChaApp.state.game || {};
     return { myAgainst: (g.myVotes || []).length,
@@ -477,7 +515,7 @@ async function createRoom(page, name) {
   ok('改投「对不上」会记进反对票', against.myAgainst >= 1, JSON.stringify(against));
   ok('「对不上」按钮文案也跟着变', /已投/.test(against.label), '实际「' + against.label + '」');
   await host.click('#rpVoteOk');
-  await sleep(400);
+  await host.waitForFunction(() => ((window.ChaApp.state.game || {}).myVotes || []).length === 0, { timeout: 4000 });
   ok('再切回「对得上」能撤销反对票',
     (await host.evaluate(() => ((window.ChaApp.state.game || {}).myVotes || []).length)) === 0);
 

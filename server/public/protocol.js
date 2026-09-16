@@ -30,6 +30,12 @@
  *   - 接龙状态里有 chains（整条链的匿名化进度）与 replay（回放用），都由 snapshotFor 裁剪
  *   - 回放后投票（C2S.GAME_VOTE）决定「起词的人」拿不拿奖杯；奖杯累计 = 该玩家的分数
  *   - 词库分主题：默认 / 明日方舟 / 鸣潮 / 碧蓝档案（C2S.GAME_START 的 theme）
+ *
+ * v7 变更（更多主题 + 自定义词库 + 音效 + 投票动画）：
+ *   - 主题扩到 15 套（原神 / 星铁 / 终末地 / 东方 / 赛马娘 / 绝区零 / 怪猎 / 美食 / 动物 / 物品）
+ *   - 自定义词库支持用户在界面上自建（HTTP /api/themes，不是实时协议），
+ *     增删改后服务端广播 S2C.GAME_THEMES 让所有人的下拉框立刻更新
+ *   - 音效是纯前端的（WebAudio 合成，见 client/renderer/sfx.js），协议不变
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
@@ -37,7 +43,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var PROTOCOL_VERSION = 6;
+  var PROTOCOL_VERSION = 7;
 
   // 客户端 -> 服务端
   var C2S = {
@@ -129,7 +135,8 @@
     // ---- 接龙 ----
     // 接龙的快照同样按收件人裁剪：你在猜的时候只能看到「上家那幅画」，
     // 绝不能看到词；结束前也拿不到别人的图（否则把后面几步的答案都看完了）。
-    GAME_TASK: 'game:task'              // { task } 只发给我：这一步要我做什么（词 / 别人的画）
+    GAME_TASK: 'game:task',             // { task } 只发给我：这一步要我做什么（词 / 别人的画）
+    GAME_THEMES: 'game:themes'          // { themes } 主题菜单变了（有人建/改/删了自定义词库）
   };
 
   var HISTORY_CHUNK_SIZE = 400;

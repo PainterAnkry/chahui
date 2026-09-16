@@ -1,7 +1,14 @@
 /* 验证：1) 小节能跨左右两栏拖动 2) 颜色栏 RGB/HSV 滑块与开关 3) 恢复默认布局 */
 const { chromium } = require('./pw');
 
-const URL = process.env.CHAHU_URL || 'http://127.0.0.1:8440/';
+// 地址来源：CLI 参数（run-all-tests 会统一传）> CHAHU_URL 环境变量 > 默认端口。
+// 以前只认 CHAHU_URL，于是被 run-all-tests 带着跑时它照样去打 8440，
+// 报出来的错看着像功能坏了，其实只是没听参数。别的测试都是一样的优先级，跟着对齐。
+const URL = (() => {
+  const a = process.argv[2];
+  if (a && /^https?:\/\//.test(a)) return a.replace(/\/?$/, '/');
+  return (process.env.CHAHU_URL || 'http://127.0.0.1:8440/').replace(/\/?$/, '/');
+})();
 let pass = 0, fail = 0;
 function ok(name, cond, extra) {
   if (cond) { pass++; console.log('  ✓ ' + name); }

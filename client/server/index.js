@@ -121,6 +121,10 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
   if (url.pathname === '/health') return json(res, 200, { ok: true, rooms: store.rooms.size, uptime: process.uptime() });
   if (url.pathname === '/api/rooms') return json(res, 200, { rooms: store.list() });
+  // 自定义主题词库的增删改查（配置类，见下方 handleThemesApi）
+  if (url.pathname === '/api/themes' || url.pathname.indexOf('/api/themes/') === 0) {
+    return handleThemesApi(req, res, url);
+  }
   // 附带「这台服务端到底是什么配置」——自动化测试靠它判断端口上挂着的
   // 是不是自己刚起的那个进程（旧进程残留会静默顶替，测试就白跑了）。
   if (url.pathname === '/api/share') return json(res, 200, {
@@ -134,7 +138,9 @@ const server = http.createServer((req, res) => {
     // 主题词库：给前端拿来填「接龙主题」下拉（含可读名），也给测试当身份判据。
     // 只给 id / name / 词数 —— 一个词都不下发，免得提前泄题。
     themes: THEMES.themeList().map(t => t.id),
-    themeList: THEMES.themeList()
+    themeList: THEMES.themeList(),
+    customThemes: THEMES.custom.list().length,     // 自定义词库套数（测试身份判据）
+    themesSig: THEMES.custom.signature()           // 自定义词库指纹
   });
   if (!fs.existsSync(PUBLIC_DIR)) {
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -142,6 +148,102 @@ const server = http.createServer((req, res) => {
   }
   serveStatic(req, res);
 });
+
+/* ------------------------------------------------------------------ 自定义主题词库 API
+ *
+ * 为什么不走 WebSocket 协议：这是**配置类**操作（建/改/删词库），
+ * 不是实时房间状态。塞进 C2S 只会让协议表多出四条一辈子用一次的指令。
+ * 而且词库是全局的（不分房间）—— 用 HTTP 表达「全局资源」更自然。
+ *
+ * 权限：谁都能建（局域网/自建服务器的场景下，使用者本来就是熟人）；
+ * 上限靠 MAX_THEMES 兜住。
+ */
+
+function readBody(req, cb) {
+  let raw = '';
+  let tooBig = false;
+  req.on('data', d => {
+    raw += d;
+    if (raw.length > 64 * 1024) { tooBig = true; req.destroy(); }
+  });
+  req.on('end', () => {
+    if (tooBig) return cb({ error: '内容太大了' });
+    try { cb({ data: raw ? JSON.parse(raw) : {} }); }
+    catch (e) { cb({ error: '数据格式不对' }); }
+  });
+  req.on('error', () => cb({ error: '读取失败' }));
+}
+
+/** 词库变了要把新的菜单推给所有在场的人（下拉框里立刻能选到） */
+function broadcastThemes() {
+  const raw = JSON.stringify({ t: P.S2C.GAME_THEMES, themes: THEMES.themeList() });
+  for (const room of store.rooms.values()) {
+    for (const m of room.members.values()) {
+      if (m.ws.readyState === m.ws.OPEN) m.ws.send(raw);
+    }
+  }
+}
+
+function handleThemesApi(req, res, url) {
+  const parts = url.pathname.split('/').filter(Boolean);   // ['api','themes', id?]
+  const id = parts[2] || '';
+  const method = req.method.toUpperCase();
+
+  // GET /api/themes/<id>/words —— 取某套自定义词库的完整词表（「编辑」时要回填）
+  // ⚠️ 只能取**自定义**的：内置主题的词绝不能下发（F12 一看游戏就废了）。
+  if (method === 'GET' && id && parts[3] === 'words') {
+    const words = THEMES.custom.wordsOf(id);
+    if (!words) return json(res, 404, { ok: false, message: '没有这套自定义词库' });
+    return json(res, 200, { ok: true, id, name: THEMES.custom.nameOf(id), words });
+  }
+
+  // GET /api/themes —— 列出全部（自带的 + 自定义）
+  if (method === 'GET') {
+    return json(res, 200, {
+      themes: THEMES.themeList(),
+      custom: THEMES.custom.list(),
+      minWords: THEMES.custom.MIN_WORDS,
+      maxThemes: THEMES.custom.MAX_THEMES,
+      maxNameLen: THEMES.custom.MAX_NAME_LEN
+    });
+  }
+
+  // POST /api/themes —— 新建
+  if (method === 'POST') {
+    return readBody(req, ({ data, error }) => {
+      if (error) return json(res, 400, { ok: false, message: error });
+      const r = THEMES.custom.create(data && data.name, data && data.words);
+      if (!r.ok) return json(res, 400, r);
+      broadcastThemes();
+      json(res, 200, r);
+    });
+  }
+
+  // PUT /api/themes/<id> —— 改名 / 改词
+  if (method === 'PUT') {
+    if (!id) return json(res, 400, { ok: false, message: '缺少 id' });
+    return readBody(req, ({ data, error }) => {
+      if (error) return json(res, 400, { ok: false, message: error });
+      const r = THEMES.custom.update(id, data && data.name, data && data.words);
+      if (!r.ok) return json(res, 400, r);
+      broadcastThemes();
+      json(res, 200, r);
+    });
+  }
+
+  // DELETE /api/themes/<id>
+  if (method === 'DELETE') {
+    if (!id) return json(res, 400, { ok: false, message: '缺少 id' });
+    // 内置主题删不得（它们是代码里的常量）
+    if (!THEMES.custom.has(id)) return json(res, 400, { ok: false, message: '只能删自定义词库' });
+    const r = THEMES.custom.remove(id);
+    if (!r.ok) return json(res, 400, r);
+    broadcastThemes();
+    return json(res, 200, r);
+  }
+
+  json(res, 405, { ok: false, message: '不支持的方法' });
+}
 
 /* ------------------------------------------------------------------ WebSocket */
 

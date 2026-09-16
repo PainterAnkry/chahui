@@ -41,6 +41,9 @@
 
   var engine = new global.CanvasEngine();
   var net = new global.Net();
+  // 游戏音效（WebAudio 合成，无音频文件）。sfx.js 没加载时退化成「什么都不响」，
+  // 绝不能让整个 app 因为少一个脚本就崩掉。
+  var SFX = global.ChaSFX || { play: function () {}, setEnabled: function () {}, isEnabled: function () { return false; }, toggle: function () {}, unlock: function () {} };
 
   /* ============================================================ 状态 */
 
@@ -3010,6 +3013,7 @@
       }
 
       case P.S2C.MEMBERS: {
+        var prevMembers = S.members || [];
         S.members = msg.members || [];
         var ids = S.members.map(function (m) { return m.userId; });
         S.cursors.forEach(function (v, k) { if (ids.indexOf(k) < 0) removeCursor(k); });
@@ -3017,6 +3021,15 @@
         refreshMyRole();
         renderMembers();
         renderRoomChip();
+        // 有人进出就响一声 —— 但**只在游戏进行中**。
+        // 平时画画时人进人出很频繁，每次都响会变成噪音。
+        if (gameActive() && S.room) {
+          var prevIds = prevMembers.map(function (m) { return m.userId; });
+          var joined = ids.some(function (id) { return prevIds.indexOf(id) < 0; });
+          var left = prevIds.some(function (id) { return ids.indexOf(id) < 0; });
+          if (joined) SFX.play('join');
+          else if (left) SFX.play('leave');
+        }
         break;
       }
 
@@ -3146,6 +3159,15 @@
 
       case P.S2C.GAME_CORRECT:
         onGameCorrect(msg);
+        break;
+
+      /* 主题菜单变了（有人建/改/删了自定义词库）—— 把新菜单缓存下来刷新下拉 */
+      case P.S2C.GAME_THEMES:
+        if (msg.themes && msg.themes.length) {
+          S.themes = msg.themes;
+          renderChainDialog();
+          if (TM.list) loadThemeList();       // 词库面板开着的话也顺手刷新
+        }
         break;
 
       case P.S2C.ROOM_LEFT:
@@ -4890,6 +4912,14 @@
     });
     $('#ghScore').addEventListener('click', toggleScore);
     $('#gsClose').addEventListener('click', toggleScore);
+
+    /* ---- 音效开关 ---- */
+    $('#ghSound').addEventListener('click', function () {
+      var on = SFX.toggle();
+      renderSoundBtn();
+      if (on) SFX.play('toggle');
+    });
+    renderSoundBtn();
     $('#btnRepick').addEventListener('click', function () {
       if (this.disabled) return;
       net.send(P.C2S.GAME_REPICK, {});
@@ -4909,6 +4939,22 @@
     $('#btnChainClose').addEventListener('click', function () { $('#chainMask').classList.add('hidden'); });
     $('#btnChainCancel').addEventListener('click', function () { $('#chainMask').classList.add('hidden'); });
     $('#btnChainStart').addEventListener('click', startChainGame);
+    $('#btnThemeManage').addEventListener('click', openThemeManager);
+
+    /* ---- 自定义词库管理面板 ---- */
+    $('#btnThemeClose').addEventListener('click', closeThemeManager);
+    $('#btnThemeDone').addEventListener('click', closeThemeManager);
+    $('#btnThemeNew').addEventListener('click', function () {
+      TM.editing = null;
+      fillThemeForm(null, '');
+      renderThemeList();
+      SFX.play('tap');
+      var n = $('#tmName'); if (n) n.focus();
+    });
+    $('#btnThemeSave').addEventListener('click', saveTheme);
+    $('#btnThemeDelete').addEventListener('click', deleteTheme);
+    $('#tmWords').addEventListener('input', updateThemeStats);
+    $('#tmWords').addEventListener('change', updateThemeStats);
     $('#btnChainStop').addEventListener('click', function () {
       confirmDialog('结束接龙？这一局的奖杯不会保留。', {
         title: '结束接龙', yes: '结束接龙', danger: true
@@ -4935,7 +4981,25 @@
     $('#rpVoteBad').addEventListener('click', function () { voteChain(false); });
     $('#rpVoteOk').addEventListener('click', function () { voteChain(true); });
     $('#btnRpNext').addEventListener('click', function () { net.send(P.C2S.GAME_NEXT, {}); });
-    $('#btnRpExit').addEventListener('click', function () { $('#replayMask').classList.add('hidden'); });
+    $('#btnRpExit').addEventListener('click', function () {
+      // 收起面板 = 我先不看了，但票还是要投的 —— 服务端到点自动结算。
+      rpClearTimers();
+      $('#replayMask').classList.add('hidden');
+    });
+    // 进度小点：直接跳链（4~16 条链时比一下下点箭头快得多）
+    $('#rpChainHead').addEventListener('click', function (ev) {
+      var pill = ev.target.closest ? ev.target.closest('.rp-pill') : null;
+      if (!pill) return;
+      var pills = Array.prototype.slice.call(this.querySelectorAll('.rp-pill'));
+      gotoReplay(pills.indexOf(pill));
+    });
+    // 键盘左右翻链（面板开着时才有意义）
+    document.addEventListener('keydown', function (ev) {
+      var mask = $('#replayMask');
+      if (!mask || mask.classList.contains('hidden')) return;
+      if (ev.key === 'ArrowLeft') { stepReplay(-1); ev.preventDefault(); }
+      else if (ev.key === 'ArrowRight') { stepReplay(1); ev.preventDefault(); }
+    });
 
     /* ---- 奖杯结算 ---- */
     $('#btnTrophyClose').addEventListener('click', closeTrophy);
@@ -5145,6 +5209,17 @@
         toast(gameImDrawer() ? '开始画吧！' : gameName(S.game.drawerName) + ' 开始作画，快猜', 'ok', 2600);
       }
       if (phase === 'off' && prevPhase !== 'off') toast('游戏结束，回到自由绘画', 'ok', 2600);
+
+      // ---- 音效：经典模式的阶段变化 ----
+      // 顺序讲究：开局的「开场音」要压过下面那些通用音，否则一开局连响三四声很吵
+      if (prevPhase === 'off' && phase === 'lobby') SFX.play('gameStart');
+      else if (phase === 'off' && prevPhase !== 'off') SFX.play('gameOver');
+      else if (phase === 'over' && prevPhase !== 'over') SFX.play('gameOver');
+      else if (phase === 'pick' && prevPhase !== 'pick') SFX.play('stepStart');
+      else if (phase === 'draw' && prevPhase !== 'draw') {
+        // 「轮到你」是全游戏最该被听见的一声
+        SFX.play(gameImDrawer() ? 'yourTurn' : 'stepStart');
+      } else if (S.game && S.game.round !== prevRound) SFX.play('roundStart');
     }
 
     // 画手的词：只在「本回合第一次拿到」时提示，避免每次状态同步都弹一次
@@ -5459,6 +5534,8 @@
   function onGameCorrect(msg) {
     if (!msg || msg.userId === S.me.userId) return;   // 自己的由服务端单独回执
     toast(msg.name + ' 猜对了（第 ' + msg.rank + ' 名）', 'ok', 2400);
+    // 别人猜对：发一个「闷一点」的版本 —— 抢自己猜对的那一声会让人以为是自己猜的
+    SFX.play('correctOther');
   }
 
   /** 顶栏「游戏」弹窗里当前选中的玩法（纯粹是弹窗内的状态，和房间真正在玩什么无关） */
@@ -5575,7 +5652,12 @@
     var step = t ? t.step : '';
     var prevKey = prev ? prev.step + '|' + (prev.word || '') + '|' + (prev.choices || []).join(',') : '';
     var nowKey = t ? step + '|' + (t.word || '') + '|' + (t.choices || []).join(',') : '';
-    if (prevKey !== nowKey) S.chainInputSubmitted = false;
+    if (prevKey !== nowKey) {
+      S.chainInputSubmitted = false;
+      // 题面换了 = 轮到我了。这是接龙里最该被听见的一声：
+      // 手里有活的人如果没注意到，这一步基本就废了（等超时才反应过来）。
+      if (t && t.step) SFX.play('yourTurn');
+    }
     renderChainTask();
     syncChainInput();
   }
@@ -5669,6 +5751,7 @@
     if (!payload || (payload.text === '' && payload.index == null)) return;
     S.chainInputSubmitted = true;
     net.send(P.C2S.GAME_SUBMIT, payload);
+    SFX.play('submit');
     renderChainTask();
     closeChainInput();
   }
@@ -5680,9 +5763,10 @@
     if (S.chainInputSubmitted) return;
     var png;
     try { png = engine.exportPNG(); } catch (e) { png = ''; }
-    if (!png) return toast('导出作品失败，再试一次', 'warn', 2600);
+    if (!png) { SFX.play('error'); return toast('导出作品失败，再试一次', 'warn', 2600); }
     S.chainInputSubmitted = true;
     net.send(P.C2S.GAME_ART, { png: png });
+    SFX.play('submit');
     renderChainTask();
     toast('作品已交给下一位', 'ok', 2600);
   }
@@ -5766,7 +5850,38 @@
     list.innerHTML = html;
   }
 
-  /* ---- 回放 + 投票 ---- */
+  /* ---- 回放 + 投票 ----
+   *
+   * 三段式渲染，是为了做「揭晓」的节奏：
+   *   ① renderReplay()        —— 只铺格子骨架，内容全部是盖着的
+   *   ② revealReplayCells()   —— 一格一格翻开（每格一行延迟），翻完收尾
+   *   ③ renderReplayVerdict() —— 最后才揭晓首尾判定 + 投票区
+   *
+   * 为什么不一次性铺完再用 CSS 动画：那样「翻到第几格」和「揭示判定」的时机
+   * 就只能靠 animation-delay 硬凑，一旦用户中途手动翻页（换链）就全乱了。
+   * 用 JS 排时更可控，也更好在换链时整体取消重排。
+   */
+
+  /** 回放面板的重排句柄：换链 / 关面板时必须清掉，否则旧定时器会翻新链的格子 */
+  var RP = { timers: [], cellMs: 0, revealMs: 0 };
+
+  function rpClearTimers() {
+    RP.timers.forEach(function (t) { clearTimeout(t); });
+    RP.timers = [];
+  }
+
+  function rpAfter(ms, fn) {
+    RP.timers.push(setTimeout(fn, ms));
+  }
+
+  /**
+   * 揭晓节奏：格子越多，每格越快（总时长封顶在 ~1.5s）。
+   * 一条 6 格的链如果每格都等 220ms，光翻开就要 1.3 秒，人会烦。
+   */
+  function rpTiming(cellCount) {
+    var per = Math.max(70, Math.min(220, 900 / Math.max(1, cellCount)));
+    return { cellMs: per, revealMs: per * cellCount + 120 };
+  }
 
   function renderReplay() {
     var mask = $('#replayMask');
@@ -5775,31 +5890,69 @@
     var show = !!(g && g.phase === 'chain_vote' && g.replay && g.replay.length);
     if (!show) {
       // 结算阶段改由奖杯面板展示，回放面板收起来
+      rpClearTimers();
       mask.classList.add('hidden');
       return;
     }
+    var wasHidden = mask.classList.contains('hidden');
     mask.classList.remove('hidden');
+
     var idx = Math.max(0, Math.min(S.replayIndex | 0, g.replay.length - 1));
     S.replayIndex = idx;
     var chain = g.replay[idx];
-    $('#rpIndex').textContent = (idx + 1) + ' / ' + g.replay.length;
-    $('#rpChainHead').innerHTML = '第 ' + (idx + 1) + ' 条链 · 起词人 <b>' + esc(chain.ownerName) + '</b>';
 
-    // 摊平这条链的每一格
+    // 进度条式的位置指示（「第 2 / 4 条」+ 一排小点）
+    var total = g.replay.length;
+    $('#rpIndex').textContent = (idx + 1) + ' / ' + total;
+    var pills = '';
+    for (var p = 0; p < total; p++) {
+      pills += '<i class="rp-pill' + (p === idx ? ' on' : (p < idx ? ' past' : '')) + '"></i>';
+    }
+    var head = $('#rpChainHead');
+    head.innerHTML = '<span class="rp-pills">' + pills + '</span>' +
+      '第 ' + (idx + 1) + ' 条链 · 起词人 <b>' + esc(chain.ownerName) + '</b>' +
+      (chain.ownerId === S.me.userId ? '<span class="rp-mine">我的</span>' : '');
+    // 换链时给整块内容一个轻微的「推进」动效，翻页才不像跳帧
+    head.classList.remove('rp-in');
+    void head.offsetWidth;          // 强制回流，动画才能重播
+    head.classList.add('rp-in');
+
+    // ① 骨架：先把格子摆好，内容盖住
     var strip = $('#rpStrip');
     strip.innerHTML = '';
+    strip.classList.remove('rp-in');
+    void strip.offsetWidth;
+    strip.classList.add('rp-in');
+
+    var t = rpTiming(chain.cells.length);
+    RP.cellMs = t.cellMs;
+    RP.revealMs = t.revealMs;
+
     chain.cells.forEach(function (c, i) {
       var el = document.createElement('div');
       el.className = 'rp-cell ' + (c.step || '') +
-        (i === 0 ? ' first' : '') + (i === chain.cells.length - 1 ? ' last' : '');
+        (i === 0 ? ' first' : '') + (i === chain.cells.length - 1 ? ' last' : '') +
+        ' covered';
+      el.dataset.i = String(i);
       var stepName = c.step === 'write' ? '起词' : c.step === 'draw' ? '作画' : '猜词';
       var inner;
       if (c.word) inner = '<div class="rpc-word">' + esc(c.word) + '</div>';
       else if (c.image) inner = '<img class="rpc-img" alt="第' + (i + 1) + '格">';
       else inner = '<div class="rpc-empty">（空）</div>';
       el.innerHTML = '<div class="rpc-head"><span class="rpc-step">' + stepName + '</span>' +
-        '<span>' + esc(c.name || '某人') + '</span></div>' +
+        '<span class="rpc-who">' + esc(c.name || '某人') + '</span>' +
+        '<span class="rpc-idx">' + (i + 1) + '</span></div>' +
         '<div class="rpc-body">' + inner + '</div>';
+      // 格与格之间的箭头（表示「传下去」）
+      if (i < chain.cells.length - 1) {
+        var arrow = document.createElement('div');
+        arrow.className = 'rp-arrow';
+        arrow.textContent = '→';
+        strip.appendChild(el);
+        strip.appendChild(arrow);
+        return;
+      }
+      strip.appendChild(el);
       if (c.image && !c.word) {
         var im = el.querySelector('.rpc-img');
         var probe = new Image();
@@ -5808,22 +5961,73 @@
         })(im, c.image);
         probe.src = c.image;
       }
-      strip.appendChild(el);
     });
 
-    // 首尾对照 + 我的投票状态
+    // ② 逐格翻开
+    rpClearTimers();
+    revealReplayCells();
+    // 刚打开（而不是换链）时给整条链一点入场延迟，让人来得及看清这是第几条
+    if (wasHidden) toast('回放：' + (idx + 1) + ' / ' + total + ' 条链', 'ok', 1800);
+    updateGameTimer();
+  }
+
+  /**
+   * 一格一格把 `covered` 摘掉。
+   * 同时把「这一格是谁做的」标签淡入 —— 只看内容一闪出来会不知道是谁干的。
+   */
+  function revealReplayCells() {
+    var strip = $('#rpStrip');
+    if (!strip) return;
+    var cells = Array.prototype.slice.call(strip.querySelectorAll('.rp-cell'));
+    cells.forEach(function (el, i) {
+      if (!el.classList.contains('covered')) return;
+      rpAfter(RP.cellMs * i, function () {
+        if (!el.parentNode) return;
+        el.classList.remove('covered');
+        SFX.play('cellReveal');
+      });
+    });
+    // ③ 全部翻开后再揭晓首尾判定（判定是这一屏的结论，必须等过程演完）
+    rpAfter(RP.revealMs, function () {
+      renderReplayVerdict(true);
+    });
+  }
+
+  /**
+   * 首尾判定 + 投票按钮。
+   * @param {boolean} animate 是否带「卷轴展开」的入场（换链时的第一次调用传 true）
+   */
+  function renderReplayVerdict(animate) {
+    var g = S.game;
+    if (!g || !g.replay || !g.replay.length) return;
+    var chain = g.replay[Math.max(0, Math.min(S.replayIndex | 0, g.replay.length - 1))];
+    if (!chain) return;
+
     // 注意：服务端只把「投了对不上」记进 myVotes（同意是默认值，不留痕），
     // 所以「有没有投过」要看 myVoted —— 单看 myVotes 会把「投了对得上」当成没投。
     var votedAlready = (g.myVoted || []).indexOf(chain.id) >= 0;
     var against = (g.myVotes || []).indexOf(chain.id) >= 0;
     var myVote = !votedAlready ? '' : (against ? 'bad' : 'ok');
+
+    var verdict = $('#rpVerdict');
     var tag = chain.matched
       ? '<span class="rv-tag ok">首尾对得上</span>'
       : '<span class="rv-tag bad">首尾对不上</span>';
-    $('#rpVerdict').innerHTML =
+    verdict.innerHTML =
       '<span class="rv-a">' + esc(chain.firstWord || '（空）') + '</span>' +
-      '<span class="rv-arrow">→ 传了 ' + Math.max(0, chain.cells.length - 1) + ' 手 →</span>' +
+      '<span class="rv-arrow"><i class="rv-line"></i>' +
+      '传了 ' + Math.max(0, chain.cells.length - 1) + ' 手' +
+      '<i class="rv-line"></i></span>' +
       '<span class="rv-b">' + esc(chain.lastWord || '（空）') + '</span>' + tag;
+    // 判定「对得上」时绿一下、「对不上」时红一下 —— 这是全屏唯一的结论，值得强调
+    verdict.classList.toggle('ok', !!chain.matched);
+    verdict.classList.toggle('bad', !chain.matched);
+    if (animate) {
+      verdict.classList.remove('rp-in');
+      void verdict.offsetWidth;
+      verdict.classList.add('rp-in');
+      SFX.play(chain.matched ? 'match' : 'mismatch');
+    }
 
     var vb = $('#rpVoteBad'), vk = $('#rpVoteOk');
     vb.classList.toggle('primary', myVote === 'bad');
@@ -5832,6 +6036,10 @@
     vk.classList.toggle('ghost', myVote !== 'ok');
     $('#rpVoteBad').textContent = myVote === 'bad' ? '已投：对不上' : '对不上';
     $('#rpVoteOk').textContent = myVote === 'ok' ? '已投：对得上' : '对得上';
+
+    // 「已投」的小勾：投过一次之后让按钮带个记号，避免反复怀疑自己投没投
+    vb.classList.toggle('voted', myVote === 'bad');
+    vk.classList.toggle('voted', myVote === 'ok');
 
     // 房主才能「立刻结算」
     var btn = $('#btnRpNext');
@@ -5844,13 +6052,44 @@
     if (!g || !g.replay || !g.replay.length) return;
     var chain = g.replay[Math.max(0, Math.min(S.replayIndex | 0, g.replay.length - 1))];
     if (!chain) return;
+    // 投「对得上」时如果本来就已经投过对得上，等于没变 —— 那就别响，
+    // 否则连点两下会响两声，听着像投了两票。
+    var votedAlready = (g.myVoted || []).indexOf(chain.id) >= 0;
+    var wasAgainst = (g.myVotes || []).indexOf(chain.id) >= 0;
+    var willBeAgainst = !agree;
+    if (!votedAlready) SFX.play(willBeAgainst ? 'voteBad' : 'voteOk');
+    else if (wasAgainst !== willBeAgainst) SFX.play(willBeAgainst ? 'voteBad' : 'voteUndo');
     net.send(P.C2S.GAME_VOTE, { chainId: chain.id, agree: !!agree });
+
+    // 立刻给按钮一个「按下了」的反馈，别等服务端回快照 ——
+    // 公网下这一来回有几百毫秒，不立刻反馈的话人会以为没点到，然后连点。
+    var btn = willBeAgainst ? $('#rpVoteBad') : $('#rpVoteOk');
+    if (btn && !votedAlready) {
+      btn.classList.add('pulse');
+      setTimeout(function () { btn.classList.remove('pulse'); }, 420);
+    }
   }
 
   function stepReplay(d) {
     var g = S.game;
     if (!g || !g.replay || !g.replay.length) return;
+    var before = S.replayIndex;
     S.replayIndex = (S.replayIndex + d + g.replay.length) % g.replay.length;
+    if (S.replayIndex === before) return;
+    SFX.play('flip');
+    rpClearTimers();                 // 换链：把上一条链的揭晓定时器全部取消
+    renderReplay();
+  }
+
+  /** 跳到第几条链（进度小点可以直接点） */
+  function gotoReplay(i) {
+    var g = S.game;
+    if (!g || !g.replay || !g.replay.length) return;
+    var n = Math.max(0, Math.min(i | 0, g.replay.length - 1));
+    if (n === S.replayIndex) return;
+    S.replayIndex = n;
+    SFX.play('flip');
+    rpClearTimers();
     renderReplay();
   }
 
@@ -5864,6 +6103,9 @@
     mask.classList.remove('hidden');
 
     var won = g.voteResult.filter(function (r) { return r.won; });
+    // 我自己起词的链有没有拿到奖杯 —— 有就放华丽的那一声
+    var iWon = won.some(function (r) { return r.ownerId === S.me.userId; });
+    SFX.play(iWon ? 'trophy' : (won.length ? 'match' : 'noTrophy'));
     $('#trSummary').innerHTML =
       '<div class="tr-row' + (won.length ? ' won' : '') + '">' +
       '<b>' + (won.length ? '🎉 ' + won.length + ' 条链安全到达终点' : '这一局全军覆没') + '</b>' +
@@ -5896,6 +6138,208 @@
   function closeTrophy() {
     var mask = $('#trophyMask');
     if (mask) mask.classList.add('hidden');
+  }
+
+  /* ============================================================ 自定义主题词库
+   *
+   * 词库存服务端（server/data/themes.json）。前端只做两件事：
+   *   ① 把用户在 textarea 里粘的词原样发给服务端，由服务端裁决合格与否
+   *   ② 把「被丢掉的词」如实回显 —— 静默吞词是最气人的交互
+   *
+   * 为什么判定不在前端做：前端的校验永远只是「体验优化」，真规矩得在服务端。
+   * 否则一个改过的客户端就能往词库里塞单字词，把整个房间的接龙判定搞坏。
+   */
+
+  /** 词库管理面板的状态 */
+  var TM = { list: [], editing: null, minWords: 3 };
+
+  function openThemeManager() {
+    var mask = $('#themeMask');
+    if (!mask) return;
+    mask.classList.remove('hidden');
+    $('#themeMask').classList.remove('hidden');
+    TM.editing = null;
+    fillThemeForm(null, '');
+    loadThemeList();
+  }
+
+  function closeThemeManager() {
+    var mask = $('#themeMask');
+    if (mask) mask.classList.add('hidden');
+    // 关掉后刷新接龙面板的主题下拉（可能刚建/改/删过）
+    S.themes = null;
+    renderChainDialog();
+    probePublicUrl();
+  }
+
+  /** 拉词库列表。同时也把内置主题的「不可删」信息带给面板 */
+  function loadThemeList() {
+    fetch(httpBase() + '/api/themes')
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        TM.list = (j && j.custom) || [];
+        TM.minWords = (j && j.minWords) || 3;
+        var el = $('#tmMinWords');
+        if (el) el.textContent = String(TM.minWords);
+        renderThemeList();
+        // 顺便把最新的主题菜单缓存下来（含内置），接龙下拉就能立刻看到新词库
+        S.themes = (j && j.themes) || S.themes;
+      })
+      .catch(function () {
+        toast('读不到词库列表（服务端没响应？）', 'err', 3000);
+      });
+  }
+
+  function renderThemeList() {
+    var box = $('#tmList');
+    if (!box) return;
+    if (!TM.list.length) {
+      box.innerHTML = '<div class="tm-empty">还没有自定义词库。点下面「新建一套」开始。</div>';
+      return;
+    }
+    box.innerHTML = '';
+    TM.list.forEach(function (t) {
+      var row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'tm-item' + (TM.editing === t.id ? ' active' : '');
+      row.innerHTML = '<span class="tm-item-name">' + esc(t.name) + '</span>' +
+        '<span class="tm-item-count">' + t.count + ' 词</span>';
+      row.addEventListener('click', function () { selectTheme(t.id); });
+      box.appendChild(row);
+    });
+  }
+
+  /** 选中一套进行编辑 —— 需要把词拉回来（列表接口不带词） */
+  function selectTheme(id) {
+    TM.editing = id;
+    renderThemeList();
+    fetch(httpBase() + '/api/themes/' + encodeURIComponent(id) + '/words')
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j || !j.ok) throw new Error('bad');
+        fillThemeForm({ id: id, name: j.name }, (j.words || []).join('、'));
+        updateThemeStats();
+      })
+      .catch(function () {
+        // 服务端没提供单取词表的接口时，退化成「只知道名字」
+        var meta = TM.list.filter(function (t) { return t.id === id; })[0] || {};
+        fillThemeForm({ id: id, name: meta.name }, '');
+        setThemeWarn('这套词库的词表读不出来，保存会把它覆盖成你下面填的内容 —— 小心。');
+      });
+  }
+
+  function fillThemeForm(entry, wordsText) {
+    var nameEl = $('#tmName'), wordsEl = $('#tmWords');
+    if (nameEl) nameEl.value = entry ? entry.name : '';
+    if (wordsEl) wordsEl.value = wordsText || '';
+    var del = $('#btnThemeDelete');
+    if (del) del.classList.toggle('hidden', !entry);
+    setThemeWarn('');
+    updateThemeStats();
+  }
+
+  function setThemeWarn(msg) {
+    var el = $('#tmWarn');
+    if (!el) return;
+    el.textContent = msg || '';
+    el.classList.toggle('hidden', !msg);
+  }
+
+  /** 本地先粗算一下有多少合格的词 —— 让用户在点保存之前就有数 */
+  function updateThemeStats() {
+    var el = $('#tmStats');
+    if (!el) return;
+    var raw = ($('#tmWords') && $('#tmWords').value) || '';
+    var parts = raw.split(/[,，、;；\s\r\n]+/).map(function (s) { return s.trim(); }).filter(Boolean);
+    var seen = {}, ok = 0, bad = [];
+    parts.forEach(function (p) {
+      if (!/^[\u4e00-\u9fa5]{2,}$/.test(p) || p.length > 12) { bad.push(p); return; }
+      if (seen[p]) return;
+      seen[p] = 1; ok += 1;
+    });
+    var txt = ok + ' 个合格的词（去重后）';
+    if (bad.length) txt += '，' + bad.length + ' 个会被丢掉';
+    el.textContent = txt;
+    el.style.color = ok >= TM.minWords ? 'var(--text-dim)' : 'var(--danger)';
+    if (bad.length) setThemeWarn('这些会被丢掉（必须是 2 字以上的中文）：' + bad.join('、'));
+    else setThemeWarn('');
+  }
+
+  function saveTheme() {
+    var name = (($('#tmName') && $('#tmName').value) || '').trim();
+    var words = ($('#tmWords') && $('#tmWords').value) || '';
+    if (!name) { SFX.play('error'); return toast('给这套词库起个名字', 'warn', 2400); }
+
+    var url = httpBase() + '/api/themes' + (TM.editing ? '/' + encodeURIComponent(TM.editing) : '');
+    var method = TM.editing ? 'PUT' : 'POST';
+    fetch(url, {
+      method: method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, words: words })
+    })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        var j = res.j || {};
+        if (!res.ok || !j.ok) {
+          SFX.play('error');
+          toast(j.message || '保存失败', 'err', 3200);
+          if (j.rejected && j.rejected.length) {
+            setThemeWarn('这些词不合格：' + j.rejected.join('、'));
+          }
+          return;
+        }
+        SFX.play('submit');
+        var rejected = j.rejected || [];
+        toast('已保存「' + j.name + '」（' + j.count + ' 个词）'
+          + (rejected.length ? '，丢掉了 ' + rejected.length + ' 个不合格的' : ''), 'ok', 3600);
+        TM.editing = j.id || TM.editing;
+        loadThemeList();
+        setTimeout(function () { renderThemeList(); }, 60);
+      })
+      .catch(function () {
+        SFX.play('error');
+        toast('保存失败，检查一下服务端', 'err', 3200);
+      });
+  }
+
+  function deleteTheme() {
+    if (!TM.editing) return;
+    var meta = TM.list.filter(function (t) { return t.id === TM.editing; })[0] || {};
+    confirmDialog('删掉词库「' + (meta.name || TM.editing) + '」？用它开过局的房间不受影响，但之后就选不到它了。', {
+      title: '删除词库', yes: '删除', danger: true
+    }).then(function (yes) {
+      if (!yes) return;
+      fetch(httpBase() + '/api/themes/' + encodeURIComponent(TM.editing), { method: 'DELETE' })
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          if (!j || !j.ok) { SFX.play('error'); return toast((j && j.message) || '删除失败', 'err', 2800); }
+          SFX.play('voteBad');
+          toast('词库已删除', 'ok', 2400);
+          TM.editing = null;
+          fillThemeForm(null, '');
+          loadThemeList();
+        })
+        .catch(function () { SFX.play('error'); toast('删除失败', 'err', 2800); });
+    });
+  }
+
+  /** 更新 HUD 上那个喇叭图标 */
+  function renderSoundBtn() {
+    var b = $('#ghSound');
+    if (!b) return;
+    var on = SFX.isEnabled();
+    b.textContent = on ? '🔊' : '🔇';
+    b.classList.toggle('off', !on);
+    b.title = on ? '游戏音效：开（点击静音）' : '游戏音效：关（点击开启）';
+  }
+
+  /** 拼 HTTP 基址：优先公网，其次局域网，最后拿 ws 地址推 */
+  function httpBase() {
+    if (typeof shareBase === 'function') {
+      var b = shareBase();
+      if (b) return b.replace(/\/$/, '');
+    }
+    return Cfg.httpBaseOf(net.url).replace(/\/$/, '');
   }
 
   /* ---- 接龙开局对话框 ---- */
@@ -5963,6 +6407,7 @@
 
   /** 接龙相关的所有 UI 一起收起来（切模式 / 结束游戏时用） */
   function closeChainUi() {
+    rpClearTimers();          // 回放的揭晓定时器必须停，否则会在关掉的树上乱翻
     ['#chainMask', '#chainInputMask', '#replayMask', '#trophyMask', '#chainTask', '#chainProgress']
       .forEach(function (id) { var el = $(id); if (el) el.classList.add('hidden'); });
     S.chainTask = null;
@@ -5980,13 +6425,26 @@
 
     // 回放 / 投票面板
     if (phase === 'chain_vote') {
-      if (prevPhase !== 'chain_vote') S.replayIndex = 0;
+      var enteringVote = prevPhase !== 'chain_vote';
+      if (enteringVote) S.replayIndex = 0;
       renderReplay();
+      // 已经在投票阶段时的后续快照（**主要是自己刚投完那一票**）不能重跑揭晓动画：
+      // renderReplay 会把格子重新盖回去再逐格翻开，判定与按钮也被清空 ——
+      // 表现就是「投完了按钮没反应，过一会儿才变」。
+      // 所以这里补一次「无动画」的判定刷新，把按钮状态立刻拉正。
+      if (!enteringVote) renderReplayVerdict(false);
       closeTrophy();
-      if (prevPhase !== 'chain_vote') {
+      if (enteringVote) {
         toast('全部传递完成！看看这一局跑偏成了什么样', 'ok', 3600);
       }
+    } else if (prevPhase === 'chain_vote' && phase === 'over') {
+      // 从回放进结算：**别把面板的内容重画一遍**。
+      // 换链的 `flip` 音和重新逐格揭晓会在结算瞬间又演一次，看着像出了 bug。
+      // 只把面板收起来即可（结算由奖杯面板负责）。
+      rpClearTimers();
+      $('#replayMask').classList.add('hidden');
     } else {
+      rpClearTimers();
       $('#replayMask').classList.add('hidden');
     }
 
@@ -6005,6 +6463,17 @@
       if (phase === 'chain_write') toast('第一圈：给每条链起一个词', 'ok', 3000);
       else if (phase === 'lobby') toast('接龙已就绪', 'ok', 2400);
       else if (phase === 'off' && prevPhase !== 'off') toast('接龙结束，回到自由绘画', 'ok', 2600);
+
+      // ---- 音效：接龙的阶段变化 ----
+      // 注意「轮到我了」的那一声在 applyChainTask 里（题面到达时）——
+      // 这里只负责阶段的整体节奏，两者不会撞在同一帧。
+      if (prevPhase === 'off' && phase === 'lobby') SFX.play('gameStart');
+      else if (phase === 'off') SFX.play('gameOver');
+      else if (phase === 'chain_vote' && prevPhase !== 'chain_vote') SFX.play('roundStart');
+      else if (phase === 'over' && prevPhase !== 'over') SFX.play('gameOver');
+      else if (phase === 'chain_write' && prevPhase !== 'chain_write') SFX.play('roundStart');
+      else if (g && g.round !== (S.chainPrevRound == null ? -1 : S.chainPrevRound)) SFX.play('roundStart');
+      S.chainPrevRound = g ? g.round : null;
     }
 
     // 论到我动手时提醒一声（服务端已经用系统播报说了「谁在做什么」，这里只补一句自己的）
@@ -7419,6 +7888,12 @@
     submitChainWord: submitChainWord, submitChainArt: submitChainArt,
     doChainGuessSubmit: doChainGuessSubmit, voteChain: voteChain,
     stepReplay: stepReplay, openTrophy: openTrophy, closeTrophy: closeTrophy,
-    setGameDialogMode: setGameDialogMode
+    setGameDialogMode: setGameDialogMode,
+
+    /* ---- 音效与自定义词库 ---- */
+    sfx: SFX,
+    openThemeManager: openThemeManager, closeThemeManager: closeThemeManager,
+    loadThemeList: loadThemeList, saveTheme: saveTheme, deleteTheme: deleteTheme,
+    selectTheme: selectTheme, httpBase: httpBase
   };
 })(window);
