@@ -1513,7 +1513,13 @@ body.panel-dragging * { cursor: grabbing !important; }
 }
 .quickbar.collapsed { padding: 3px; }
 .quickbar.collapsed .qb-body { display: none; }
-.qb-body { display: flex; align-items: center; gap: 2px; }
+/* qb-body 是「一整排」的那层：外层限宽后它必须自己会折行，
+   否则 min-width:auto 撑着不缩，整条从圆角容器两端溢出去 */
+.qb-body {
+  display: flex; align-items: center; gap: 2px;
+  flex-wrap: wrap; row-gap: 2px;
+  min-width: 0; max-width: 100%;
+}
 .qb-toggle {
   border: 0; background: transparent; cursor: pointer;
   font: inherit; font-size: 12px; line-height: 1;
