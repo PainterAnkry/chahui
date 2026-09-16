@@ -185,6 +185,9 @@ class Game {
       theme: this.theme || null,
       themeName: this.themeName || null,
       drawSeconds: Math.round(this.roundMs() / 1000),
+      // 主题菜单（只有 id + 名字，没有词）—— 和接龙快照同源，开局前前端
+      // 拿不到快照时才靠 /api/share 的 themeList 垫底
+      themes: THEMES.themeList(),
       // 词：只有画手本人（或结算之后）才拿得到明文
       word: (isDrawer || revealed) ? this.word : '',
       // 字数提示给所有人看 —— 这类游戏的常规做法（等于把答案显示成「□□□」），

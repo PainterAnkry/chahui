@@ -368,44 +368,66 @@
 
   <!-- ==================== 中：画布 ==================== -->
   <section class="stage" id="stage">
-  <!-- 画布上沿的快捷小菜单（对照 SAI2 顶部那条）。可以整条收起/拉开。 -->
+  <!-- 画布上沿的快捷小菜单（对照 SAI2 顶部那条）。可以整条收起/拉开。
+       每块功能包在 .qb-item[data-item] 里，可在「⚙ 自定义」里逐块显隐（localStorage 记住）。 -->
   <div class="quickbar" id="quickBar">
     <button class="qb-toggle" id="qbToggle" title="收起 / 拉开快捷菜单">▾</button>
     <div class="qb-body" id="qbBody">
-      <button class="qb-btn" id="qbUndo" title="撤销 (Ctrl+Z)">↶</button>
-      <button class="qb-btn" id="qbRedo" title="重做 (Ctrl+Y)">↷</button>
-      <span class="qb-sep"></span>
-      <span class="qb-label">视图</span>
-      <select class="qb-select" id="qbViewMode" title="画布显示方式">
-        <option value="normal">正常</option>
-        <option value="gray">灰度</option>
-        <option value="flipH">水平翻转</option>
-      </select>
-      <span class="qb-sep"></span>
-      <span class="qb-label">缩放</span>
-      <input class="qb-num qb-input" id="qbZoomText" value="100%" title="可以直接输入百分比，回车生效" />
-      <button class="qb-btn" id="qbZoomOut" title="缩小 (-)">−</button>
-      <button class="qb-btn" id="qbZoomIn" title="放大 (=)">＋</button>
-      <button class="qb-btn" id="qbZoomFit" title="适应窗口 (0)">▣</button>
-      <button class="qb-btn" id="qbZoom100" title="实际大小 (1)">1:1</button>
-      <span class="qb-sep"></span>
-      <span class="qb-label">旋转</span>
-      <input class="qb-num qb-input" id="qbRotText" value="0.0°" title="可以直接输入角度（度），回车生效" />
-      <button class="qb-btn" id="qbRotL" title="向左旋转 (,)">↺</button>
-      <button class="qb-btn" id="qbRotR" title="向右旋转 (.)">↻</button>
-      <button class="qb-btn" id="qbRotReset" title="角度归零">⌂</button>
-      <button class="qb-btn" id="qbFlip" title="水平翻转视图 (H)">⇄</button>
-      <span class="qb-sep"></span>
-      <span class="qb-label">手抖修正</span>
-      <button class="qb-btn" id="qbSteadierDown" title="减小抖动修正">−</button>
-      <span class="qb-num" id="qbSteadierText">0</span>
-      <button class="qb-btn" id="qbSteadierUp" title="增大抖动修正">＋</button>
-      <span class="qb-sep"></span>
-      <span class="qb-label">他人笔触</span>
-      <button class="qb-btn qb-wide" id="qbDimOthers" title="别人的笔迹在本机显示得淡一点（只影响你自己的屏幕，不影响导出，也不会同步给别人）">原样</button>
-      <span class="qb-sep"></span>
-      <button class="qb-btn" id="qbRuler" title="对称尺（尺子）">✎</button>
-      <button class="qb-btn" id="qbRef" title="参考图（只有自己看得见）">🖼</button>
+      <span class="qb-item" data-item="undo">
+        <button class="qb-btn" id="qbUndo" title="撤销 (Ctrl+Z)">↶</button>
+        <button class="qb-btn" id="qbRedo" title="重做 (Ctrl+Y)">↷</button>
+      </span>
+      <span class="qb-item" data-item="view">
+        <span class="qb-sep"></span>
+        <span class="qb-label">视图</span>
+        <select class="qb-select" id="qbViewMode" title="画布显示方式">
+          <option value="normal">正常</option>
+          <option value="gray">灰度</option>
+          <option value="flipH">水平翻转</option>
+        </select>
+      </span>
+      <span class="qb-item" data-item="zoom">
+        <span class="qb-sep"></span>
+        <span class="qb-label">缩放</span>
+        <input class="qb-num qb-input" id="qbZoomText" value="100%" title="可以直接输入百分比，回车生效" />
+        <button class="qb-btn" id="qbZoomOut" title="缩小 (-)">−</button>
+        <button class="qb-btn" id="qbZoomIn" title="放大 (=)">＋</button>
+        <button class="qb-btn" id="qbZoomFit" title="适应窗口 (0)">▣</button>
+        <button class="qb-btn" id="qbZoom100" title="实际大小 (1)">1:1</button>
+      </span>
+      <span class="qb-item" data-item="rot">
+        <span class="qb-sep"></span>
+        <span class="qb-label">旋转</span>
+        <input class="qb-num qb-input" id="qbRotText" value="0.0°" title="可以直接输入角度（度），回车生效" />
+        <button class="qb-btn" id="qbRotL" title="向左旋转 (,)">↺</button>
+        <button class="qb-btn" id="qbRotR" title="向右旋转 (.)">↻</button>
+        <button class="qb-btn" id="qbRotReset" title="角度归零">⌂</button>
+        <button class="qb-btn" id="qbFlip" title="水平翻转视图 (H)">⇄</button>
+      </span>
+      <span class="qb-item" data-item="steadier">
+        <span class="qb-sep"></span>
+        <span class="qb-label">手抖修正</span>
+        <button class="qb-btn" id="qbSteadierDown" title="减小抖动修正">−</button>
+        <span class="qb-num" id="qbSteadierText">0</span>
+        <button class="qb-btn" id="qbSteadierUp" title="增大抖动修正">＋</button>
+      </span>
+      <span class="qb-item" data-item="dim">
+        <span class="qb-sep"></span>
+        <span class="qb-label">他人笔触</span>
+        <button class="qb-btn qb-wide" id="qbDimOthers" title="别人的笔迹在本机显示得淡一点（只影响你自己的屏幕，不影响导出，也不会同步给别人）">原样</button>
+      </span>
+      <span class="qb-item" data-item="ruler">
+        <span class="qb-sep"></span>
+        <button class="qb-btn" id="qbRuler" title="对称尺（尺子）">✎</button>
+      </span>
+      <span class="qb-item" data-item="ref">
+        <button class="qb-btn" id="qbRef" title="参考图（只有自己看得见）">🖼</button>
+      </span>
+      <!-- 自定义入口：这块永远显示，不参与显隐 -->
+      <span class="qb-item" data-item="edit" data-fixed="1">
+        <span class="qb-sep"></span>
+        <button class="qb-btn" id="qbEditBtn" title="自定义快捷菜单：选择要显示的功能">⚙</button>
+      </span>
     </div>
   </div>
 
@@ -690,6 +712,22 @@
     <div class="modal-foot">
       <button class="btn ghost" id="btnPassCancel">取消</button>
       <button class="btn primary" id="btnPassOk">进入</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask hidden" id="qbEditMask">
+  <div class="modal confirm">
+    <div class="modal-head">
+      <h3>自定义快捷菜单</h3>
+    </div>
+    <div class="modal-body">
+      <p class="hint">勾选要在画布上沿快捷条里显示的功能，改动立即生效并自动记住。</p>
+      <div id="qbEditList"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" id="btnQbReset">恢复默认</button>
+      <button class="btn primary" id="btnQbDone">完成</button>
     </div>
   </div>
 </div>

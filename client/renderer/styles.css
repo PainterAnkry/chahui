@@ -1520,6 +1520,8 @@ body.panel-dragging * { cursor: grabbing !important; }
   flex-wrap: wrap; row-gap: 2px;
   min-width: 0; max-width: 100%;
 }
+/* 快捷菜单的「功能块」：自定义显隐的最小单位（.hidden 全局 display:none !important） */
+.qb-item { display: flex; align-items: center; gap: 2px; }
 .qb-toggle {
   border: 0; background: transparent; cursor: pointer;
   font: inherit; font-size: 12px; line-height: 1;
@@ -1931,7 +1933,8 @@ body.panel-dragging * { cursor: grabbing !important; }
 /* ==================== 你画我猜 ==================== */
 .game-hud {
   position: absolute;
-  top: 54px;
+  /* 挂在快捷条下面：快捷条折行/收起会变高，JS 把实际高度写进 --qb-h */
+  top: calc(var(--qb-h, 40px) + 14px);
   left: 50%;
   transform: translateX(-50%);
   z-index: 35;
@@ -2044,7 +2047,8 @@ body.panel-dragging * { cursor: grabbing !important; }
 
 .round-card {
   position: absolute;
-  top: 54px;
+  /* 同 .game-hud：跟在快捷条下面，高度随 --qb-h 动 */
+  top: calc(var(--qb-h, 40px) + 14px);
   left: 50%;
   transform: translateX(-50%);
   z-index: 37;

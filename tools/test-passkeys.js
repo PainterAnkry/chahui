@@ -10,6 +10,8 @@
  *   ② 数字键 1-9 切笔刷槽位；工具键（B/E…）切基础画笔；键位角标可见；Ctrl+1/0 缩放
  *   ③ 快捷菜单在窄窗口下不溢出（两边不被裁）
  *   ④ 侧栏拖动调宽 → CSS 变量变化 + 持久化
+ *   ⑤ 快捷菜单自定义：⚙ 面板勾选显隐 → 立即生效 + 刷新记住 + 恢复默认
+ *   ⑥ 经典模式主题下拉与接龙同源（快照 themes + /api/share themeList 垫底）
  */
 'use strict';
 const path = require('path');
@@ -249,8 +251,94 @@ async function waitForPage(page, fn, timeout, label) {
       return (before - now) >= 90;
     }, viewW0));
 
-  /* ================= [5] 控制台干净 ================= */
-  console.log('\n[5] 控制台干净');
+  /* ================= [5] 快捷菜单自定义 ================= */
+  console.log('\n[5] 快捷菜单自定义（显隐 + 持久化 + 恢复默认）');
+  ok('默认所有功能块都显示',
+    await B.evaluate(() => {
+      const items = Array.from(document.querySelectorAll('#qbBody .qb-item[data-item]'))
+        .filter(w => !w.getAttribute('data-fixed'));
+      return items.length >= 8 && items.every(w => !w.classList.contains('hidden'));
+    }));
+  await B.click('#qbEditBtn');
+  ok('点 ⚙ 弹出自定义面板',
+    await waitForPage(B, () => !document.querySelector('#qbEditMask').classList.contains('hidden'), 4000, 'qbEditMask'));
+  ok('面板里列出 8 块功能',
+    await B.evaluate(() => document.querySelectorAll('#qbEditList .check-row').length === 8));
+
+  // 取消「缩放」「旋转」（第 3、4 个 checkbox）
+  await B.evaluate(() => {
+    const rows = document.querySelectorAll('#qbEditList .check-row input');
+    rows[2].click(); rows[3].click();
+  });
+  await sleep(200);
+  ok('取消勾选后缩放/旋转立即隐藏，撤销还在',
+    await B.evaluate(() => {
+      const q = k => document.querySelector('#qbBody .qb-item[data-item="' + k + '"]');
+      return q('zoom').classList.contains('hidden') &&
+             q('rot').classList.contains('hidden') &&
+             !q('undo').classList.contains('hidden');
+    }));
+  ok('选择已写入 localStorage',
+    await B.evaluate(() => {
+      try {
+        const m = JSON.parse(localStorage.getItem('chahu.quickbar.items') || '{}');
+        return m.zoom === false && m.rot === false;
+      } catch (e) { return false; }
+    }));
+
+  // 刷新页面 → 配置还在
+  await B.goto(BASE + '/?room=' + (await B.evaluate(() => window.ChaApp.state.room.id)));
+  await B.waitForFunction(() => window.ChaApp && window.ChaApp.state, { timeout: 15000 });
+  await sleep(1000);
+  try { await B.click('#btnEntryClose', { timeout: 1500 }); } catch (e) { /* 没遮罩就算了 */ }
+  ok('刷新后缩放/旋转仍然是隐藏的（配置被记住）',
+    await B.evaluate(() => {
+      const q = k => document.querySelector('#qbBody .qb-item[data-item="' + k + '"]');
+      return q('zoom').classList.contains('hidden') && q('rot').classList.contains('hidden');
+    }));
+
+  // 恢复默认
+  await B.click('#qbEditBtn');
+  await B.waitForFunction(() => !document.querySelector('#qbEditMask').classList.contains('hidden'), { timeout: 4000 });
+  await B.click('#btnQbReset');
+  await sleep(200);
+  ok('恢复默认后所有功能块都回来了',
+    await B.evaluate(() => {
+      const items = Array.from(document.querySelectorAll('#qbBody .qb-item[data-item]'))
+        .filter(w => !w.getAttribute('data-fixed'));
+      return items.every(w => !w.classList.contains('hidden')) &&
+             localStorage.getItem('chahu.quickbar.items') === null;
+    }));
+  await B.click('#btnQbDone');
+  ok('「完成」关掉自定义面板',
+    await B.evaluate(() => document.querySelector('#qbEditMask').classList.contains('hidden')));
+
+  /* ================= [6] 经典模式词库与接龙同源 ================= */
+  console.log('\n[6] 经典模式主题下拉（内置 + 自定义同源）');
+  await B.click('#btnGame');
+  ok('点「游戏」弹出开局面板',
+    await waitForPage(B, () => !document.querySelector('#gameMask').classList.contains('hidden'), 4000, 'gameMask'));
+  await sleep(600);   // 等 /api/share 的 themeList 晚到补位（如果快照没先到）
+  const themeInfo = await B.evaluate(() => {
+    const sel = document.querySelector('#gameTheme');
+    return { n: sel.options.length,
+             ids: Array.from(sel.options).map(o => o.value),
+             hasGenshin: !!Array.from(sel.options).find(o => o.value === 'genshin'),
+             hasAnime: !!Array.from(sel.options).find(o => o.value === 'anime') };
+  });
+  ok('经典面板的主题下拉有完整的 15 套（不再是单个占位项）', themeInfo.n >= 15, '实际 ' + themeInfo.n);
+  ok('下拉里有扩展词库（原神 / 二次元混合）', themeInfo.hasGenshin && themeInfo.hasAnime, JSON.stringify(themeInfo.ids));
+  ok('自定义词库与接龙共用同一个数据源（themeList 长度一致）',
+    await B.evaluate(() => {
+      const gs = window.ChaApp.state.themes || [];
+      const sel = document.querySelector('#gameTheme');
+      return gs.length > 0 && sel.options.length === gs.length;
+    }));
+  await B.click('#btnGameStart', { trial: true }).catch(() => {});
+  await B.evaluate(() => document.querySelector('#gameMask').classList.add('hidden'));
+
+  /* ================= [7] 控制台干净 ================= */
+  console.log('\n[7] 控制台干净');
   const realErrs = errs.filter(e => !/favicon|net::ERR_|Download the React/i.test(e) &&
     !expectedErrs.some(x => e.indexOf(x) >= 0));
   ok('整个过程没有 JS 报错', realErrs.length === 0, realErrs.slice(0, 3).join(' | '));

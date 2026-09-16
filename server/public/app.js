@@ -3320,6 +3320,7 @@
       case P.S2C.GAME_THEMES:
         if (msg.themes && msg.themes.length) {
           S.themes = msg.themes;
+          buildThemeSelect($('#gameTheme'));   // 经典模式的开局面板
           renderChainDialog();
           if (TM.list) loadThemeList();       // 词库面板开着的话也顺手刷新
         }
@@ -3898,9 +3899,14 @@
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (j) {
         if (!j) return;
-        // 顺手把「接龙主题列表」缓存下来 —— 开局前 S.game 是 null，
-        // 那时候接龙面板拿不到快照里的 themes，只能靠这里先垫上
-        if (j.themeList && j.themeList.length) S.themes = j.themeList;
+        // 顺手把「主题列表」缓存下来 —— 开局前 S.game 是 null，
+        // 那时候面板拿不到快照里的 themes，只能靠这里先垫上
+        if (j.themeList && j.themeList.length) {
+          S.themes = j.themeList;
+          // 面板正开着的话立刻换掉占位项（fetch 是异步的，晚到也要补上）
+          buildThemeSelect($('#gameTheme'));
+          buildThemeSelect($('#chainTheme'));
+        }
         var next = (j.publicUrl || '').replace(/\/+$/, '');
         if (next === S.publicUrl) return;
         S.publicUrl = next;
@@ -7221,6 +7227,67 @@
 
   var QB_COLLAPSED = 'chahu.quickbar.collapsed';
 
+  /* ---- 快捷菜单自定义：每块功能（.qb-item[data-item]）可单独显隐，localStorage 记住 ---- */
+  var QB_ITEMS_KEY = 'chahu.quickbar.items';
+  var QB_ITEMS = [
+    { key: 'undo',     label: '撤销 / 重做' },
+    { key: 'view',     label: '视图方式（正常 / 灰度 / 翻转）' },
+    { key: 'zoom',     label: '缩放' },
+    { key: 'rot',      label: '旋转' },
+    { key: 'steadier', label: '手抖修正' },
+    { key: 'dim',      label: '他人笔触淡化' },
+    { key: 'ruler',    label: '对称尺' },
+    { key: 'ref',      label: '参考图' }
+  ];
+
+  function loadQbItems() {
+    var m = {};
+    try { m = JSON.parse(localStorage.getItem(QB_ITEMS_KEY) || '{}') || {}; } catch (e) { m = {}; }
+    var out = {};
+    QB_ITEMS.forEach(function (it) {
+      out[it.key] = m[it.key] !== false;    // 没配置过的默认显示
+    });
+    return out;
+  }
+
+  function applyQbItems() {
+    var m = loadQbItems();
+    var list = document.querySelectorAll('#qbBody .qb-item[data-item]');
+    for (var i = 0; i < list.length; i++) {
+      var w = list[i];
+      if (w.getAttribute('data-fixed')) continue;   // ⚙ 自定义入口永远显示
+      w.classList.toggle('hidden', !m[w.getAttribute('data-item')]);
+    }
+  }
+
+  function renderQbEditList() {
+    var m = loadQbItems();
+    var box = $('#qbEditList');
+    if (!box) return;
+    box.innerHTML = '';
+    QB_ITEMS.forEach(function (it) {
+      var row = document.createElement('label');
+      row.className = 'check-row';
+      var chk = document.createElement('input');
+      chk.type = 'checkbox';
+      chk.checked = m[it.key];
+      chk.addEventListener('change', function () {
+        var cur = loadQbItems();
+        cur[it.key] = chk.checked;
+        try { localStorage.setItem(QB_ITEMS_KEY, JSON.stringify(cur)); } catch (e) { /* ignore */ }
+        applyQbItems();
+      });
+      var span = document.createElement('span');
+      span.textContent = it.label;
+      row.appendChild(chk);
+      row.appendChild(span);
+      box.appendChild(row);
+    });
+  }
+
+  function openQbEdit() { renderQbEditList(); var m = $('#qbEditMask'); if (m) m.classList.remove('hidden'); }
+  function closeQbEdit() { var m = $('#qbEditMask'); if (m) m.classList.add('hidden'); }
+
   /** 菜单里那项「手抖修正」：把快捷条拉出来并高亮一下，告诉用户去哪儿调 */
   function toggleQuickBarSteadier() {
     var bar = $('#quickBar');
@@ -7272,6 +7339,29 @@
     });
     on('#qbRef', function () { pickReferenceImage(); });
     on('#qbDimOthers', cycleDimMode);
+
+    // 自定义显隐：进场先应用记住的配置，⚙ 打开编辑弹窗
+    applyQbItems();
+    on('#qbEditBtn', openQbEdit);
+    on('#btnQbDone', closeQbEdit);
+    on('#btnQbReset', function () {
+      try { localStorage.removeItem(QB_ITEMS_KEY); } catch (e) { /* ignore */ }
+      applyQbItems();
+      renderQbEditList();
+    });
+    var qem = $('#qbEditMask');
+    if (qem) qem.addEventListener('click', function (e) { if (e.target === qem) closeQbEdit(); });
+
+    // 快捷条折行/收起/自定义显隐都会变高 —— HUD 和回合卡挂在它下面，跟着挪
+    function syncQbH() {
+      document.documentElement.style.setProperty('--qb-h', bar.offsetHeight + 'px');
+    }
+    syncQbH();
+    if (typeof ResizeObserver === 'function') {
+      new ResizeObserver(syncQbH).observe(bar);
+    } else {
+      window.addEventListener('resize', syncQbH);
+    }
 
     // 缩放 / 旋转可以直接输入：回车或失焦生效
     function commitZoom() {
