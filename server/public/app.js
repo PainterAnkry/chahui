@@ -55,6 +55,8 @@
     myUndo: [],
     myRedo: [],
     joinCount: 0,
+    // 正在进行的加入：带密码的房间输错时好把密码框弹回来
+    pendingJoin: null,
     // 你画我猜：服务端推来的最新一份快照（已按我裁剪过 —— 猜手拿到的 word 恒为空）
     // skew 是「服务端时钟 - 本机时钟」，倒计时按它换算，免得各端显示不一致
     game: null,
@@ -598,8 +600,103 @@
       .filter(Boolean);
   }
 
+  /* ---------------------------------------------------------- 侧栏宽度拖动 */
+
+  var COL_MIN = 190, COL_MAX = 520;   // 拖太窄按钮挤成一团，拖太宽画布就没了
+
+  /** 恢复上次的栏宽（存在 localStorage 里；开机时调一次） */
+  function loadColumnWidths() {
+    var raw = null;
+    try { raw = JSON.parse(lsGet('chahu.colW', 'null')); } catch (e) { raw = null; }
+    if (!raw) return;
+    if (raw.left) setColW('left', raw.left);
+    if (raw.right) setColW('right', raw.right);
+  }
+  function setColW(side, w) {
+    var clamped = Math.max(COL_MIN, Math.min(COL_MAX, Math.round(w)));
+    document.documentElement.style.setProperty(side === 'left' ? '--left-w' : '--right-w', clamped + 'px');
+    return clamped;
+  }
+
+  /**
+   * 左右栏贴画布一侧各有一条 7px 的拖动条：按住横向拖就能调栏宽。
+   * 宽度落在 CSS 变量 --left-w / --right-w 上（面板的 width 直接引用它们），
+   * 拖完存 localStorage；拖动过程里画布跟着重排。
+   */
+  function bindColumnResizers() {
+    loadColumnWidths();
+    var raf = 0;
+    function bind(el, side) {
+      if (!el) return;
+      el.addEventListener('pointerdown', function (e) {
+        e.preventDefault();
+        e.stopPropagation();          // 别把这次按下交给小节拖拽 / 画布
+        var panel = el.closest('.panel');
+        var startW = panel ? panel.getBoundingClientRect().width : 0;
+        var startX = e.clientX;
+        el.classList.add('dragging');
+        document.body.classList.add('col-resizing');
+        el.setPointerCapture(e.pointerId);
+
+        function onMove(ev) {
+          // 左栏在画布左边：往右拖变宽；右栏相反
+          var dx = ev.clientX - startX;
+          var w = side === 'left' ? startW + dx : startW - dx;
+          if (raf) return;
+          raf = requestAnimationFrame(function () {
+            raf = 0;
+            setColW(side, w);
+            engine.resize();
+          });
+        }
+        function finish() {
+          el.removeEventListener('pointermove', onMove);
+          el.removeEventListener('pointerup', finish);
+          el.removeEventListener('pointercancel', finish);
+          el.classList.remove('dragging');
+          document.body.classList.remove('col-resizing');
+          if (raf) { cancelAnimationFrame(raf); raf = 0; }
+          var panel2 = el.closest('.panel');
+          if (panel2) {
+            var save = { left: null, right: null };
+            try { save = JSON.parse(lsGet('chahu.colW', '{}')) || {}; } catch (err2) { save = {}; }
+            save[side] = Math.round(panel2.getBoundingClientRect().width);
+            lsSet('chahu.colW', JSON.stringify(save));
+          }
+          engine.resize();
+        }
+        el.addEventListener('pointermove', onMove);
+        el.addEventListener('pointerup', finish);
+        el.addEventListener('pointercancel', finish);
+      });
+    }
+    bind($('#leftResizer'), 'left');
+    bind($('#rightResizer'), 'right');
+  }
+
   /** 「工具栏」放工具，「笔刷栏」放笔刷 —— 和 SAI2 一样分开两栏 */
   function isBrushItem(it) { return it.type === 'brush'; }
+
+  /**
+   * 工具的默认快捷键（PS / SAI 习惯；键位表见全局 keydown 的 map，两处要同步改）。
+   * 显示在格子角上 —— 键位要「看得见」才有人用。
+   */
+  var TOOL_KEYS = {
+    brush: 'B', eraser: 'E', blur: 'U', smudge: 'S', line: 'L',
+    rect: 'R', ellipse: 'O', fill: 'G', gradient: 'N',
+    select: 'Q', selectErase: 'W', picker: 'I'
+  };
+  /** 数字键 1-9 切到笔刷栏第 1-9 支笔（按当前面板顺序），返回这支笔的键位角标 */
+  function itemKeyBadge(it, list, isBrushList) {
+    // 橡皮 / 油漆桶 / 模糊这些「住在笔刷栏里的工具」有自己的字母键，优先显示字母
+    var letter = TOOL_KEYS[it.tool];
+    if (letter && it.tool !== 'brush') return letter;
+    if (isBrushList) {
+      var i = list.indexOf(it);
+      return i >= 0 && i < 9 ? String(i + 1) : '';
+    }
+    return letter || '';
+  }
 
   /**
    * 渲染一格工具/笔刷按钮。
@@ -610,12 +707,15 @@
     box.innerHTML = '';
     box.classList.toggle('editing', S.toolEdit);
     list.forEach(function (it) {
+      var isBrushList = box.id === 'brushGrid';
+      var keyBadge = itemKeyBadge(it, list, isBrushList);
       var b = document.createElement('button');
       b.className = 'tool' + (it.id === S.brushId ? ' active' : '');
       b.dataset.tool = it.tool;
       b.dataset.item = it.id;
-      b.title = it.name + '｜' + it.tip;
+      b.title = it.name + (keyBadge ? '（快捷键 ' + keyBadge + '）' : '') + '｜' + it.tip;
       b.innerHTML = Brushes.iconSvg(it.icon || it.id) + '<span>' + esc(it.name) + '</span>' +
+        (keyBadge ? '<span class="tkey">' + esc(keyBadge) + '</span>' : '') +
         (S.toolEdit
           ? '<span class="tbadge">' +
             '<button data-act="left" title="前移">◀</button>' +
@@ -2295,7 +2395,61 @@
     var name = ($('#nameInput').value || '').trim() || ('茶友' + Math.floor(Math.random() * 900 + 100));
     Cfg.setName(name);
     S.me.name = name;
-    net.send(P.C2S.ROOM_JOIN, { roomId: roomId, user: name, password: '' });
+    // 上锁的房间：先要密码（本地记住的密码直接用，错了会弹回来让你重输）
+    var meta = lastRoomList.filter(function (x) { return x.id === roomId; })[0];
+    if (meta && meta.hasPassword && !getRoomPass(roomId)) {
+      askRoomPassword(roomId, meta.name, name);
+      return;
+    }
+    joinRoom(roomId, name, getRoomPass(roomId));
+  }
+
+  /* ---- 房间密码：所有 ROOM_JOIN 都走这里，保证 pendingJoin / 记住密码一致 ---- */
+  function joinRoom(roomId, name, password) {
+    S.pendingJoin = { roomId: roomId, name: name };
+    net.send(P.C2S.ROOM_JOIN, { roomId: roomId, user: name, password: password || '' });
+  }
+
+  function passStore() {
+    try { return JSON.parse(lsGet('chahu.roomPass', '{}')) || {}; } catch (e) { return {}; }
+  }
+  function getRoomPass(roomId) {
+    var m = passStore();
+    return (m[roomId] || '').trim();
+  }
+  function setRoomPass(roomId, pass) {
+    var m = passStore();
+    if (pass) m[roomId] = pass; else delete m[roomId];
+    lsSet('chahu.roomPass', JSON.stringify(m));
+  }
+
+  /** 弹出密码框。roomName 只用来显示；serviceName 是发起加入时的用户名。 */
+  function askRoomPassword(roomId, roomName, userName) {
+    S.pendingJoin = { roomId: roomId, name: userName || S.me.name || '', roomName: roomName || '' };
+    $('#passHint').textContent = roomName
+      ? '「' + roomName + '」上了锁，输入密码进入。'
+      : '这个房间上了锁，输入密码进入。';
+    $('#passErr').classList.add('hidden');
+    $('#passInput').value = '';
+    $('#passMask').classList.remove('hidden');
+    setTimeout(function () { $('#passInput').focus(); }, 60);
+  }
+  function closeRoomPassword() {
+    $('#passMask').classList.add('hidden');
+    S.pendingJoin = null;
+  }
+  function submitRoomPassword() {
+    var pj = S.pendingJoin;
+    if (!pj) { closeRoomPassword(); return; }
+    var pass = ($('#passInput').value || '').trim();
+    if (!pass) {
+      $('#passErr').textContent = '密码不能为空。';
+      $('#passErr').classList.remove('hidden');
+      return;
+    }
+    setRoomPass(pj.roomId, pass);
+    closeRoomPassword();
+    joinRoom(pj.roomId, pj.name, pass);
   }
 
   function doCreate() {
@@ -2968,6 +3122,7 @@
         S.me.color = msg.you.color;
         S.me.isOwner = !!msg.you.isOwner;
         S.joined = true;
+        S.pendingJoin = null;
         // 「他人笔触」要靠这个判断哪些笔是自己的
         engine.setMeId(S.me.userId);
         S.myUndo = []; S.myRedo = [];
@@ -3194,6 +3349,16 @@
         break;
 
       case P.S2C.ERROR:
+        // 密码错了：把密码框弹回来重输（记住的密码也不对就顺手清掉）
+        if (msg.code === 'bad_password' && S.pendingJoin) {
+          var pj = S.pendingJoin;
+          setRoomPass(pj.roomId, '');
+          askRoomPassword(pj.roomId, pj.roomName || ('房间 ' + pj.roomId), pj.name);
+          $('#passErr').textContent = '密码不正确，再试一次。';
+          $('#passErr').classList.remove('hidden');
+          toast(msg.message || '房间密码不正确', 'err');
+          break;
+        }
         toast(msg.message || '出错了', 'err');
         setStatus('错误：' + (msg.message || msg.code));
         break;
@@ -4392,6 +4557,9 @@
         if (e.key === 'd') { e.preventDefault(); beginSelSnapshot(); engine.clearSelection(); commitSelSnapshot(); toast('已取消选区'); return; }
         if (e.key === 'i') { e.preventDefault(); beginSelSnapshot(); invertSelection(); commitSelSnapshot(); return; }
         if (e.key === 't') { e.preventDefault(); if (engine.transform) commitTransform(); else startTransform(); return; }
+        // PS 习惯：Ctrl+0 适应窗口、Ctrl+1 100%（裸的 0/1 让给了适应窗口和笔刷槽位）
+        if (e.key === '0') { e.preventDefault(); engine.fitView(); return; }
+        if (e.key === '1') { e.preventDefault(); engine.setZoom(1); return; }
         if (e.key === 'n' && e.shiftKey) {
           e.preventDefault();
           if (S.joined) net.send(P.C2S.LAYER_ADD, { name: '图层 ' + (engine.layers.length + 1) });
@@ -4420,8 +4588,10 @@
       if (k === ',') { engine.rotateBy(-15); return; }
       if (k === '.') { engine.rotateBy(15); return; }
       if (k === '0') { engine.fitView(); return; }
-      if (k === '1') {
-        engine.setZoom(1);
+      // 数字键 1-9 = 笔刷栏第 1-9 支笔（按当前面板顺序 —— 把常用的排前面就行）
+      if (k >= '1' && k <= '9') {
+        var slot = visibleItems().filter(isBrushItem)[Number(k) - 1];
+        if (slot) loadBrush(slot.id);
         return;
       }
       if (k === '=' || k === '+') { engine.setZoom(engine.scale * 1.25); return; }
@@ -4941,6 +5111,15 @@
     $('#btnChainStart').addEventListener('click', startChainGame);
     $('#btnThemeManage').addEventListener('click', openThemeManager);
 
+    /* ---- 房间密码框 ---- */
+    $('#btnPassOk').addEventListener('click', submitRoomPassword);
+    $('#btnPassCancel').addEventListener('click', closeRoomPassword);
+    $('#passInput').addEventListener('keydown', function (e) {
+      e.stopPropagation();                        // 别让画布快捷键（1-9 切笔等）抢走输入
+      if (e.key === 'Enter') { e.preventDefault(); submitRoomPassword(); }
+      else if (e.key === 'Escape') { e.preventDefault(); closeRoomPassword(); }
+    });
+
     /* ---- 自定义词库管理面板 ---- */
     $('#btnThemeClose').addEventListener('click', closeThemeManager);
     $('#btnThemeDone').addEventListener('click', closeThemeManager);
@@ -5008,7 +5187,10 @@
       closeTrophy();
       var rounds = Number($('#chainRounds').value) || P.GAME.CHAIN_ROUNDS;
       var theme = $('#chainTheme').value || 'default';
-      net.send(P.C2S.GAME_START, { mode: 'chain', rounds: rounds, theme: theme });
+      net.send(P.C2S.GAME_START, {
+        mode: 'chain', rounds: rounds, theme: theme,
+        drawSeconds: Number($('#chainDrawTime').value) || 0
+      });
     });
 
     /* ---- 顶栏「立刻推进」（接龙里房主用来跳过没交的人 / 提前结算投票） ---- */
@@ -5411,8 +5593,8 @@
         hint = '说点什么…（接龙的猜词请用画布左下角的输入框）';
       }
     } else if (gameActive() && S.game.phase === 'draw') {
-      if (gameImDrawer()) hint = '你是画手，这里说的话不会发出去';
-      else if (gameGuessedMe()) hint = '你已经猜对了，再说话会剧透（不会发出去）';
+      if (gameImDrawer()) hint = '你是画手：可以聊天给提示，但别把答案说出来（带答案的话发不出去）';
+      else if (gameGuessedMe()) hint = '你已经猜对了：可以照常聊天，但别把答案说出来（带答案的话发不出去）';
       else hint = '输入你的猜测…（Enter 发送）';
     }
     input.placeholder = hint;
@@ -5591,6 +5773,8 @@
     if (gameActive() && S.game.mode === 'chain') { openChainDialog(); return; }
     setGameDialogMode(gameDialogMode);
     updateGameDialog();
+    buildThemeSelect($('#gameTheme'));    // 开局前快照里可能还没有词库列表，顺手再问一次
+    if (!S.themes || !S.themes.length) probePublicUrl();
     $('#gameMask').classList.remove('hidden');
   }
 
@@ -5603,7 +5787,12 @@
       return;
     }
     var rounds = Number($('#gameRounds').value) || P.GAME.DEFAULT_ROUNDS;
-    net.send(P.C2S.GAME_START, { mode: 'classic', rounds: rounds });
+    net.send(P.C2S.GAME_START, {
+      mode: 'classic',
+      rounds: rounds,
+      theme: $('#gameTheme').value || '',
+      drawSeconds: Number($('#gameDrawTime').value) || 0
+    });
     $('#gameMask').classList.add('hidden');
   }
 
@@ -6344,34 +6533,40 @@
 
   /* ---- 接龙开局对话框 ---- */
 
+  /**
+   * 把服务端下发的主题列表填进任意一个词库下拉（经典面板 / 接龙面板共用）。
+   * 列表随快照下发（服务端只给 id/name，绝不含词）。
+   * 注意：快照里的 themes 只有「开局之后」才有 —— 开局前 g 是 null 或另一种模式的快照。
+   * 所以这里不能一看「还没填过」就用兜底列表把下拉锁死（那会永远只有「通用」一项）；
+   * 只有真的拿到服务端的列表才记 data-built。
+   */
+  function buildThemeSelect(sel) {
+    if (!sel) return;
+    var g = S.game;
+    // 优先用快照里的（开局后一定有）；开局前用 probePublicUrl 顺手缓存的 S.themes 垫着
+    var list = (g && g.themes && g.themes.length) ? g.themes : (S.themes || null);
+    if (list && list.length) {
+      var sig = list.map(function (t) { return t.id; }).join(',');
+      if (sel.dataset.built !== sig) {
+        var keep = sel.value;
+        sel.innerHTML = '';
+        list.forEach(function (t) {
+          var o = document.createElement('option');
+          o.value = t.id; o.textContent = t.name;
+          sel.appendChild(o);
+        });
+        if (keep) sel.value = keep;
+        sel.dataset.built = sig;
+      }
+    } else if (!sel.options.length) {
+      // 还没拿到真正的列表 —— 先摆一项占位，等服务端的数据到了再换掉
+      sel.innerHTML = '<option value="default">通用（什么都能画）</option>';
+    }
+  }
+
   function renderChainDialog() {
     var g = S.game;
-    var sel = $('#chainTheme');
-    // 主题列表随快照下发（服务端只给 id/name，绝不含词）。
-    // 注意：快照里的 themes 只有「接龙开局之后」才有 —— 开局前 g 是 null 或经典模式的快照。
-    // 所以这里不能一看「还没填过」就用兜底列表把下拉锁死（那会永远只有「通用」一项）；
-    // 只有真的拿到服务端的列表才记 data-built。
-    if (sel) {
-      // 优先用快照里的（开局后一定有）；开局前用 probePublicUrl 顺手缓存的 S.themes 垫着
-      var list = (g && g.themes && g.themes.length) ? g.themes : (S.themes || null);
-      if (list && list.length) {
-        var sig = list.map(function (t) { return t.id; }).join(',');
-        if (sel.dataset.built !== sig) {
-          var keep = sel.value;
-          sel.innerHTML = '';
-          list.forEach(function (t) {
-            var o = document.createElement('option');
-            o.value = t.id; o.textContent = t.name;
-            sel.appendChild(o);
-          });
-          if (keep) sel.value = keep;
-          sel.dataset.built = sig;
-        }
-      } else if (!sel.options.length) {
-        // 还没拿到真正的列表 —— 先摆一项占位，等服务端的数据到了再换掉
-        sel.innerHTML = '<option value="default">通用（什么都能画）</option>';
-      }
-    }
+    buildThemeSelect($('#chainTheme'));
     var online = S.members.length;
     var min = (g && g.minPlayers) || P.GAME.CHAIN_MIN_PLAYERS;
     var max = (g && g.maxPlayers) || P.GAME.CHAIN_MAX_PLAYERS;
@@ -6524,6 +6719,7 @@
     bindWheel();
     bindColorSliders();
     bindPanelDnD();
+    bindColumnResizers();
     bindQuickBar();
     bindRefWindow();
     loadDimPrefs();
@@ -6556,7 +6752,8 @@
     net.on('open', function () {
       if (S.room && S.room.id && S.me.name) {
         setStatus('已重连，正在回到「' + S.room.name + '」…');
-        net.send(P.C2S.ROOM_JOIN, { roomId: S.room.id, user: S.me.name });
+        // 带密码的房间重连也要带密码 —— 本地记着上次输对的那个
+        net.send(P.C2S.ROOM_JOIN, { roomId: S.room.id, user: S.me.name, password: getRoomPass(S.room.id) });
       }
       // 每次连上（含重连）都问一次：隧道可能是中途才开的
       probePublicUrl();
@@ -6577,7 +6774,8 @@
       var t = setInterval(function () {
         if (net.isOpen()) {
           clearInterval(t);
-          net.send(P.C2S.ROOM_JOIN, { roomId: autoRoom, user: name });
+          // 分享链接进带密码的房间：先试（记住过密码就直接进），错了会弹密码框
+          joinRoom(autoRoom, name, getRoomPass(autoRoom));
         }
       }, 300);
       setTimeout(function () { clearInterval(t); }, 15000);

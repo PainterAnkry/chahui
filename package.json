@@ -54,6 +54,7 @@
     "test:game": "node tools/test-game.js",
     "test:chain": "node tools/test-chain.js",
     "test:chain-ui": "node tools/test-chain-ui.js",
+    "test:passkeys": "node tools/test-passkeys.js",
     "test:chain-sim": "node tools/test-chain-sim.js",
     "test:theme": "node tools/test-theme-ui.js"
   },

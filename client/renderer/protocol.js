@@ -171,6 +171,11 @@
     HINT_RATIO: 0.5,
     HINT_MIN_LEN: 3,
     REPICK_LIMIT: 1,         // 选词阶段画手可以「换一组」几次
+    // 作画时长可以按房自定义（开局设置），单位秒 —— 环境变量压的是全局默认，
+    // 这个是「这一局」的覆盖值。限个范围，免得 3 秒一回合或者挂机三小时
+    DRAW_SECONDS_DEFAULT: 80,   // = ROUND_MS / 1000
+    DRAW_SECONDS_MIN: 30,
+    DRAW_SECONDS_MAX: 300,
 
     /* ---- 接龙模式（mode = 'chain'）----
      * 链条：每人起一个词 → 下一人照画猜词 → 再下一人照词作画…… 绕圈推进。

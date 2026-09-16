@@ -112,6 +112,7 @@ class ChainGame {
     this.rounds = P.GAME.CHAIN_ROUNDS;   // 每条链走几圈
     this.round = 0;                      // 当前第几圈（1 起）
     this.theme = 'default';
+    this.drawMs = 0;                     // 「照词作画」一步的时长覆盖值（0 = 用全局默认）
 
     this.chains = [];        // [{ id, ownerId, ownerName, cells: [cell...] }]
     this.order = [];         // 传递顺序（开局时打乱一次，整局固定）
@@ -219,7 +220,7 @@ class ChainGame {
   /** 这一步的时长（按步骤类型给不同的值） */
   stepMs() {
     if (this.phase === CHAIN_PHASE.WRITE) return CFG.WRITE_MS;
-    if (this.phase === CHAIN_PHASE.DRAW) return CFG.DRAW_MS;
+    if (this.phase === CHAIN_PHASE.DRAW) return this.drawMs || CFG.DRAW_MS;
     if (this.phase === CHAIN_PHASE.GUESS) return CFG.WRITE_MS;
     if (this.phase === CHAIN_PHASE.REPLAY || this.phase === CHAIN_PHASE.VOTE) return CFG.REPLAY_MS;
     return 0;
@@ -391,6 +392,10 @@ class ChainGame {
 
     this.rounds = clampInt(opts && opts.rounds, P.GAME.CHAIN_ROUNDS, 1, P.GAME.CHAIN_MAX_ROUNDS);
     this.theme = (opts && THEMES.hasTheme(opts.theme)) ? opts.theme : 'default';
+    const dsec = Math.floor(Number(opts && opts.drawSeconds));
+    this.drawMs = (isFinite(dsec) && dsec > 0)
+      ? clampInt(dsec, P.GAME.DRAW_SECONDS_DEFAULT, P.GAME.DRAW_SECONDS_MIN, P.GAME.DRAW_SECONDS_MAX) * 1000
+      : 0;
     this.round = 0;
     this.usedWords = [];
     this.voteResult = null;

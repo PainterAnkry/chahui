@@ -18,6 +18,7 @@
 
 const P = require('./protocol');
 const WORDS = require('./words');
+const THEMES = require('./themes');
 
 const PHASE = {
   OFF: 'off',              // 不在游戏模式，房间就是普通协作画布
@@ -96,7 +97,13 @@ class Game {
     this.startedAt = 0;
     this.hint = null;            // 本回合的露字提示 { index, char }，没给提示时为 null
     this.repickLeft = 0;         // 本回合画手还能「换一组」几次
+    this.theme = '';             // 本局用的主题词库（'' = 通用词库），开局时定下
+    this.themeName = '';
+    this.drawMs = 0;             // 本局的作画时长覆盖值（0 = 用全局默认 CFG.ROUND_MS）
   }
+
+  /** 本局的作画时限。开局设置里自定义的优先，否则用环境变量 / 协议默认 */
+  roundMs() { return this.drawMs || CFG.ROUND_MS; }
 
   /* ------------------------------------------------------------ 查询 */
 
@@ -174,6 +181,10 @@ class Game {
       drawerName: this.drawerName,
       deadline: this.deadline,
       serverNow: Date.now(),
+      // 本局的词库与作画时长（开局面板里选的），前端展示用
+      theme: this.theme || null,
+      themeName: this.themeName || null,
+      drawSeconds: Math.round(this.roundMs() / 1000),
       // 词：只有画手本人（或结算之后）才拿得到明文
       word: (isDrawer || revealed) ? this.word : '',
       // 字数提示给所有人看 —— 这类游戏的常规做法（等于把答案显示成「□□□」），
@@ -203,12 +214,25 @@ class Game {
   /* ------------------------------------------------------------ 流程 */
 
   /** 房主开局 */
-  start(rounds) {
+  /**
+   * 开一局。
+   * @param opts {number | {rounds, theme, drawSeconds}} 兼容旧的纯数字（=轮数）写法；
+   *        theme 是 themes.js 里的词库 id（'' = 通用），drawSeconds 单位秒。
+   */
+  start(opts) {
+    if (typeof opts === 'number') opts = { rounds: opts };
+    opts = opts || {};
     const players = this.playerList();
     if (players.length < P.GAME.MIN_PLAYERS) {
       return { ok: false, code: 'too_few', message: '至少要有 ' + P.GAME.MIN_PLAYERS + ' 个人才能开局' };
     }
-    this.rounds = clampInt(rounds, P.GAME.DEFAULT_ROUNDS, 1, P.GAME.MAX_ROUNDS);
+    this.rounds = clampInt(opts.rounds, P.GAME.DEFAULT_ROUNDS, 1, P.GAME.MAX_ROUNDS);
+    this.theme = (opts.theme && THEMES.hasTheme(opts.theme)) ? opts.theme : '';
+    this.themeName = this.theme ? THEMES.nameOf(this.theme) : '';
+    const sec = Math.floor(Number(opts.drawSeconds));
+    this.drawMs = (isFinite(sec) && sec > 0)
+      ? clampInt(sec, P.GAME.DRAW_SECONDS_DEFAULT, P.GAME.DRAW_SECONDS_MIN, P.GAME.DRAW_SECONDS_MAX) * 1000
+      : 0;
     this.round = 0;
     this.usedWords = [];
     this.roundResult = null;
@@ -248,7 +272,7 @@ class Game {
 
     this.drawerId = pickId;
     this.drawerName = this.names.get(pickId) || '某人';
-    this.choices = WORDS.pickChoices(P.GAME.CHOICES, this.usedWords);
+    this.choices = WORDS.pickChoices(P.GAME.CHOICES, this.usedWords, WORDS.poolForTheme(this.theme));
     this.word = this.choices.length === 1 ? this.choices[0] : '';
 
     // 新回合一律从干净画布开始（服务端清空 + 广播，客户端跟着重建）
@@ -267,13 +291,14 @@ class Game {
   beginDraw() {
     if (!this.word) return this.toLobby('词库取词失败');
     this.phase = PHASE.DRAW;
-    this.deadline = Date.now() + CFG.ROUND_MS;
+    this.deadline = Date.now() + this.roundMs();
     this.guessed = new Map();
     this.guessOrder = [];
     if (this.usedWords.indexOf(this.word) < 0) this.usedWords.push(this.word);
     this.api.sync();
     this.api.systemChat('开始作画！' + this.drawerName + ' 画的是 ' + this.word.length
-      + ' 个字，其他人请在聊天框里猜（' + Math.round(CFG.ROUND_MS / 1000) + ' 秒）');
+      + ' 个字（' + (this.themeName ? '词库：' + this.themeName + '，' : '通用词库，')
+      + Math.round(this.roundMs() / 1000) + ' 秒），其他人请在聊天框里猜');
   }
 
   /** 选词超时：随便挑一个，别让全场干等 */
@@ -325,7 +350,7 @@ class Game {
    */
   maybeHint(nowMs) {
     if (this.hintShown || this.phase !== PHASE.DRAW) return;
-    const hintAt = this.deadline - Math.round(CFG.ROUND_MS * (1 - P.GAME.HINT_RATIO));
+    const hintAt = this.deadline - Math.round(this.roundMs() * (1 - P.GAME.HINT_RATIO));
     if (nowMs < hintAt) return;
     this.hintShown = true;
 
@@ -379,11 +404,32 @@ class Game {
     return { kind: 'wrong' };
   }
 
-  /** 这条发言该不该被广播出去（游戏中的防剧透规则） */
-  chatLeaksAnswer(userId) {
+  /**
+   * 这条发言该不该被广播出去（游戏中的防剧透规则）。
+   * 画手和**已经猜对的人**都可以发言（用户要求：能给提示 / 照常聊天），
+   * 但话里不能带着答案 —— 「脖子长」可以，「长颈鹿」不行，
+   * 连答案每个字都出现也不行（等于把词拼出来了）。
+   * 带了答案的消息不外发，只给本人一条私密提醒。
+   */
+  chatLeaksAnswer(userId, text) {
     if (!this.isPlaying()) return false;
-    if (userId === this.drawerId) return true;              // 画手说话必然泄题
-    return this.guessed.has(userId);                        // 猜对的人再说话就会剧透
+    const knows = userId === this.drawerId || this.guessed.has(userId);
+    if (!knows) return false;
+    return text ? this.messageContainsAnswer(text) : false;
+  }
+
+  /** 画手的提示消息有没有把答案带出去（整词命中，或答案的每个字都出现） */
+  messageContainsAnswer(text) {
+    if (!this.word) return false;
+    const w = P.normGuess(this.word);
+    const t = P.normGuess(text);
+    if (!w || !t) return false;
+    if (t.indexOf(w) >= 0) return true;
+    if (w.length >= 2) {
+      const chars = Array.from(w);
+      if (chars.every(ch => t.indexOf(ch) >= 0)) return true;
+    }
+    return false;
   }
 
   /** 某人猜对了之后的收尾：全员猜出就直接结束这一回合 */

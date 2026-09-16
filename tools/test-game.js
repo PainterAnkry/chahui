@@ -174,7 +174,7 @@ async function main() {
 
   /* ---------------- 开局 ---------------- */
   console.log('\n[3] 开局与选词');
-  A.send(P.C2S.GAME_START, { rounds: 2 });
+  A.send(P.C2S.GAME_START, { rounds: 2, drawSeconds: 60 });   // 作画时限放宽到 60s：后面的聊天/撤回断言不用跟 2.5s 的压缩回合抢时间
   const started = await waitFor(() => A.gstate && (A.phase() === 'pick' || A.phase() === 'draw'), 4000, '开局');
   ok('房主开局成功', started);
 
@@ -295,12 +295,37 @@ async function main() {
     drawerScore && drawerScore.score === P.GAME.DRAWER_POINT_PER_GUESS,
     'drawerScore=' + (drawerScore && drawerScore.score));
 
-  // 已经猜对的人再说话也会剧透 → 拦下
-  const afterText = '答案是' + word + '啦';
-  others[0].send(P.C2S.CHAT, { text: afterText });
+  // 已经猜对的人再说话：不带答案照常公开（用户反馈：猜对的人也要能聊天）
+  // （发消息之间要隔开 250ms 以上 —— 服务端对刷屏有限流，隔太近会被静默吞掉）
+  await sleep(300);
+  const guessedChat = '我也给个提示：它生活在草原上';
+  others[0].send(P.C2S.CHAT, { text: guessedChat });
+  ok('已猜对者不带答案的发言照常公开',
+    await waitFor(() => others[1].msgs(P.S2C.CHAT).some(m => m.text === guessedChat), 4000, '广播'));
+
+  // 带答案（整词）的发言仍然拦下 —— 画手和已猜对者一视同仁
+  await sleep(300);
+  const guessedLeak = '答案是' + word + '啦';
+  others[0].send(P.C2S.CHAT, { text: guessedLeak });
   await sleep(400);
-  ok('已猜对者的发言也被拦下',
-    !others[1].msgs(P.S2C.CHAT).some(m => m.text === afterText));
+  ok('已猜对者带答案的发言被拦下',
+    !others[1].msgs(P.S2C.CHAT).some(m => m.text === guessedLeak));
+
+  // 把答案的每个字都拼进消息也算泄题（比如「长呀颈鹿」），整词没连着出现也要拦
+  await sleep(300);
+  const scattered = word.slice(0, 1) + '呀' + word.slice(1);
+  drawer.send(P.C2S.CHAT, { text: scattered });
+  await sleep(400);
+  ok('答案的字全出现（没连着写）也被拦下',
+    !others.some(c => c.msgs(P.S2C.CHAT).some(m => m.text === scattered)),
+    'scattered=' + JSON.stringify(scattered));
+
+  // 画手给普通提示：话里不带答案 → 正常广播（用户反馈：画手要能聊天给提示）
+  const drawerHint = '画个提示：脖子上长着毛';
+  drawer.send(P.C2S.CHAT, { text: drawerHint });
+  ok('画手不带答案的提示会广播出去',
+    await waitFor(() => others.every(c => c.msgs(P.S2C.CHAT).some(m => m.text === drawerHint)),
+      4000, '提示广播'));
 
   /* ---------------- 回合结算 ---------------- */
   console.log('\n[7] 回合结算与下一回合');
@@ -312,6 +337,16 @@ async function main() {
   ok('结算原因标记为 all', rr.reason === 'all', 'reason=' + rr.reason);
   ok('结算里列出了猜对的人', Array.isArray(rr.guessed) && rr.guessed.length === 2,
     'guessed=' + ((rr.guessed || []).length));
+
+  // round_end 对所有人 lockedFor=true —— 但画手收拾自己刚画的笔迹必须放行（用户实测反馈）
+  const lockedErrsBefore = drawer.msgs(P.S2C.ERROR).filter(e => e.code === 'game_locked').length;
+  drawer.send(P.C2S.STROKE_UNDO, { ids: [did] });
+  const undoOk = await waitFor(() =>
+    others.some(c => c.msgs(P.S2C.STROKE_REMOVED).some(
+      m => m.reason === 'undo' && (m.ids || []).indexOf(did) >= 0)), 4000, '结算阶段撤回');
+  ok('结算阶段画手撤回自己的笔迹被放行', undoOk);
+  ok('画手撤回没有收到 game_locked 错误',
+    drawer.msgs(P.S2C.ERROR).filter(e => e.code === 'game_locked').length === lockedErrsBefore);
 
   const nextRound = await waitFor(() => (others[0].phase() === 'pick' || others[0].phase() === 'draw') &&
     others[0].gstate.round === 2, 8000, '第 2 回合');
@@ -474,8 +509,50 @@ async function main() {
     ok('结束这一局，回到自由绘画', await waitFor(() => A.phase() === 'off', 5000, 'off'));
   }
 
+  /* ---------------- 开局设置：主题词库 + 自定义作画时长 ---------------- */
+  console.log('\n[12] 开局设置（主题词库 + 作画时限）');
+  {
+    // 词池纯函数：给了池就必须从池里取
+    const THEMES = require('../server/src/themes');
+    const W = require('../server/src/words');
+    const pool = THEMES.wordsOf('genshin');
+    ok('主题词池非空（genshin）', Array.isArray(pool) && pool.length > 0, pool && pool.length);
+    const picks = W.pickChoices(P.GAME.CHOICES, [], pool);
+    ok('pickChoices 按池取词',
+      picks.length === P.GAME.CHOICES && picks.every(w => pool.indexOf(w) >= 0),
+      JSON.stringify(picks));
+
+    // 线上：快照要带出本局的词库与作画时限
+    A.send(P.C2S.GAME_START, { rounds: 1, theme: 'genshin', drawSeconds: 45 });
+    const started = await waitFor(() => A.phase() === 'pick' || A.phase() === 'draw', 5000, '开局');
+    ok('带设置开局成功', started);
+    ok('快照带出主题 id 与名称',
+      A.gstate.theme === 'genshin' && !!A.gstate.themeName,
+      'theme=' + A.gstate.theme + ' name=' + A.gstate.themeName);
+    ok('快照带出自定义作画时长（45 秒）',
+      A.gstate.drawSeconds === 45, 'drawSeconds=' + A.gstate.drawSeconds);
+    // 注意：CHAHU_WORDS 环境变量优先级高于主题词库（words.js 的约定，测试靠它固定答案），
+    // 所以这里**不**断言答案真的来自 genshin —— 池子选择已被上面的纯函数断言覆盖
+    A.send(P.C2S.GAME_STOP, {});
+    ok('停局', await waitFor(() => A.phase() === 'off', 5000, 'off'));
+
+    A.send(P.C2S.GAME_START, { rounds: 1, drawSeconds: 99999 });
+    await waitFor(() => A.phase() === 'pick' || A.phase() === 'draw', 5000);
+    ok('超上限的作画时长被收到 300 秒',
+      A.gstate.drawSeconds === 300, 'drawSeconds=' + A.gstate.drawSeconds);
+    A.send(P.C2S.GAME_STOP, {});
+    await waitFor(() => A.phase() === 'off', 5000);
+
+    A.send(P.C2S.GAME_START, { rounds: 1, drawSeconds: 3 });
+    await waitFor(() => A.phase() === 'pick' || A.phase() === 'draw', 5000);
+    ok('低于下限的作画时长被抬到 30 秒',
+      A.gstate.drawSeconds === 30, 'drawSeconds=' + A.gstate.drawSeconds);
+    A.send(P.C2S.GAME_STOP, {});
+    ok('停局', await waitFor(() => A.phase() === 'off', 5000, 'off'));
+  }
+
   /* ---------------- 单字答案不该被判「接近」 ---------------- */
-  console.log('\n[12] 单字答案不再误报「很接近了」（纯协议函数）');
+  console.log('\n[13] 单字答案不再误报「很接近了」（纯协议函数）');
   // 单字答案的编辑距离恒为 1，以前猜任何字都会回一句「很接近了」——既谎报又泄题。
   // 词库里也不该再有单字词（words.js 启动时自检会拦）。
   ok('单字答案不再被判「接近」', P.isNearGuess('狗', '猫') === false,
@@ -485,7 +562,7 @@ async function main() {
   ok('词库里没有单字词', require('../server/src/words.js').WORDS.every(w => w.length >= 2));
 
   /* ---------------- 收尾 ---------------- */
-  console.log('\n[13] 收尾');
+  console.log('\n[14] 收尾');
   A.send(P.C2S.ROOM_DESTROY, {});
   ok('房间可以正常解散', await waitFor(() => clients.every(c => c.msgs(P.S2C.ROOM_DESTROYED).length > 0), 5000));
   clients.forEach(c => c.close());

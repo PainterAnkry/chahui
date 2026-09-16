@@ -326,9 +326,10 @@ function gameOf(room, mode) {
 }
 
 /**
- * 开一局指定玩法。两种玩法的 start() 签名不同：
- *   经典：start(rounds)              轮数
- *   接龙：start({ rounds, theme })   每条链走几圈 + 用哪个主题词库
+ * 开一局指定玩法。两种玩法的 start() 都收 { rounds, theme, drawSeconds }：
+ *   rounds      轮数（接龙 = 每条链走几圈）
+ *   theme       主题词库 id（'' = 通用词库）
+ *   drawSeconds 作画时限（秒，可省略 = 全局默认；限 30~300）
  */
 function startGameOf(room, mode, opts) {
   const g = gameOf(room, mode);
@@ -337,8 +338,13 @@ function startGameOf(room, mode, opts) {
     const label = running && GAME_MODES[running.mode] ? GAME_MODES[running.mode].label : '另一局游戏';
     return { ok: false, code: 'game_busy', message: '现在正在玩「' + label + '」，先点「结束游戏」再换' };
   }
-  if (g.mode === 'chain') return g.start(opts || {});
-  return g.start(opts ? opts.rounds : undefined);
+  const cfg = {
+    rounds: opts && opts.rounds,
+    theme: opts && opts.theme,
+    drawSeconds: opts && opts.drawSeconds
+  };
+  if (g.mode === 'chain') return g.start(cfg);
+  return g.start(cfg);
 }
 
 function makeGameApi(room) {
@@ -432,6 +438,25 @@ function gameBlocked(ws, room, member) {
   const msg = room.game.mode === 'chain'
     ? '接龙这一步轮不到你动笔'
     : '这一回合只有画手能改画布';
+  send(ws, P.S2C.ERROR, { code: 'game_locked', message: msg });
+  return true;
+}
+
+/**
+ * 撤回 / 重做自己的笔迹要不要拦。
+ * 画手在「回合结算」阶段（有人猜对 → 立刻进入 round_end）也该能收拾自己刚画的 ——
+ * lockedFor 在 round_end 对所有人返回 true，把画手的撤销也挡了（用户实测反馈）。
+ * 只放行**经典模式 + 当前（刚结束回合的）画手**：ids 过滤保证只能动自己的笔迹，
+ * 接龙不动（每一步的画要原样传下去），选词阶段也不动（画布必须保持干净）。
+ */
+function undoBlocked(ws, room, member) {
+  if (!room || !member || !room.game) return false;
+  if (!room.game.lockedFor(member.userId)) return false;
+  const g = room.game;
+  if (g.mode !== 'chain' && member.userId === g.drawerId && g.phase === 'round_end') return false;
+  const msg = g.mode === 'chain'
+    ? '接龙这一步轮不到你动笔'
+    : '现在不能改画布';
   send(ws, P.S2C.ERROR, { code: 'game_locked', message: msg });
   return true;
 }
@@ -921,7 +946,7 @@ function handle(ws, msg) {
 
     case P.C2S.STROKE_UNDO: {
       if (!room || !member || !Array.isArray(msg.ids)) return;
-      if (gameBlocked(ws, room, member)) return;
+      if (undoBlocked(ws, room, member)) return;
       const ids = msg.ids.filter(id => room.strokes.some(s => s.id === id && s.userId === member.userId));
       if (!ids.length) return;
       room.removeStrokes(ids);
@@ -933,7 +958,7 @@ function handle(ws, msg) {
 
     case P.C2S.STROKE_REDO: {
       if (!room || !member || !msg.stroke || typeof msg.stroke !== 'object') return;
-      if (gameBlocked(ws, room, member)) return;
+      if (undoBlocked(ws, room, member)) return;
       const s = msg.stroke;
       if (!s.id || !Array.isArray(s.points) || !s.points.length) return;
       if (room.strokes.some(k => k.id === s.id)) return;
@@ -1181,14 +1206,13 @@ function handle(ws, msg) {
         }
       }
 
-      // 防剧透：经典模式的画手发言必然泄题；已经猜对的人再说话也会把答案说出去。
-      // 这两种人的文字消息不外发（表情图没有泄题风险，照发）。
-      if (guessing && text && g.chatLeaksAnswer(member.userId)) {
+      // 防剧透：画手 / 已经猜对的人都可以发言（给提示 / 照常聊天），
+      // 但话里带着答案（整词、或答案的字全出现）就拦下，只回本人。
+      if (guessing && text && g.chatLeaksAnswer(member.userId, text)) {
         send(ws, P.S2C.CHAT, {
           id: P.rid('m'), userId: 'system', name: '系统', color: '#8b8b8b', system: true,
           ts: now,
-          text: (member.userId === g.drawerId ? '你是画手' : '你已经猜对了')
-            + '，这句话不会发出去（免得剧透）'
+          text: '这句话带着答案，不会发出去（可以给提示，但别把词说出来）'
         });
         if (!img) return;
       }

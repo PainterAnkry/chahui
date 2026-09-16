@@ -45,6 +45,7 @@
 
   <!-- ==================== 左：SAI2 风格面板 ==================== -->
   <aside class="panel left">
+    <div class="col-resizer" id="leftResizer" title="拖动调整左栏宽度"></div>
     <div class="panel-scroll" id="leftPanelScroll">
       <div class="panel-handle" id="panelHandle">
         <span class="panel-handle-grip">⋮⋮</span>
@@ -522,6 +523,7 @@
 
   <!-- ==================== 右：聊天 / 成员 / 笔迹 ==================== -->
   <aside class="panel right" id="sidePanel">
+    <div class="col-resizer" id="rightResizer" title="拖动调整右栏宽度"></div>
     <!-- 从左边拖过来的小节住这里；空着的时候自动收起来 -->
     <div class="panel-scroll right-sections empty" id="rightPanelScroll"></div>
     <div class="tabs">
@@ -670,6 +672,24 @@
     <div class="modal-foot">
       <button class="btn ghost" id="confirmNo">取消</button>
       <button class="btn primary" id="confirmYes">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 房间密码 ============ -->
+<div class="modal-mask hidden" id="passMask">
+  <div class="modal confirm">
+    <div class="modal-head">
+      <h3>此房间有密码</h3>
+    </div>
+    <div class="modal-body">
+      <p class="hint" id="passHint">输入密码进入。</p>
+      <input type="password" id="passInput" maxlength="32" placeholder="房间密码" autocomplete="off" />
+      <p class="hint warn hidden" id="passErr">密码不正确，再试一次。</p>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" id="btnPassCancel">取消</button>
+      <button class="btn primary" id="btnPassOk">进入</button>
     </div>
   </div>
 </div>
@@ -1018,6 +1038,24 @@
         </select>
         <span class="hint">每位画手出场的次数由回合数与人数共同决定</span>
       </div>
+      <div class="form-row">
+        <label>主题词库</label>
+        <select id="gameTheme"></select>
+        <span class="hint">只从选中的词库里出题（接龙面板里也能选）</span>
+      </div>
+      <div class="form-row">
+        <label>作画时间</label>
+        <select id="gameDrawTime">
+          <option value="">默认（80 秒）</option>
+          <option value="30">30 秒</option>
+          <option value="60">1 分钟</option>
+          <option value="90">1 分半</option>
+          <option value="120">2 分钟</option>
+          <option value="180">3 分钟</option>
+          <option value="300">5 分钟</option>
+        </select>
+        <span class="hint">每回合画手的作画时限</span>
+      </div>
       <p class="game-state" id="gameState">当前：自由绘画</p>
     </div>
     <div class="modal-foot">
@@ -1094,6 +1132,18 @@
         <select id="chainTheme"></select>
         <button class="mini" id="btnThemeManage" title="新建 / 编辑自定义词库">管理…</button>
         <span class="hint" id="chainThemeHint">选词时会优先给这个主题的词</span>
+      </div>
+      <div class="form-row">
+        <label>作画时间</label>
+        <select id="chainDrawTime">
+          <option value="">默认</option>
+          <option value="30">30 秒</option>
+          <option value="60">1 分钟</option>
+          <option value="90">1 分半</option>
+          <option value="120">2 分钟</option>
+          <option value="180">3 分钟</option>
+        </select>
+        <span class="hint">每一步「照词作画」的时限（写词 / 猜词另算）</span>
       </div>
       <p class="game-state" id="chainState">当前：自由绘画</p>
       <p class="hint" id="chainPlayers">需要 4 ~ 16 人</p>

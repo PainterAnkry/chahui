@@ -77,12 +77,13 @@ const WORDS = customWords() || DEFAULT_WORDS;
 }
 
 /** 已经用过的词不重复出；库见底了就允许重复（总比开不了局强） */
-function pickChoices(n, used) {
+function pickChoices(n, used, pool) {
+  const base = pool || WORDS;
   const usedSet = new Set(used || []);
-  let pool = WORDS.filter(w => !usedSet.has(w));
-  if (pool.length < n) pool = WORDS.slice();          // 词用光了，重新洗一轮
+  let avail = base.filter(w => !usedSet.has(w));
+  if (avail.length < n) avail = base.slice();          // 词用光了，重新洗一轮
   const out = [];
-  const copy = pool.slice();
+  const copy = avail.slice();
   while (out.length < n && copy.length) {
     const i = Math.floor(Math.random() * copy.length);
     out.push(copy.splice(i, 1)[0]);

@@ -29,6 +29,7 @@ const SUITE = [
   'test-cansize.js',
   'test-collab-view.js',
   'test-chain-ui.js',
+  'test-passkeys.js',
   'test-chain-sim.js',
   'test-theme-ui.js',
   'verify-issues.js',
