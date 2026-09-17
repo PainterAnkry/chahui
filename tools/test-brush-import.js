@@ -192,6 +192,158 @@ function check(name, ok, extra) {
   check('.sut：扫出 1 张笔尖 PNG', sut.n === 1, String(sut.n));
   check('.sut：PNG 完整取到（含 IEND）', sut.pngLen === sut.expect, sut.pngLen + ' / ' + sut.expect);
 
+  // 完整 parse() 一遍：笔尖必须真的被解出来 —— 回归「png 只存不解码、
+  // 导出来的全是圆头空壳」的 bug（真实 CSP sample.sut 上踩过）
+  const sutTip = await page.evaluate(() => {
+    const c = document.createElement('canvas');
+    c.width = c.height = 24;
+    const cx = c.getContext('2d');
+    const g = cx.createRadialGradient(12, 12, 0, 12, 12, 12);
+    g.addColorStop(0, 'rgba(0,0,0,1)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    cx.fillStyle = g; cx.fillRect(0, 0, 24, 24);
+    const png = Uint8Array.from(atob(c.toDataURL('image/png').split(',')[1]), ch => ch.charCodeAt(0));
+    const head = new Uint8Array(64);
+    const magic = 'SQLite format 3\0';
+    for (let i = 0; i < magic.length; i++) head[i] = magic.charCodeAt(i);
+    const all = new Uint8Array(head.length + png.length + 8);
+    all.set(head, 0); all.set(png, head.length);
+    const r = window.ChaBrushImport.parse('x.sut', all);
+    const b = r.brushes[0] || {};
+    return { n: r.brushes.length, tip: (b.tip || '').length, dia: b.diameter, hard: b.hardness };
+  });
+  check('.sut：parse() 出来的笔真的带笔尖位图（空壳 bug 回归）', sutTip.tip > 100, String(sutTip.tip));
+  check('.sut：直径 / 硬度也从笔尖推出来了', sutTip.dia === 24 && sutTip.hard > 0, sutTip.dia + ' / ' + sutTip.hard);
+
+  // SQLite 头但没有图 → 必须「配置型」明确拒绝，不许含糊
+  const sutCfg = await page.evaluate(() => {
+    const head = 'SQLite format 3\0';
+    const all = new Uint8Array(300);
+    for (let i = 0; i < head.length; i++) all[i] = head.charCodeAt(i);
+    try { window.ChaBrushImport.parse('cfg.sut', all); return 'no-error'; }
+    catch (e) { return e.message; }
+  });
+  check('.sut：SQLite 但没图 → 明确说「配置型」', /配置型/.test(sutCfg), sutCfg);
+
+  /* ---------- 5b) .sut：SQLite 跨溢出页（真实 CSP 里 blob 都是被切碎存的） ---------- */
+  console.log('\n=== .sut（SQLite 跨溢出页：blob 被切碎也要按链拼回来） ===');
+  const sqliteSut = await page.evaluate(() => {
+    // 8×8 软圆点 PNG
+    const c = document.createElement('canvas');
+    c.width = c.height = 8;
+    const cx = c.getContext('2d');
+    const g = cx.createRadialGradient(4, 4, 0, 4, 4, 4);
+    g.addColorStop(0, 'rgba(0,0,0,1)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    cx.fillStyle = g; cx.fillRect(0, 0, 8, 8);
+    const png = Uint8Array.from(atob(c.toDataURL('image/png').split(',')[1]), ch => ch.charCodeAt(0));
+
+    const PS = 512;                                  // 故意用最小页，逼 blob 跨页
+    function varint(v) {
+      const d = [];
+      if (v === 0) d.push(0);
+      else { while (v > 0) { d.unshift(v & 127); v = Math.floor(v / 128); } }
+      return d.map((x, i) => (i === d.length - 1 ? x : 128 | x));
+    }
+    function set(u8, pos, arr) { for (let i = 0; i < arr.length; i++) u8[pos + i] = arr[i]; }
+    function u32a(v) { return [(v >>> 24) & 255, (v >> 16) & 255, (v >> 8) & 255, v & 255]; }
+
+    function tarMember(name, data) {
+      const head = new Uint8Array(512);
+      for (let i = 0; i < name.length && i < 100; i++) head[i] = name.charCodeAt(i);
+      const oct = data.length.toString(8);
+      const sf = ('00000000000' + oct).slice(-11) + '\0';      // 12 字节八进制
+      for (let i = 0; i < 12; i++) head[124 + i] = sf.charCodeAt(i);
+      const magic = 'ustar\0';
+      for (let i = 0; i < 6; i++) head[257 + i] = magic.charCodeAt(i);
+      for (let i = 148; i < 156; i++) head[i] = 32;          // 校验和占位，解析器不查
+      const out = new Uint8Array(1024);                      // 512 头 + 512 数据槽
+      out.set(head, 0); out.set(data, 512);
+      return out;
+    }
+    const blob = tarMember('mytip.png', png);                // 1024B，肯定跨页
+
+    // record：varint(headerLen) + serial types + 值
+    function rec(cols) {
+      const types = [], vals = [];
+      for (const c of cols) {
+        if (c.t === 'txt') {
+          const n = c.v.length; types.push(13 + 2 * n);
+          const b = new Uint8Array(n);
+          for (let i = 0; i < n; i++) b[i] = c.v.charCodeAt(i);
+          vals.push(b);
+        } else if (c.t === 'int') {
+          const v = c.v;
+          if (v >= 0 && v < 128) { types.push(1); vals.push(new Uint8Array([v])); }
+          else { types.push(2); vals.push(new Uint8Array([(v >> 8) & 255, v & 255])); }
+        } else { types.push(12 + 2 * c.v.length); vals.push(c.v); }
+      }
+      const tb = [];
+      for (const ty of types) tb.push(...varint(ty));
+      const out = new Uint8Array(1 + tb.length + vals.reduce((s, v) => s + v.length, 0));
+      out[0] = tb.length + 1;          // SQLite 规范：header size 含它自己这 1 字节
+      set(out, 1, tb);
+      let o = 1 + tb.length;
+      for (const v of vals) { set(out, o, v); o += v.length; }
+      return out;
+    }
+
+    // 表叶子页：cells = 完整的字节数组（调用方自己拼好 varint/rowid/内联+溢出指针）
+    function leaf(pageNo, cells) {
+      const page = new Uint8Array(PS);
+      const hdr = pageNo === 1 ? 100 : 0;
+      page[hdr] = 13;
+      let content = PS;
+      const ptrs = [];
+      for (let i = cells.length - 1; i >= 0; i--) {          // 从页尾往前放
+        content -= cells[i].length;
+        set(page, content, cells[i]);
+        ptrs[i] = content;
+      }
+      page[hdr + 3] = cells.length >> 8; page[hdr + 4] = cells.length & 255;
+      page[hdr + 5] = content >> 8; page[hdr + 6] = content & 255;
+      for (let i = 0; i < cells.length; i++) {
+        page[hdr + 8 + i * 2] = ptrs[i] >> 8; page[hdr + 8 + i * 2 + 1] = ptrs[i] & 255;
+      }
+      return page;
+    }
+
+    // page1：sqlite_master（带 100 字节文件头）。cell = varint(长度) + varint(rowid) + record
+    const masterRec = rec([
+      { t: 'txt', v: 'table' }, { t: 'txt', v: 'MaterialFile' }, { t: 'txt', v: 'MaterialFile' },
+      { t: 'int', v: 2 }, { t: 'txt', v: 'CREATE TABLE MaterialFile (_PW_ID INTEGER, FileData BLOB)' }
+    ]);
+    const p1 = leaf(1, [new Uint8Array([...varint(masterRec.length), ...varint(1), ...masterRec])]);
+    const magic = 'SQLite format 3\0';
+    for (let i = 0; i < magic.length; i++) p1[i] = magic.charCodeAt(i);
+    p1[16] = PS >> 8; p1[17] = PS & 255;                     // 页大小
+
+    // page2：MaterialFile 行（_PW_ID int + FileData blob）。注意 cell 的 payload 长度
+    // 是**整条记录**（头 + int + blob），不是 blob 本身——别再写错了
+    const mfRec = rec([{ t: 'int', v: 1 }, { t: 'blob', v: blob }]);
+    const P = mfRec.length;                                   // 1029
+    const U = PS;                                             // reserved=0
+    const X = U - 35;
+    const M = Math.floor((U - 12) * 32 / 255) - 23;
+    const K = M + ((P - M) % (U - 4));
+    const local = K <= X ? K : M;                             // 1029 → 39
+    const cell = [...varint(P), ...varint(1), ...mfRec.slice(0, local), ...u32a(3)];
+    const p2 = leaf(2, [new Uint8Array(cell)]);
+    // page3/page4：溢出链 3 → 4 → 0
+    const p3 = new Uint8Array(PS); set(p3, 0, u32a(4)); set(p3, 4, mfRec.slice(local, local + U - 4));
+    const p4 = new Uint8Array(PS); set(p4, 0, u32a(0)); set(p4, 4, mfRec.slice(local + U - 4));
+
+    const all = new Uint8Array(PS * 4);
+    set(all, 0, p1); set(all, PS, p2); set(all, PS * 2, p3); set(all, PS * 3, p4);
+    const r = window.ChaBrushImport.parse('chopped.sut', all);
+    return { n: r.brushes.length, names: r.brushes.map(b => b.name),
+      tips: r.brushes.map(b => (b.tip || '').length), dias: r.brushes.map(b => b.diameter) };
+  });
+  check('.sut：跨页 blob 拼回来并解出笔尖', sqliteSut.n === 1, JSON.stringify(sqliteSut));
+  check('.sut：笔名来自 tar 成员名「mytip」', sqliteSut.names[0] === 'mytip', JSON.stringify(sqliteSut.names));
+  check('.sut：拼回的笔尖带位图且直径 8', sqliteSut.tips[0] > 50 && sqliteSut.dias[0] === 8,
+    'tip=' + sqliteSut.tips[0] + ' dia=' + sqliteSut.dias[0]);
+
   /* ---------- 6) 端到端：导入 → 出现在笔刷栏 → 画得出笔尖形状 ---------- */
   console.log('\n=== 端到端：导入后真的能画出笔尖形状 ===');
   const e2e = await page.evaluate(async () => {

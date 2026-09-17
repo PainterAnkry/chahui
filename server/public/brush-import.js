@@ -20,9 +20,16 @@
  *       'desc' 块里是笔刷动态参数（这里不解析，形状和间距已经够用了）
  *
  *   .sut（CSP）
- *     文件里嵌了一个 SQLite 库，笔尖是 PNG，直接按 PNG 签名 → IEND 扫出来即可，
- *     不需要实现 SQLite。CSP 的数值参数（BrushSize/BrushInterval 等）存在 SQLite 表里，
- *     这里不去读，形状和尺寸从笔尖本身推。
+ *     文件本体就是一个 SQLite 库（头 16 字节 "SQLite format 3\0"），笔尖图以 blob 藏在
+ *     表里（MaterialFile.FileData 是个 tar 包，成员才是真正的图）。提取分两路：
+ *       ① tar 成员：扫 "ustar" 魔数按成员边界取图，成员名还能当笔名
+ *         （thumbnail/ 这种名字不当笔名，但图照样收——有的笔尖就存在那）；
+ *       ② 兜底裸扫 PNG 签名 → IEND（覆盖图不在 tar 成员头上的情况）。
+ *     两路合并、按内容去重、逐张解码成灰度笔尖。**解不出来就跳过**——
+ *     宁可少给一支，也绝不交付没有笔尖的笔（png 只存不解码的教训：导出来的全是圆头空壳）。
+ *     一张内嵌图都没有时明确报错：是 SQLite → 「配置型 .sut」（笔尖引外部素材）；
+ *     不是 SQLite → 多半是 SAI 的笔刷形状（裸灰度位图）。这两种暂不支持。
+ *     CSP 的数值参数（BrushSize/BrushInterval 等）也在库里，暂不读，形状从笔尖推。
  *
  * 位图压缩：0 = 原样，1 = PackBits。
  *
@@ -268,13 +275,18 @@
   /* ============================================================ .sut */
 
   var PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-  function findPngs(bytes) {
+  function isPngAt(bytes, i) {
+    if (i < 0 || i + 8 > bytes.length) return false;
+    for (var k = 0; k < 8; k++) if (bytes[i + k] !== PNG_SIG[k]) return false;
+    return true;
+  }
+
+  /** 裸扫：PNG 签名 → IEND，返回 [{start,end}] */
+  function findPngRanges(bytes) {
     var found = [];
     var i = 0;
     while (i < bytes.length - 8) {
-      var hit = true;
-      for (var k = 0; k < 8; k++) if (bytes[i + k] !== PNG_SIG[k]) { hit = false; break; }
-      if (!hit) { i++; continue; }
+      if (!isPngAt(bytes, i)) { i++; continue; }
       // 从签名往后找 IEND，取整个 PNG
       var j = i + 8, end = -1;
       while (j < bytes.length - 8) {
@@ -285,19 +297,232 @@
         j++;
       }
       if (end < 0) break;
-      found.push(bytes.slice(i, end));
+      found.push({ start: i, end: end });
       i = end;
     }
     return found;
   }
 
+  /** 扫 tar 成员（ustar 魔数在 +257）。CSP 把笔尖图用 tar 包着塞进 SQLite 的 blob。 */
+  function findTarMembers(bytes) {
+    var out = [];
+    var i = 0;
+    while (i + 512 <= bytes.length) {
+      if (asciiOf(bytes, i + 257, 5) !== 'ustar') { i++; continue; }
+      var name = asciiOf(bytes, i, 100).replace(/\0[\s\S]*$/, '');
+      var prefix = asciiOf(bytes, i + 345, 155).replace(/\0[\s\S]*$/, '');
+      if (prefix && name) name = prefix + '/' + name;
+      var size = parseInt(asciiOf(bytes, i + 124, 12), 8);
+      if (!(size >= 0)) size = 0;
+      var start = i + 512;
+      if (start + size > bytes.length) break;   // 尺寸坏掉就别再按它往前跳
+      out.push({ name: name, start: start, size: size });
+      i = start + Math.ceil(size / 512) * 512;
+    }
+    return out;
+  }
+
+  /** 内容级去重：同张图在库里常出现多次（mipmap / 多处引用） */
+  function quickHash(b) {
+    var h = b.length;
+    var step = Math.max(1, (b.length / 32) | 0);
+    for (var i = 0; i < b.length; i += step) h = ((((h << 5) - h) + b[i]) & 0xffffffff) >>> 0;
+    return h;
+  }
+
+  /** tar 成员名 → 笔名。thumbnail/preview 这种不算名字，返回空走默认编号 */
+  function tipNameFromPath(p) {
+    if (!p) return '';
+    var base = String(p).split('/').pop() || '';
+    base = base.replace(/\.[a-z0-9]{1,5}$/i, '').replace(/[\\/:*?"<>|\x00-\x1f]/g, '').trim();
+    if (!base || /^(thumbnail|thumb|preview|image|img)$/i.test(base)) return '';
+    return base.slice(0, 24);
+  }
+
+  function sutUnsupportedMsg(bytes) {
+    if (bytes.length >= 15 && asciiOf(bytes, 0, 15) === 'SQLite format 3') {
+      return '这是 CSP 的「配置型」.sut：笔刷参数在库里，但笔尖引用的是外部素材，文件里没有内嵌笔尖图，茶绘暂时导不了这种；可以在 CSP 里换一支内嵌笔尖的笔刷导出再试';
+    }
+    return '这个 .sut 里没找到可用的笔尖图片——可能是 SAI 的笔刷形状文件（裸灰度位图，茶绘暂不支持），或文件已损坏';
+  }
+
+  // 记录格式：header 长度 varint + serial types + 值。取 int / text / blob。
+  // （模块级：sqliteTableBlobs 用它解每行，测试也能直接打到它）
+  function recordValues(pl) {
+    function vint(p) {
+      var v = 0, i, b;
+      for (i = 0; i < 8; i++) {
+        b = pl[p + i];
+        v = v * 128 + (b & 0x7f);
+        if (!(b & 0x80)) return { val: v, next: p + i + 1 };
+      }
+      return { val: v * 256 + pl[p + 8], next: p + 9 };
+    }
+    var h = vint(0);
+    var types = [], p = h.next, t;
+    while (p < h.val) { t = vint(p); types.push(t.val); p = t.next; }
+    var out = [], q = h.val, i, n, val, k, ty;
+    for (i = 0; i < types.length; i++) {
+      ty = types[i];
+      val = null; n = 0;
+      if (ty >= 12 && ty % 2 === 0) { n = (ty - 12) / 2; val = pl.subarray(q, q + n); }
+      else if (ty >= 13) {
+        n = (ty - 13) / 2; val = '';
+        for (k = 0; k < n; k++) val += String.fromCharCode(pl[q + k]);
+      } else if (ty >= 1 && ty <= 6) {
+        n = (ty === 1 ? 1 : ty === 2 ? 2 : ty === 3 ? 3 : ty === 4 ? 4 : ty === 5 ? 6 : 8);
+        val = 0;
+        var neg = (pl[q] & 0x80) !== 0;
+        for (k = 0; k < n; k++) val = val * 256 + pl[q + k];
+        if (neg) val -= Math.pow(256, n);
+      } else if (ty === 7 || ty === 8 || ty === 9) { n = ty === 7 ? 8 : 0; val = ty === 9 ? 1 : 0; }
+      /* 0 / 10 / 11 → NULL，n=0 */
+      out.push(val);
+      q += n;
+    }
+    return out;
+  }
+
+  /* ---------- 最小 SQLite 读取（只为把 blob 完整拼回来） ----------
+   * CSP 的 .sut 是个 SQLite 库，大 blob（笔尖 tar 包）会跨「溢出页」存储：
+   * 每个溢出页开头有 4 字节「下一页号」，所以**裸字节里的 PNG 是被切碎的**，
+   * 签名扫出来也解不开（deflate 提前结束）。这里实现刚好够用的读取：
+   * 表 btree 遍历 + 记录解析 + 溢出链拼接。不做 SQL、不管索引/空闲页。
+   */
+  function sqliteTableBlobs(bytes, wantTable) {
+    var pageSize = (bytes[16] << 8) | bytes[17];
+    if (pageSize === 1) pageSize = 65536;
+    if (pageSize < 512 || (pageSize & (pageSize - 1)) !== 0) throw new Error('SQLite 页大小不对');
+    var usable = pageSize - bytes[20];
+    if (usable < 480) throw new Error('SQLite 可用页大小不对');
+
+    function u32(p) { return ((bytes[p] << 24) | (bytes[p + 1] << 16) | (bytes[p + 2] << 8) | bytes[p + 3]) >>> 0; }
+    function u16(p) { return (bytes[p] << 8) | bytes[p + 1]; }
+    function varint(p) {
+      var v = 0, i, b;
+      for (i = 0; i < 8; i++) {
+        b = bytes[p + i];
+        v = v * 128 + (b & 0x7f);
+        if (!(b & 0x80)) return { val: v, next: p + i + 1 };
+      }
+      return { val: v * 256 + bytes[p + 8], next: p + 9 };
+    }
+    function pageBase(n) { return (n - 1) * pageSize; }
+
+    // 读一个 cell 的 payload；超过本地阈值的部分沿溢出链拼回来
+    function readPayload(off, total) {
+      var X = usable - 35;
+      if (total <= X) return bytes.subarray(off, off + total);
+      var M = (((usable - 12) * 32) / 255 - 23) | 0;
+      var K = M + ((total - M) % (usable - 4));
+      var local = K <= X ? K : M;
+      var parts = [bytes.subarray(off, off + local)];
+      var left = total - local;
+      var next = u32(off + local);
+      var guard = 0;
+      while (next > 0 && left > 0 && guard++ < 100000) {
+        if (next * pageSize > bytes.length) throw new Error('溢出链指向页外');
+        var pb = pageBase(next);
+        var take = Math.min(left, usable - 4);
+        parts.push(bytes.subarray(pb + 4, pb + 4 + take));
+        left -= take;
+        next = u32(pb);
+      }
+      if (left > 0) throw new Error('溢出链提前结束');
+      return concatBytes(parts);
+    }
+
+    // 遍历一张表 btree，对每个叶子行 payload 调 cb；单行坏不拖垮整表
+    function walkTable(pageNo, cb, depth) {
+      if (depth > 30 || pageNo < 1 || pageNo * pageSize > bytes.length) return;
+      var base = pageBase(pageNo);
+      var hdr = base + (pageNo === 1 ? 100 : 0);
+      var type = bytes[hdr];
+      var ncells = u16(hdr + 3);
+      var i, cellPtr, off;
+      if (type === 5) {                           // 内部页：孩子指针 + 最右指针
+        cellPtr = hdr + 12;
+        for (i = 0; i < ncells; i++) {
+          off = base + u16(cellPtr + i * 2);
+          walkTable(u32(off), cb, depth + 1);
+        }
+        walkTable(u32(hdr + 8), cb, depth + 1);
+      } else if (type === 13) {                   // 表叶子页
+        cellPtr = hdr + 8;
+        for (i = 0; i < ncells; i++) {
+          off = base + u16(cellPtr + i * 2);
+          var pLen = varint(off);
+          var rid = varint(pLen.next);
+          try { cb(readPayload(rid.next, pLen.val)); } catch (e) { /* 跳过坏行 */ }
+        }
+      }
+    }
+
+    // 记录解析用模块级的 recordValues()
+
+    // sqlite_master：type, name, tbl_name, rootpage, sql —— 找目标表的根页
+    var root = 0;
+    walkTable(1, function (row) {
+      var cols = recordValues(row);
+      if (cols.length >= 4 && cols[1] === wantTable && typeof cols[3] === 'number') root = cols[3];
+    }, 0);
+    if (!root) throw new Error('库里没有 ' + wantTable + ' 表');
+    var blobs = [];
+    walkTable(root, function (row) {
+      var cols = recordValues(row);
+      cols.forEach(function (c) {
+        if (c && typeof c === 'object' && c.length > 0) blobs.push(c);   // Uint8Array = blob
+      });
+    }, 0);
+    return blobs;
+  }
+
   function parseSut(buf) {
     var bytes = asBytes(buf);
-    var pngs = findPngs(bytes);
-    if (!pngs.length) throw new Error('这个 .sut 里没找到笔尖图片（可能不是 CSP 笔刷文件）');
-    return { version: 0, brushes: pngs.map(function (b, i) {
-      return { png: b, name: 'CSP 笔刷 ' + (i + 1), spacing: 0.1 };
-    }) };
+    var cands = [];
+
+    function offer(name, data) { cands.push({ name: name, data: data }); }
+
+    // ① 正路：走 SQLite 把 MaterialFile 的 blob 按溢出链拼回来（blob 是 tar，成员名可当笔名）
+    try {
+      sqliteTableBlobs(bytes, 'MaterialFile').forEach(function (blob) {
+        findTarMembers(blob).forEach(function (m) {
+          if (m.size > 0 && isPngAt(blob, m.start)) offer(m.name, blob.subarray(m.start, m.start + m.size));
+        });
+        findPngRanges(blob).forEach(function (r) {
+          offer('', blob.subarray(r.start, r.end));
+        });
+      });
+    } catch (e) { /* 不是 SQLite / 没有该表 → 走兜底 */ }
+
+    // ② 兜底：整文件裸扫。跨页切碎的 PNG 解码会失败、自动跳过；
+    //    整段放进一页的小图、图不在 MaterialFile 表里的场合，靠这条路吃到。
+    findTarMembers(bytes).forEach(function (m) {
+      if (m.size > 0 && isPngAt(bytes, m.start)) offer(m.name, bytes.subarray(m.start, m.start + m.size));
+    });
+    findPngRanges(bytes).forEach(function (r) {
+      offer('', bytes.subarray(r.start, r.end));
+    });
+
+    var seen = {};
+    var brushes = [];
+    cands.forEach(function (c) {
+      var key = c.data.length + ':' + quickHash(c.data);
+      if (seen[key]) return;
+      seen[key] = 1;
+      var img;
+      try { img = decodePngGray(c.data); } catch (e) { return; }   // 解不出就跳过
+      if (img.w < 4 || img.h < 4) return;                          // 太小的不可能是笔尖
+      brushes.push({
+        name: tipNameFromPath(c.name),
+        spacing: 0.1,
+        gray: img.gray, w: img.w, h: img.h,
+        png: c.data
+      });
+    });
+    if (!brushes.length) throw new Error(sutUnsupportedMsg(bytes));
+    brushes.forEach(function (b, i) { if (!b.name) b.name = 'CSP 笔刷 ' + (i + 1); });
+    return { version: 0, brushes: brushes };
   }
 
   /* ============================================================ Procreate 底层 */
@@ -1086,6 +1311,7 @@
         b.diameter = Math.max(b.w, b.h);
       }
       delete b.gray;
+      delete b.png;   // 原始 PNG 不许跟着记录走（体积太大，localStorage 会爆）
     });
     return { kind: kind, version: res.version, brushes: res.brushes };
   }

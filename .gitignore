@@ -34,3 +34,5 @@ client/build/icon-red-backup.png
 
 # DSH 工作记忆（本地笔记，不发布）
 .workbuddy/
+# 本地 .sut 样本库（真实 CSP 文件，不入库）
+tools/_sut-lab/
