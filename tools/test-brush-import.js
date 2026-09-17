@@ -1,11 +1,14 @@
 /**
- * 笔刷导入回归：PS `.abr`（v1/v2 与 v6+）与 CSP `.sut` 的解析 + 笔尖渲染。
+ * 笔刷导入回归：PS `.abr`（v1/v2 与 v6+）、CSP `.sut`、Procreate `.brush` 的解析 + 笔尖渲染。
  *
  * ⚠️ 关于测试的诚实说明：这台机器上没有真实的 Photoshop / CSP 笔刷文件，
- * 所以这里用的是**按格式规范自己构造的样本**（写字节 → 解析回来）。
+ * 所以 .abr / .sut 用的是**按格式规范自己构造的样本**（写字节 → 解析回来）。
  * 这能证明解析器和渲染链路是对的，但**不能**证明它能吃下你手上的每一个真实文件。
  * 拿到真实文件后如果解析失败，把文件名和现象告诉我 —— 解析器是「读不懂就明确报错」，
  * 不会静默给出一支错的笔。
+ *
+ * Procreate 那一段不一样：`tools/procreate-corpus/*.brush` 是**真实文件**，
+ * 从 #brushFileInput 灌进去，走的就是用户点「导入笔刷」时的同一条链路。
  *
  * 用法: node tools/test-brush-import.js [http://localhost:8437]
  */
@@ -234,6 +237,211 @@ function check(name, ok, extra) {
   console.log('  画出来的墨:', JSON.stringify(ink));
   check('这一笔确实记录了笔尖位图（别人那边才能画得一样）', ink.hasTip === true);
   check('画布上真的落了墨', ink.px > 2000, ink.px + ' 像素');
+
+  /* ---------- 7) Procreate .brush：真实文件 + 真实的文件选择器 ---------- */
+  console.log('\n=== Procreate .brush（真实语料，走「导入笔刷」按钮的同一条路） ===');
+  // tools/procreate-corpus/marker.brush 是真实 Procreate 导出的文件。
+  // 这里不直接调解析函数，而是塞进 #brushFileInput —— 和用户点「导入笔刷」时
+  // 走的是同一条链路：FileReader → parse → 弹窗 → 勾选 → 进笔刷栏。
+  const corpus = require('path').join(__dirname, 'procreate-corpus', 'marker.brush');
+  await page.setInputFiles('#brushFileInput', corpus);
+  await page.waitForSelector('#importMask:not(.hidden)', { timeout: 10000 });
+  const pcDlg = await page.evaluate(() => {
+    const rows = Array.prototype.map.call(document.querySelectorAll('#importBody .imp-row'), r => ({
+      name: r.querySelector('.imp-name').textContent,
+      meta: r.querySelector('.imp-meta').textContent,
+      thumb: !!r.querySelector('img.imp-tip')
+    }));
+    return { title: document.querySelector('#importTitle').textContent, rows: rows };
+  });
+  console.log('  弹窗:', JSON.stringify(pcDlg));
+  check('Procreate 文件弹出了导入对话框', /发现 1 支/.test(pcDlg.title), pcDlg.title);
+  check('读出了真实笔名「Marker」', pcDlg.rows.length === 1 && pcDlg.rows[0].name === 'Marker',
+    JSON.stringify(pcDlg.rows.map(r => r.name)));
+  check('笔尖缩略图渲染出来了（说明 PNG 解出来了）', pcDlg.rows[0].thumb === true);
+  check('摘要显示直径 34px / 间距 6% / 硬度 0.65',
+    /34px/.test(pcDlg.rows[0].meta) && /间距 6%/.test(pcDlg.rows[0].meta) && /硬度 0\.65/.test(pcDlg.rows[0].meta),
+    pcDlg.rows[0].meta);
+
+  await page.click('#btnImportOk');
+  // 注意用 waitForFunction 判类名：`#importMask.hidden` 这个元素是「不可见」的，
+  // 而 waitForSelector 默认等「可见」，会一直等不到。
+  await page.waitForFunction(() => document.querySelector('#importMask').classList.contains('hidden'), null, { timeout: 5000 });
+  await sleep(600);
+  const pcState = await page.evaluate(() => {
+    const S = window.ChaApp.state;
+    const list = S.imported || [];
+    // 按名字找，别用 imported[0] —— 上面第 6 段已经先导过一支「测试方笔」了
+    const it = list.filter(function (x) { return x.name === 'Marker'; })[0] || list[list.length - 1];
+    if (!it) return null;
+    return {
+      inGrid: !!document.querySelector('#brushGrid .tool[data-item="' + it.id + '"]'),
+      importedCount: list.length,
+      name: it.name, label: it.tip, tool: it.tool, editing: S.brushId === it.id,
+      size: S.brush.size, opacity: S.brush.opacity, spacing: S.brush.spacing,
+      hardness: S.brush.hardness, minSize: S.brush.minSize,
+      pressSize: S.brush.pressSize, pressOpacity: S.brush.pressOpacity,
+      scatter: S.brush.scatter, grain: S.brush.grain, grainScale: S.brush.grainScale,
+      tipLen: (S.brush.tip || '').length
+    };
+  });
+  console.log('  导入后:', JSON.stringify(pcState));
+  check('导入的 Procreate 笔刷落到「笔刷栏」里', pcState && pcState.inGrid === true);
+  check('笔名保持 Marker', pcState && pcState.name === 'Marker', pcState && pcState.name);
+  check('来源标注写明了 Procreate', !!pcState && /Procreate/.test(pcState.label), pcState && pcState.label);
+  check('导入完自动选中了这支笔', !!pcState && pcState.editing === true);
+  check('带上了笔尖位图', !!pcState && pcState.tipLen > 1000, pcState && (pcState.tipLen + ' 字符'));
+  // 下面四个值全部和 importedItem 的默认值（0.4 / 0.8 / 0 / 0）不同，
+  // 所以它们对上了 = rec.opts 确实合并进来了，而不是被默认值盖住。
+  check('最小直径来自 Procreate 的 minSize', !!pcState && Math.abs(pcState.minSize - 0.2727) < 1e-3,
+    pcState && String(pcState.minSize));
+  check('压力→尺寸力度来自 dynamicsPressureSize', !!pcState && Math.abs(pcState.pressSize - 0.2) < 1e-6,
+    pcState && String(pcState.pressSize));
+  check('压力→浓度来自 dynamicsPressureOpacity', !!pcState && Math.abs(pcState.pressOpacity - 0.3) < 1e-6,
+    pcState && String(pcState.pressOpacity));
+  check('颗粒粗细来自 textureScale', !!pcState && Math.abs(pcState.grainScale - 0.74) < 1e-6,
+    pcState && String(pcState.grainScale));
+  check('间距沿用 Procreate 的 plotSpacing', !!pcState && Math.abs(pcState.spacing - 0.06) < 1e-6,
+    pcState && String(pcState.spacing));
+  check('硬度没被非圆笔尖拖到下限', !!pcState && pcState.hardness > 0.4, pcState && pcState.hardness.toFixed(3));
+
+  // 真的用这支笔画一笔：Procreate 的笔尖形状要落到画布上
+  const pcDraw = await page.evaluate(() => {
+    const e = window.ChaApp.engine;
+    const s0 = e.docToScreen(300, 620), s1 = e.docToScreen(900, 620);
+    const box = document.querySelector('#view').getBoundingClientRect();
+    return { a: [box.left + s0.x, box.top + s0.y], b: [box.left + s1.x, box.top + s1.y] };
+  });
+  const before = await page.evaluate(() => {
+    const e = window.ChaApp.engine, l = e.activeLayer();
+    const d = l.ctx.getImageData(0, 0, e.width, e.height).data;
+    let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 40) n++;
+    return n;
+  });
+  await page.mouse.move(pcDraw.a[0], pcDraw.a[1]);
+  await page.mouse.down();
+  await page.mouse.move(pcDraw.b[0], pcDraw.b[1], { steps: 16 });
+  await page.mouse.up();
+  await sleep(900);
+  const pcInk = await page.evaluate(() => {
+    const e = window.ChaApp.engine, l = e.activeLayer();
+    const d = l.ctx.getImageData(0, 0, e.width, e.height).data;
+    let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 40) n++;
+    const st = e.strokes[e.strokes.length - 1];
+    return { px: n, hasTip: !!(st && st.tip), spacing: st && st.spacing };
+  });
+  console.log('  这笔的墨:', JSON.stringify(pcInk), '（画前 ' + before + '）');
+  check('Procreate 笔刷真的画出墨了', pcInk.px > before + 1500, (pcInk.px - before) + ' 像素');
+  check('这一笔记录了笔尖位图（别人那边才能画得一样）', pcInk.hasTip === true);
+
+  /* ---------- 8) Procreate 的坏文件要明确报错 ---------- */
+  // 一个「有效 ZIP，但里面没有 Brush.archive」的包：把真实文件里的
+  // `Brush.archive` 原地改成同样长度的 `BrushXarchive`（13 字节对 13 字节，
+  // ZIP 的本地头和中央目录都不用动，包结构照样合法）。
+  const pcB64 = require('fs').readFileSync(corpus).toString('base64');
+  const pcBad = await page.evaluate((b64) => {
+    const out = {};
+    try { window.ChaBrushImport.parse('x.brush', new Uint8Array([1, 2, 3, 4, 5])); out.junk = 'no-error'; }
+    catch (e) { out.junk = e.message; }
+
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const needle = 'Brush.archive', repl = 'BrushXarchive';
+    let hits = 0;
+    outer:
+    for (let i = 0; i + needle.length <= bytes.length; i++) {
+      for (let j = 0; j < needle.length; j++) if (bytes[i + j] !== needle.charCodeAt(j)) continue outer;
+      for (let j = 0; j < needle.length; j++) bytes[i + j] = repl.charCodeAt(j);
+      hits++; i += needle.length - 1;
+    }
+    out.patched = hits;
+    try { window.ChaBrushImport.parse('z.brush', bytes); out.noarch = 'no-error'; }
+    catch (e) { out.noarch = e.message; }
+    return out;
+  }, pcB64);
+  console.log('  ', JSON.stringify(pcBad));
+  check('不是 ZIP 的 .brush 会明确报错', pcBad.junk !== 'no-error', pcBad.junk);
+  check('改动确实落到了真实文件上（2 处：本地头 + 中央目录）', pcBad.patched === 2, String(pcBad.patched));
+  check('是合法 ZIP 但没有 Brush.archive 时会明确报错',
+    /Brush\.archive/.test(pcBad.noarch), pcBad.noarch);
+
+  /* ---------- 9) .brushset（多支笔、每支住一个子目录） ---------- */
+  // .brushset 才是 Procreate 导出笔刷组时最常用的格式：一个 ZIP，里面每支笔
+  // 住一个以笔名命名的子目录。这里把真实的 marker.brush 里的文件原样搬到
+  // 「My Marker/」子目录下重新打一个 ZIP —— 内容全是真的，只换了嵌套层级。
+  console.log('\n=== .brushset（子目录里找 Brush.archive 的分支） ===');
+  const zlibx = require('zlib'), fsx = require('fs'), osx = require('os'), px = require('path');
+  const crc32 = zlibx.crc32 || (function () {
+    const t = [];
+    for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); t[n] = c >>> 0; }
+    return b => { let c = 0xFFFFFFFF; for (let i = 0; i < b.length; i++) c = t[(c ^ b[i]) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+  })();
+  function buildZip(entries) {
+    const locals = [], centrals = [];
+    let off = 0;
+    entries.forEach(e => {
+      const nb = Buffer.from(e.name, 'utf8');
+      const comp = zlibx.deflateRawSync(e.data, { level: 9 });
+      const crc = crc32(e.data);
+      const lh = Buffer.alloc(30);
+      lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(0, 6);
+      lh.writeUInt16LE(8, 8); lh.writeUInt16LE(0, 10); lh.writeUInt16LE(0x21, 12);
+      lh.writeUInt32LE(crc, 14); lh.writeUInt32LE(comp.length, 18); lh.writeUInt32LE(e.data.length, 22);
+      lh.writeUInt16LE(nb.length, 26); lh.writeUInt16LE(0, 28);
+      const ch = Buffer.alloc(46);
+      ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6);
+      ch.writeUInt16LE(0, 8); ch.writeUInt16LE(8, 10); ch.writeUInt16LE(0, 12); ch.writeUInt16LE(0x21, 14);
+      ch.writeUInt32LE(crc, 16); ch.writeUInt32LE(comp.length, 20); ch.writeUInt32LE(e.data.length, 24);
+      ch.writeUInt16LE(nb.length, 28); ch.writeUInt32LE(off, 42);
+      locals.push(lh, nb, comp); centrals.push(ch, nb);
+      off += lh.length + nb.length + comp.length;
+    });
+    const cd = Buffer.concat(centrals);
+    const eocd = Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50, 0);
+    eocd.writeUInt16LE(entries.length, 8); eocd.writeUInt16LE(entries.length, 10);
+    eocd.writeUInt32LE(cd.length, 12); eocd.writeUInt32LE(off, 16);
+    return Buffer.concat([].concat(locals, [cd, eocd]));
+  }
+
+  // 用页面里的解析器把真实 .brush 拆开，拿到里面每个文件解压后的原始字节。
+  // （不能在 Node 里 require brush-import.js —— 那个模块是挂在 window 上的浏览器模块）
+  const innerRaw = await page.evaluate((b64) => {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const z = window.ChaBrushImport.readZip(bytes);
+    const b64Of = u => { let s = ''; for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]); return btoa(s); };
+    return z.entries.filter(e => !/\/$/.test(e.name)).map(e => ({ name: e.name, b64: b64Of(e.data) }));
+  }, pcB64);
+  const inner = innerRaw.map(e => ({ name: e.name, data: Buffer.from(e.b64, 'base64') }));
+  console.log('  真实 .brush 里的文件:', inner.map(e => e.name).join(', '));
+  const setDir = px.join(osx.tmpdir(), 'chahui-procreate');
+  fsx.mkdirSync(setDir, { recursive: true });
+  const setPath = px.join(setDir, 'MyMarker.brushset');
+  fsx.writeFileSync(setPath, buildZip(inner.map(e => ({ name: 'My Marker/' + e.name, data: e.data }))));
+  check('拆出了 .brush 里的 4 个文件（Shape.png 也在）',
+    inner.length === 4 && inner.some(e => e.name === 'Shape.png'), inner.map(e => e.name).join(','));
+
+  await page.setInputFiles('#brushFileInput', setPath);
+  await page.waitForSelector('#importMask:not(.hidden)', { timeout: 10000 });
+  const setDlg = await page.evaluate(() => {
+    const rows = Array.prototype.map.call(document.querySelectorAll('#importBody .imp-row'), r => ({
+      name: r.querySelector('.imp-name').textContent,
+      meta: r.querySelector('.imp-meta').textContent,
+      thumb: !!r.querySelector('img.imp-tip')
+    }));
+    return { title: document.querySelector('#importTitle').textContent, rows: rows };
+  });
+  console.log('  弹窗:', JSON.stringify(setDlg));
+  check('.brushset 也能弹窗（说明子目录里的 Brush.archive 找到了）', /发现 1 支/.test(setDlg.title), setDlg.title);
+  check('.brushset：读出的笔名与 .brush 一致（Marker）',
+    setDlg.rows.length === 1 && setDlg.rows[0].name === 'Marker', JSON.stringify(setDlg.rows.map(r => r.name)));
+  check('.brushset：笔尖缩略图也在（Shape.png 是在子目录里找到的）', setDlg.rows[0].thumb === true);
+  check('.brushset：参数与 .brush 完全一致', setDlg.rows[0].meta === '34px · 间距 6% · 硬度 0.65', setDlg.rows[0].meta);
+  await page.click('#btnImportCancel');
+  await page.waitForFunction(() => document.querySelector('#importMask').classList.contains('hidden'), null, { timeout: 5000 });
 
   check('全程没有 JS 报错', errs.length === 0, errs.join(' | '));
   console.log('\n===== 结果: ' + pass + ' 通过 / ' + fail + ' 失败 =====');

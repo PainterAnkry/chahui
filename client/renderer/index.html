@@ -111,7 +111,7 @@
       <!-- ── 笔刷栏（与工具栏分开，和 SAI2 一样） ── -->
       <section class="group" data-section="brushes">
         <h4><span class="section-grip" title="拖动调整顺序">⋮⋮</span>笔刷栏
-          <button class="mini h4-btn" id="btnBrushImport" title="导入 Photoshop (.abr) 或 Clip Studio Paint (.sut) 笔刷">导入</button>
+          <button class="mini h4-btn" id="btnBrushImport" title="导入 Photoshop (.abr)、Clip Studio Paint (.sut) 或 Procreate (.brush / .brushset) 笔刷">导入</button>
           <button class="mini h4-btn" id="btnBrushEdit" title="自定义笔刷栏：调整顺序与显隐">编辑</button>
         </h4>
         <div class="tool-grid" id="brushGrid"></div>
@@ -761,7 +761,7 @@
 </div>
 
 <!-- ============ 笔刷导入 ============ -->
-<input type="file" id="brushFileInput" accept=".abr,.sut" multiple class="hidden-file" />
+<input type="file" id="brushFileInput" accept=".abr,.sut,.brush,.brushset,.prbr,.zip" multiple class="hidden-file" />
 <div class="modal-mask hidden" id="importMask">
   <div class="modal import">
     <div class="modal-head">

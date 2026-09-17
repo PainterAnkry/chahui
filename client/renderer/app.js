@@ -2140,6 +2140,34 @@
   /** 把解析出来的笔尖变成一支可用的笔刷条目 */
   function importedItem(rec, idx) {
     var d = Math.max(4, Math.min(400, Math.round(rec.diameter || 40)));
+    var params = {
+      brush: 'custom',
+      size: d,
+      opacity: 1,
+      hardness: rec.hardness == null ? 0.8 : rec.hardness,
+      minSize: 0.4,
+      pressSize: 0.8,
+      pressOpacity: 0,
+      // 导入的笔刷靠笔尖出形状，默认关掉颗粒与散布 ——
+      // 那两样是给圆头笔加质感的，叠在笔尖上只会把形状糊掉
+      grain: 0,
+      scatter: 0,
+      spacing: rec.spacing || 0.1,
+      tip: rec.tip
+    };
+    // Procreate 那边能对应上的参数比 .abr / .sut 多（压力→尺寸/浓度、混色、
+    // 颗粒粗细、最小直径…），解析器把映射结果放在 rec.opts 里。
+    // tip 和 brush 是这支笔的身份，不接受覆盖。
+    if (rec.opts) {
+      for (var k in rec.opts) {
+        if (!Object.prototype.hasOwnProperty.call(rec.opts, k)) continue;
+        if (k === 'tip' || k === 'brush') continue;
+        if (rec.opts[k] === undefined || rec.opts[k] === null) continue;
+        params[k] = rec.opts[k];
+      }
+    }
+    params.tip = rec.tip;
+    params.brush = 'custom';
     return {
       id: 'imp_' + (rec.hash || 'x') + '_' + idx,
       name: rec.name || ('导入笔刷 ' + (idx + 1)),
@@ -2148,21 +2176,7 @@
       type: 'brush',
       tip: '导入的笔刷（' + (rec.sourceLabel || '') + '）｜笔尖 ' + d + 'px',
       imported: true,
-      params: {
-        brush: 'custom',
-        size: d,
-        opacity: 1,
-        hardness: rec.hardness == null ? 0.8 : rec.hardness,
-        minSize: 0.4,
-        pressSize: 0.8,
-        pressOpacity: 0,
-        // 导入的笔刷靠笔尖出形状，关掉颗粒与散布 ——
-        // 那两样是给圆头笔加质感的，叠在笔尖上只会把形状糊掉
-        grain: 0,
-        scatter: 0,
-        spacing: rec.spacing || 0.1,
-        tip: rec.tip
-      }
+      params: params
     };
   }
 
@@ -2186,8 +2200,9 @@
         try {
           var res = window.ChaBrushImport.parse(f.name, new Uint8Array(fr.result));
           if (!res.brushes.length) throw new Error('里面没有可导入的笔刷');
+          var KIND_LABEL = { abr: 'Photoshop', sut: 'CSP', procreate: 'Procreate' };
           res.brushes.slice(0, IMPORT_MAX).forEach(function (b) {
-            b.sourceLabel = f.name + (res.kind === 'abr' ? '（Photoshop）' : '（CSP）');
+            b.sourceLabel = f.name + '（' + (KIND_LABEL[res.kind] || res.kind) + '）';
             b.hash = simpleHash(f.name + '|' + (b.name || '') + '|' + String(b.tip || '').slice(0, 32));
             collected.push(b);
           });
@@ -2264,16 +2279,19 @@
       body.appendChild(row);
     });
     $('#importMask').classList.remove('hidden');
+    // 注意这里必须用 $$（querySelectorAll 的数组版），用 $ 拿到的是单个元素，
+    // 没有 forEach —— 曾经三个按钮全是哑的，点了没反应也不报错到界面上。
+    function boxes() { return $$('#importBody input[type=checkbox]'); }
     $('#btnImportAll').onclick = function () {
-      $('#importBody input[type=checkbox]').forEach(function (c) { c.checked = true; });
+      boxes().forEach(function (c) { c.checked = true; });
     };
     $('#btnImportNone').onclick = function () {
-      $('#importBody input[type=checkbox]').forEach(function (c) { c.checked = false; });
+      boxes().forEach(function (c) { c.checked = false; });
     };
     $('#btnImportCancel').onclick = function () { $('#importMask').classList.add('hidden'); };
     $('#btnImportOk').onclick = function () {
       var keep = [];
-      $('#importBody input[type=checkbox]').forEach(function (c) {
+      boxes().forEach(function (c) {
         if (c.checked) keep.push(S.importPending[+c.dataset.i]);
       });
       $('#importMask').classList.add('hidden');
