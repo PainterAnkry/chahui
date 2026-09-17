@@ -34,10 +34,25 @@ function check(name, ok, extra) {
   const purgeBtn = await page.evaluate(() => !!document.querySelector('#btnPurgeRooms'));
   const roomCount = await page.evaluate(() => document.querySelector('#roomCount').textContent);
   console.log('   列表房间数 =', before, '  每行删除按钮 =', delBtns, '  「清理空房」按钮 =', purgeBtn, '  计数徽标 =', roomCount);
-  check('每行都有删除按钮', delBtns === before, `(${delBtns}/${before})`);
+
+  // 房间列表是服务端通过 WS 推送渲染的，DOM 可能比这里刚 fetch 的 API 慢一拍；
+  // 而且「有人在线」的房间本来就不给删除按钮。所以只做**同一拍数据的自洽断言**
+  // （行 ↔ 删除按钮 ↔ 徽标都出自同一次 renderRoomList），
+  // 不拿 DOM 去比 API —— 那会在别的测试留下的房间还没回收时误报成失败。
+  const rowsInfo = await page.evaluate(() => {
+    const rows = Array.from(document.querySelectorAll('#roomList .room-item'));
+    const bad = rows.filter(el => {
+      const cnt = el.querySelector('.cnt');
+      const online = cnt ? (parseInt(cnt.textContent.replace(/\D/g, ''), 10) || 0) : 0;
+      return (online === 0) !== !!el.querySelector('.room-del');
+    }).length;
+    return { rows: rows.length, bad: bad };
+  });
+  check('每行的删除按钮与在线人数一致（空房才有删除按钮）', rowsInfo.bad === 0, JSON.stringify(rowsInfo));
   check('有「清理空房」入口', purgeBtn);
-  // 徽标形如「10」或「12（空 1）」，开头必须是真实房间总数
-  check('标题显示房间数', new RegExp('^' + before + '(（空 \\d+）)?$').test(roomCount), roomCount);
+  // 徽标形如「10」或「12（空 1）」，开头必须是当前列表里的房间数
+  check('标题显示房间数', new RegExp('^' + rowsInfo.rows + '(（空 \\d+）)?$').test(roomCount),
+    roomCount + '  vs 列表 ' + rowsInfo.rows + ' 行');
 
   /* ============ 进房 ============ */
   await page.fill('#nameInput', '验收');

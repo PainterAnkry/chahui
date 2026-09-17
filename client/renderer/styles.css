@@ -35,6 +35,17 @@ html, body {
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
 }
+/* 整页是「菜单栏 / 顶栏 / 工作区 / 底栏」四段竖排。
+   以前工作区高度手写 calc(100% - 48px - 26px)，漏掉了 30px 的菜单栏，
+   四段加起来比视口高出 30px —— 底栏被挤出屏幕外（overflow:hidden 直接吃掉）。
+   改成 flex 列：工作区 flex:1 自动吃掉剩余高度，谁也不多占。 */
+body {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+}
 
 button, input, select, textarea { font: inherit; color: inherit; }
 .hidden { display: none !important; }
@@ -44,6 +55,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
 .topbar {
   height: 48px;
+  flex: none;
   display: flex;
   align-items: center;
   gap: 14px;
@@ -132,12 +144,15 @@ button, input, select, textarea { font: inherit; color: inherit; }
 /* ============================== 布局 ============================== */
 
 .workspace {
-  height: calc(100% - 48px - 26px);
-  /* 用 flex 而不是 grid：这样把某一栏隐藏时画布会自动铺满，
-     不会像固定列那样留一条空档。 */
+  /* 竖排四段里唯一会伸缩的一段：菜单栏 / 顶栏 / 底栏都是 flex:none。
+     以前这里是 height: calc(100% - 48px - 26px)，漏算了 30px 的菜单栏，
+     四段加起来比视口高 30px —— 底栏被 overflow:hidden 吃掉，整条看不见。 */
+  flex: 1;
+  min-height: 0;
+  /* 窄屏下左右栏是浮在画布上的抽屉，以工作区为定位基准（别再写死 top:48px） */
+  position: relative;
   display: flex;
   gap: 0;
-  min-height: 0;
 }
 /* 默认布局：左栏（各种小节）| 画布 | 右栏（聊天 / 成员 / 笔迹）。
    用 order 而不是固定 grid 列，是为了隐藏某一栏时画布能自动铺满。
@@ -175,6 +190,21 @@ body.col-resizing iframe, body.col-resizing canvas { pointer-events: none; }
 .panel.left { border-right: 1px solid var(--line); }
 .panel.right { border-left: 1px solid var(--line); }
 .panel-scroll { overflow-y: auto; overflow-x: hidden; padding: 8px; flex: 1; }
+/* 左栏顶部那条：给「收起」一个看得见的位置。
+   以前左栏只能靠菜单 / Tab 收起，等于没有入口 —— 右栏有 » 按钮，左栏一条都没有。 */
+.panel-head-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 4px 0 10px;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--text-dim);
+  font-size: 11.5px;
+  letter-spacing: .3px;
+}
+.panel-head-bar .phb-label { flex: 1; }
 /* 右栏里装「拖过来的小节」的那一条：没内容就整条收掉，不占地方 */
 .right-sections {
   flex: none;
@@ -786,6 +816,9 @@ body.tool-dragging { cursor: grabbing; user-select: none; }
 #overlay { pointer-events: none; }
 .stage.drawing .canvas-wrap { cursor: none; }
 .stage.panning .canvas-wrap { cursor: grabbing; }
+/* 双指手势进行中（见 app.js bindTouchGestures）：这一会儿不是在画画，
+   把画笔光标收掉，免得手指挪动时那个圈跟着乱跳 */
+.stage.gesturing .brush-cursor { display: none; }
 
 /* 画笔光标：圆圈直径 = 笔刷大小 × 视图缩放。
    两个要点：
@@ -1135,6 +1168,7 @@ body.tool-dragging { cursor: grabbing; user-select: none; }
 
 .statusbar {
   height: 26px;
+  flex: none;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -1430,6 +1464,13 @@ body.panel-dragging * { cursor: grabbing !important; }
   padding: 0;
 }
 .side-rail:hover { background: #eef2f8; color: var(--text); }
+/* 左边那条窄条：和右边对称。order:0 让它排在左右栏之前 = 屏幕最左。
+   选择器写两类是为了提高优先级 —— 窄屏段落里单独写的 .side-rail 不会再盖掉 order。 */
+.side-rail.left-rail {
+  order: 0;
+  border-left: 0;
+  border-right: 1px solid var(--line);
+}
 
 /* ---------------- 独立浮窗（参考图） ---------------- */
 .float-win {
@@ -1923,16 +1964,112 @@ body.panel-dragging * { cursor: grabbing !important; }
   #colorWheel { width: 148px; height: 148px; }
 }
 
+/* ---------------------------------------------------------------
+   窄屏 = 平板 / 手机 / 并排的小窗口。
+   判断标准是「画布还能剩多宽」而不是设备类型 —— 界面要给画布让路，
+   所以左右两栏都改成浮在画布上的抽屉（画布铺满整宽），
+   开合状态由 JS 管（见 app.js 的 applyLayoutMode）：
+   进窄屏默认收起，回宽屏恢复桌面记住的偏好。
+
+   ⚠ 这里的 1080 和 app.js 里 NARROW_MQ 的值必须一致，改一处要改两处。
+   --------------------------------------------------------------- */
 @media (max-width: 1080px) {
-  .workspace { grid-template-columns: var(--left-w) 1fr; }
-  .panel.right {
+  .panel.left, .panel.right {
     position: absolute;
-    right: 0; top: 48px; bottom: 26px;
-    width: var(--right-w);
-    z-index: 15;
-    box-shadow: -8px 0 24px rgba(20, 30, 50, .12);
+    top: 0;
+    bottom: 0;
+    z-index: 18;
+  }
+  /* 宽度必须用 .workspace > .panel.x 这个选择器：上面默认布局里
+     `.workspace > .panel.left { width: var(--left-w) }` 是三类选择器，
+     光写 .panel.left 优先级不够，宽度会被它钉死成 --left-w。 */
+  .workspace > .panel.left, .workspace > .panel.right { width: min(86vw, 330px); }
+  .panel.left { left: 0; box-shadow: 14px 0 34px rgba(15, 22, 36, .22); }
+  .panel.right { left: auto; right: 0; box-shadow: -14px 0 34px rgba(15, 22, 36, .22); }
+  /* 抽屉宽度固定，拖动条留着只会误触 */
+  .col-resizer { display: none; }
+  /* 抽屉贴着屏幕边，最后一行别顶到边角 */
+  .panel-scroll { padding-bottom: 18px; }
+  .side-rail { width: 22px; font-size: 13px; }
+  /* 顶栏那排动作按钮（房间/游戏/画布…分享）：窄屏放不下就横滑，
+     别把后面的按钮直接顶出屏幕外（660~1080 这一段最容易中招）。 */
+  .topbar-actions {
+    margin-left: auto;
+    overflow-x: auto;
+    overflow-y: hidden;
+    flex-wrap: nowrap;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  .topbar-actions::-webkit-scrollbar { display: none; }
+  .topbar-actions .btn { flex: none; }
+  /* 抽屉开着时把画布上的浮层压下去，免得穿透遮挡 */
+  .drawer-back {
+    position: absolute;
+    inset: 0;
+    z-index: 17;
+    background: rgba(18, 26, 38, .32);
   }
 }
+
+/* ---------------------------------------------------------------
+   手机：能省的都省掉，按钮做大到手指点得准。
+   --------------------------------------------------------------- */
+@media (max-width: 660px) {
+  html, body { font-size: 13.5px; }
+
+  /* 顶栏：只留 logo 图标 + 房间名（动作按钮的横滑规则在 ≤1080 那段） */
+  .topbar { height: 44px; gap: 8px; padding: 0 8px; }
+  .brand-text { display: none; }
+  .brand-mark { width: 26px; height: 26px; font-size: 14px; border-radius: 7px; }
+  .room-chip { max-width: 34vw; padding: 4px 9px; }
+  .room-chip .sub { display: none; }
+  .topbar-actions { gap: 5px; padding: 4px 0; }
+  .topbar-actions .btn { padding: 5px 9px; font-size: 12px; }
+
+  /* 菜单栏：一行放不下就横滑，别把菜单项压扁。
+     注意 .menu-item 一定要 flex:none —— 默认 flex-shrink:1 会把「文件」压窄，
+     两个字换行成两行，直接顶破 30px 的菜单栏（.menu-bar 是 stretch 的）。 */
+  .menu-bar { overflow-x: auto; overflow-y: hidden; scrollbar-width: none; padding: 0 4px; }
+  .menu-bar::-webkit-scrollbar { display: none; }
+  .menu-item { flex: none; }
+  .menu-title { padding: 0 7px; white-space: nowrap; }
+  /* 下拉菜单在窄屏上可能超出右边界，限宽并允许内部滚动 */
+  .menu-drop { min-width: 200px; max-width: calc(100vw - 16px); max-height: 62vh; overflow-y: auto; }
+
+  /* 两侧抽屉几乎占满屏幕，留一点边让人知道「外面还有画布，点一下能关」 */
+  .workspace > .panel.left, .workspace > .panel.right { width: min(92vw, 360px); }
+  .side-rail { width: 24px; }
+
+  /* 底栏：只留状态和画笔，其余隐藏（都是鼠标悬停才有意义的信息） */
+  .statusbar { height: 24px; gap: 8px; padding: 0 8px; }
+  #cursorPos, #canvasSize { display: none; }
+
+  /* 弹窗：贴边、内部滚动，别让「确定」按钮被键盘顶出屏幕 */
+  .modal-mask { padding: 10px; }
+  .modal { max-width: 100%; border-radius: 10px; }
+  .modal-head, .modal-body, .modal-foot { padding-left: 12px; padding-right: 12px; }
+
+  /* 快捷条挤在手机上会变成一竖条高塔 —— 默认收起（JS 负责）；
+     展开时也强制限宽，别占掉半屏 */
+  .quickbar { top: 6px; max-width: calc(100% - 52px); }
+
+  /* 浮动小窗（参考图等）别顶到屏幕外 */
+  .float-win { right: 8px !important; left: 8px !important; width: auto !important; }
+}
+
+/* 手指点的地方得够大：粗指针（触屏）下把常用小按钮抬到 32px 以上 */
+@media (pointer: coarse) {
+  .mini { padding: 5px 8px; line-height: 20px; }
+  .btn.tiny { padding: 5px 10px; }
+  .icon-btn { width: 32px; height: 32px; }
+  .tabs .tab { padding-top: 9px; padding-bottom: 9px; }
+  .tool-grid .tool { min-height: 46px; }
+  .qb-btn { min-width: 30px; height: 28px; }
+  /* 触屏没有 hover，把「拖宽」这类只靠指针的操作藏掉 */
+  .panel-handle-grip { display: none; }
+}
+
 
 /* ==================== 你画我猜 ==================== */
 .game-hud {
@@ -2764,3 +2901,21 @@ body.panel-dragging * { cursor: grabbing !important; }
 #itemCtxMenu .icm-row:hover { background: var(--accent-soft); }
 #itemCtxMenu .icm-row.danger { color: var(--danger); }
 #itemCtxMenu .icm-row.danger:hover { background: #fdeaea; }
+
+/* ================================================================
+   窄屏：画布上的浮层要让位给抽屉
+   ----------------------------------------------------------------
+   .game-hud（35）/.game-score（36）/.round-card（37）/.float-win（55）这些
+   定义在上面的响应式段落之后，同优先级下「后写的赢」——
+   所以这条覆盖必须放在文件最末尾，写在中间会被它们盖回去（踩过一次）。
+
+   降到 12：仍在画布之上，但低于 #drawerBack(17) 和抽屉(18)，
+   抽屉一开就不会被浮层戳穿。
+   不动 #itemCtxMenu（右键小菜单，120）和 .modal-mask（弹窗，40）——
+   那两个本来就该压在最上面。
+   ================================================================ */
+@media (max-width: 1080px) {
+  .quickbar, .game-hud, .game-score, .round-card,
+  .float-win, .ref-badge, .game-lock-tip,
+  .chain-task, .chain-progress { z-index: 12; }
+}

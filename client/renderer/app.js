@@ -88,6 +88,10 @@
     text: { fontFamily: 'sans', fontSize: 48, lineHeight: 1.35 },   // 文字工具的上次设置
     textAt: null,             // 文字要放在画布的哪个位置
     leftPanelOpen: true,      // 左侧整列面板是否显示
+    sideCollapsed: lsGet('chahu.side', '1') === '0',   // 右侧聊天 / 成员 / 笔迹栏是否收起
+    narrow: false,            // 当前是不是窄屏布局（左右栏变抽屉，见 applyLayoutMode）
+    pinch: null,              // 触屏双指手势的上一帧状态（{ midX, midY, dist }）
+    touchPts: null,           // 触屏按下的指针集合（pointerId -> 坐标）
     gridOn: false,
     uiScale: 1,
     importPending: null,      // 导入对话框里待确认的笔刷
@@ -237,6 +241,8 @@
     setToolButtons();
     updateBrushLabel();
     drawBrushPreview();
+    // 窄屏里左栏是盖在画布上的抽屉：选完这一笔就把抽屉收掉，别挡着刚腾出来的画布
+    autoCloseLeftDrawer();
   }
 
   /* ---------------------------------------------------------- 工具栏（可自定义） */
@@ -603,6 +609,10 @@
   /* ---------------------------------------------------------- 侧栏宽度拖动 */
 
   var COL_MIN = 190, COL_MAX = 520;   // 拖太窄按钮挤成一团，拖太宽画布就没了
+
+  /* 窄屏阈值：和 styles.css 里「响应式」段落的 1080 必须一致（改一处要改两处）。
+     到这里左右栏都不再占位，而是变成浮在画布上的抽屉。 */
+  var NARROW_MQ = global.matchMedia ? global.matchMedia('(max-width: 1080px)') : null;
 
   /** 恢复上次的栏宽（存在 localStorage 里；开机时调一次） */
   function loadColumnWidths() {
@@ -3073,6 +3083,76 @@
     }, { passive: false });
 
     view.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+
+    bindTouchGestures();
+  }
+
+  /**
+   * 触屏双指手势：平移（中点位移）+ 缩放（两指间距之比）。
+   *
+   * 桌面端靠滚轮缩放、空格 / 中键平移，手指上这些一概没有 ——
+   * 不做手势的话手机连画布都挪不动。
+   *
+   * 监听挂在 #stage 的**捕获阶段**而不是 #view 上：同一个元素上的捕获监听
+   * 不一定比后注册的冒泡监听先跑（规范里 at target 阶段按注册顺序来），
+   * 只有挂在祖先的捕获阶段才能保证「第二根手指」被我们吃掉、不会去落笔。
+   *
+   * 第二根手指落下时，正在画的那一笔照常收尾（endLocal），不做本地丢弃：
+   * 笔迹的 begin/points 早就发给服务端了，本地私自扔掉会让各端画面不一致 ——
+   * 多出一个小点，比两个人看到的东西不一样轻得多。
+   */
+  function bindTouchGestures() {
+    var stage = $('#stage');
+    if (!stage || !global.PointerEvent) return;
+    var pts = new Map();
+    S.touchPts = pts;
+
+    function snapshot() {
+      var it = pts.values();
+      var a = it.next().value, b = it.next().value;
+      if (!a || !b) return null;
+      return {
+        midX: (a.x + b.x) / 2,
+        midY: (a.y + b.y) / 2,
+        dist: Math.hypot(a.x - b.x, a.y - b.y)
+      };
+    }
+
+    stage.addEventListener('pointerdown', function (e) {
+      if (e.pointerType !== 'touch') return;
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pts.size < 2) return;          // 第一根手指照常画画（不拦）
+      e.preventDefault();
+      e.stopPropagation();               // 第二根手指不落笔
+      if (S.session) endLocal();
+      S.pan = null;
+      S.pinch = snapshot();
+      stage.classList.add('gesturing');
+    }, true);
+
+    stage.addEventListener('pointermove', function (e) {
+      if (e.pointerType !== 'touch' || !pts.has(e.pointerId)) return;
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pts.size < 2 || !S.pinch) return;
+      e.preventDefault();
+      e.stopPropagation();
+      var g = snapshot();
+      if (!g) return;
+      engine.panBy(g.midX - S.pinch.midX, g.midY - S.pinch.midY);
+      // 两指离得太近时比值会抖成噪声，先平移稳一下再缩放
+      if (S.pinch.dist > 24) engine.setZoom(engine.scale * (g.dist / S.pinch.dist), g.midX, g.midY);
+      S.pinch = g;
+      updateBrushCursor();     // setZoom 会 emit viewport，缩放输入框由那边刷新
+    }, true);
+
+    function release(e) {
+      if (e.pointerType !== 'touch') return;
+      pts.delete(e.pointerId);
+      if (pts.size >= 2) return;
+      if (S.pinch) { S.pinch = null; stage.classList.remove('gesturing'); }
+    }
+    stage.addEventListener('pointerup', release, true);
+    stage.addEventListener('pointercancel', release, true);
   }
 
   /* ============================================================ 图像变换 */
@@ -6912,7 +6992,26 @@
     // 侧栏收拉：把手 / 窄条 / F4（菜单里那项也走同一个函数）
     $('#btnSideCollapse').addEventListener('click', function () { setSideCollapsed(true); });
     $('#sideRail').addEventListener('click', function () { setSideCollapsed(false); });
-    setSideCollapsed(lsGet('chahu.side', '1') === '0');
+    // 左栏同理：顶部 « 收起、左边窄条拉回（菜单项和 Tab 键也走这里）
+    var blc = $('#btnLeftCollapse'); if (blc) blc.addEventListener('click', function () { setLeftCollapsed(true); });
+    var lr = $('#leftRail'); if (lr) lr.addEventListener('click', function () { setLeftCollapsed(false); });
+    // 窄屏抽屉：点暗色遮罩把抽屉都关掉
+    var db = $('#drawerBack');
+    if (db) db.addEventListener('click', function () {
+      setLeftCollapsed(true, { persist: false });
+      setSideCollapsed(true, { persist: false });
+    });
+    // 进出窄屏自动切换布局（窗口拉窄 / 手机横竖屏都会触发）
+    if (NARROW_MQ) {
+      var onMq = function () { applyLayoutMode(false); };
+      if (NARROW_MQ.addEventListener) NARROW_MQ.addEventListener('change', onMq);
+      else if (NARROW_MQ.addListener) NARROW_MQ.addListener(onMq);   // 老 Safari
+    }
+    applyLayoutMode(true);
+    // iOS Safari 会自己接管双指捏合（整页缩放）—— 先拦掉，画布上的捏合才归我们
+    ['gesturestart', 'gesturechange', 'gestureend'].forEach(function (t) {
+      document.addEventListener(t, function (e) { e.preventDefault(); }, { passive: false });
+    });
     $('#btnAboutClose').addEventListener('click', function () { $('#aboutMask').classList.add('hidden'); });
     $('#btnCheckUpdate').addEventListener('click', checkUpdate);
     $$('.about-tabs .tab').forEach(function (t) { t.addEventListener('click', function () { showAboutTab(t.dataset.atab); }); });
@@ -7379,13 +7478,63 @@
     toast('画笔光标：' + (S.cursorStyle === 'ring' ? '大小圆形' : S.cursorStyle === 'cross' ? '圆点' : '智能'));
   }
 
-  function toggleLeftPanel() {
+  /* ---------------- 左右栏的收拉 ----------------
+   * 两侧对称：收起来后在屏幕边上留一条窄条，点窄条拉回来。
+   * 左栏以前只有菜单项和 Tab 键能收，界面上没有入口，等于「收不进去」；
+   * 现在左栏顶部有 « 按钮、收起后左边有 » 窄条，和右栏一致。
+   *
+   * opts.persist === false → 只改这一次的状态，不写 localStorage
+   * （窄屏自动收起 / 回到宽屏恢复偏好时用，别把自动行为记成用户偏好）。
+   */
+  function setLeftCollapsed(collapsed, opts) {
     var el = document.querySelector('aside.panel.left');
+    var rail = $('#leftRail');
     if (!el) return;
-    var hidden = el.classList.toggle('hidden');
-    S.leftPanelOpen = !hidden;
+    var on = !!collapsed;
+    el.classList.toggle('hidden', on);
+    if (rail) rail.classList.toggle('hidden', !on);
+    S.leftPanelOpen = !on;
+    if (!opts || opts.persist !== false) {
+      try { localStorage.setItem('chahu.leftOpen', on ? '0' : '1'); } catch (e) { /* ignore */ }
+    }
+    syncDrawerBack();
     engine.resize();
-    toast(hidden ? '已隐藏全部操作面板' : '已显示全部操作面板');
+  }
+
+  function toggleLeftPanel(opts) {
+    setLeftCollapsed(S.leftPanelOpen, opts);   // 现在开着 → 收；关着 → 开
+    if (!opts || !opts.silent) toast(S.leftPanelOpen ? '已展开操作面板' : '已收起操作面板');
+  }
+
+  /** 窄屏下两栏是浮在画布上的抽屉，中间垫一层暗色遮罩；点它就关抽屉 */
+  function syncDrawerBack() {
+    var back = $('#drawerBack');
+    if (!back) return;
+    var anyOpen = !!(S.narrow && (S.leftPanelOpen || !S.sideCollapsed));
+    back.classList.toggle('hidden', !anyOpen);
+  }
+
+  /** 窄屏里选完笔刷 / 工具就把左抽屉收掉，别挡着刚腾出来的画布 */
+  function autoCloseLeftDrawer() {
+    if (S.narrow && S.leftPanelOpen) setLeftCollapsed(true, { persist: false });
+  }
+
+  /** 窄屏 = 左右栏变成抽屉：进出都自动切一下，用户的桌面偏好留着不被污染 */
+  function applyLayoutMode(force) {
+    var narrow = NARROW_MQ.matches;
+    if (!force && narrow === S.narrow) return;
+    S.narrow = narrow;
+    document.body.classList.toggle('layout-narrow', narrow);
+    if (narrow) {
+      setLeftCollapsed(true, { persist: false });
+      setSideCollapsed(true, { persist: false });
+      setQuickBarCollapsed(true, false);
+    } else {
+      setLeftCollapsed(lsGet('chahu.leftOpen', '1') === '0', { persist: false });
+      setSideCollapsed(lsGet('chahu.side', '1') === '0', { persist: false });
+    }
+    syncDrawerBack();
+    engine.resize();
   }
 
   function toggleFullscreen() {
@@ -7483,16 +7632,38 @@
     toast('手抖修正在画布上沿的快捷条里：− 0 ＋');
   }
 
+  /** 快捷条折行 / 收起 / 自定义显隐都会变高 —— HUD 和回合卡挂在它下面，得跟着挪 */
+  function syncQbH() {
+    var bar = $('#quickBar');
+    if (!bar) return;
+    document.documentElement.style.setProperty('--qb-h', bar.offsetHeight + 'px');
+  }
+
+  /**
+   * 快捷条收起 / 拉开。提到模块级是因为布局模式切换时也要用
+   * （窄屏默认收起，手机上一整排按钮会变成挡住画布的高塔）。
+   * persist === false → 只是这次布局自动收的，别覆盖用户自己的选择。
+   */
+  function setQuickBarCollapsed(on, persist) {
+    var bar = $('#quickBar');
+    if (!bar) return;
+    bar.classList.toggle('collapsed', !!on);
+    var tg = $('#qbToggle');
+    if (tg) {
+      tg.textContent = on ? '▸' : '▾';
+      tg.title = on ? '拉开快捷菜单' : '收起快捷菜单';
+    }
+    if (persist !== false) {
+      try { localStorage.setItem(QB_COLLAPSED, on ? '1' : '0'); } catch (e) { /* ignore */ }
+    }
+    syncQbH();
+  }
+
   function bindQuickBar() {
     var bar = $('#quickBar');
     if (!bar) return;
 
-    function setCollapsed(on) {
-      bar.classList.toggle('collapsed', !!on);
-      $('#qbToggle').textContent = on ? '▸' : '▾';
-      $('#qbToggle').title = on ? '拉开快捷菜单' : '收起快捷菜单';
-      try { localStorage.setItem(QB_COLLAPSED, on ? '1' : '0'); } catch (e) { /* ignore */ }
-    }
+    function setCollapsed(on) { setQuickBarCollapsed(on, true); }
     setCollapsed(lsGet(QB_COLLAPSED, '0') === '1');
     $('#qbToggle').addEventListener('click', function () {
       setCollapsed(!bar.classList.contains('collapsed'));
@@ -7532,9 +7703,6 @@
     if (qem) qem.addEventListener('click', function (e) { if (e.target === qem) closeQbEdit(); });
 
     // 快捷条折行/收起/自定义显隐都会变高 —— HUD 和回合卡挂在它下面，跟着挪
-    function syncQbH() {
-      document.documentElement.style.setProperty('--qb-h', bar.offsetHeight + 'px');
-    }
     syncQbH();
     if (typeof ResizeObserver === 'function') {
       new ResizeObserver(syncQbH).observe(bar);
@@ -8283,14 +8451,18 @@
    * 侧栏收拉（聊天 / 成员 / 笔迹）
    * ================================================================ */
 
-  function setSideCollapsed(collapsed) {
+  function setSideCollapsed(collapsed, opts) {
     var el = $('#sidePanel');
     var rail = $('#sideRail');
     if (!el) return;
-    el.classList.toggle('hidden', !!collapsed);
-    if (rail) rail.classList.toggle('hidden', !collapsed);
-    S.sideCollapsed = !!collapsed;
-    try { localStorage.setItem('chahu.side', collapsed ? '0' : '1'); } catch (e) { /* ignore */ }
+    var on = !!collapsed;
+    el.classList.toggle('hidden', on);
+    if (rail) rail.classList.toggle('hidden', !on);
+    S.sideCollapsed = on;
+    if (!opts || opts.persist !== false) {
+      try { localStorage.setItem('chahu.side', on ? '0' : '1'); } catch (e) { /* ignore */ }
+    }
+    syncDrawerBack();
     engine.resize();
   }
 
@@ -8336,6 +8508,8 @@
     growSelection: growSelection, shrinkSelection: shrinkSelection,
     setUiScale: setUiScale, setCursorMode: setCursorMode,
     toggleLeftPanel: toggleLeftPanel, toggleFullscreen: toggleFullscreen,
+    setLeftCollapsed: setLeftCollapsed, setSideCollapsed: setSideCollapsed,
+    applyLayoutMode: applyLayoutMode, setQuickBarCollapsed: setQuickBarCollapsed,
     openSettings: openSettings,
     openAbout: openAbout, checkUpdate: checkUpdate, cmpVer: cmpVer,
     openToneDialog: openToneDialog, updateTonePreview: updateTonePreview, closeToneDialog: closeToneDialog,

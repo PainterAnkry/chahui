@@ -43,9 +43,19 @@
 <!-- ============ 主体三栏 ============ -->
 <main class="workspace">
 
+  <!-- 窄屏下左右栏变成浮在画布上的抽屉，点这块暗色区域把抽屉关掉 -->
+  <div class="drawer-back hidden" id="drawerBack"></div>
+
+  <!-- 操作面板收起之后留一条窄条，点一下再拉出来（和 Tab 一个效果） -->
+  <button class="side-rail left-rail hidden" id="leftRail" title="拉出操作面板（Tab）">»</button>
+
   <!-- ==================== 左：SAI2 风格面板 ==================== -->
   <aside class="panel left">
     <div class="col-resizer" id="leftResizer" title="拖动调整左栏宽度"></div>
+    <div class="panel-head-bar">
+      <span class="phb-label">操作面板</span>
+      <button class="icon-btn side-collapse" id="btnLeftCollapse" title="收起操作面板（Tab）">«</button>
+    </div>
     <div class="panel-scroll" id="leftPanelScroll">
       <div class="panel-handle" id="panelHandle">
         <span class="panel-handle-grip">⋮⋮</span>
