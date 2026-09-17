@@ -67,15 +67,34 @@
     STROKE_REDO: 'stroke:redo',     // { stroke }
     STROKE_CLEAR: 'stroke:clear',   // { scope: 'layer'|'all', layerId? }
 
-    LAYER_ADD: 'layer:add',         // { name, at? }
+    MEMBER_ROLE: 'member:role',     // { userId, readonly } —— 仅房主；只读观众只能看不能改
+    LAYER_ADD: 'layer:add',         // { name, at?, id?, groupId? } id 由客户端指定（服务端校验格式与冲突）
     LAYER_DEL: 'layer:del',         // { layerId }
     LAYER_UPD: 'layer:upd',         // { layerId, patch }
-    LAYER_MOVE: 'layer:move',       // { layerId, to }
+    LAYER_MOVE: 'layer:move',       // { layerId, to } 在**自己所属的那一组范围内**移动
     LAYER_DUP: 'layer:dup',         // { layerId, png } 复制图层（像素由客户端渲染）
     LAYER_CLEAR: 'layer:clear',     // { layerId } 清除图层内容
     LAYER_PIXELS: 'layer:pixels',   // { layerId, png, upToSeq } 用客户端渲染好的像素整体替换图层
     LAYER_MERGE: 'layer:merge',     // { srcId, dstId, png } 向下合并（结果像素由客户端渲染）
     LAYER_FLATTEN: 'layer:flatten', // { png, name? } 合并可见图层为一层
+
+    // ---- 图层组 ----
+    // 组本身没有像素，它只是一条「怎么把子图层合到一起」的规则（不透明度 + 混合模式）。
+    // 不变式：**同一组的图层在 room.layers 里永远连续**。组没有独立的位置，
+    // 「组在哪」= 「它那一块在哪」。下面几条消息都负责维持这条不变式，
+    // 页面/测试都可以拿它当断言用（见 tools/test-groups.js）。
+    GROUP_ADD: 'group:add',         // { id, name, layerId? } 新建组；给了 layerId 就顺手把它放进去
+    GROUP_UPD: 'group:upd',         // { groupId, patch } 改名 / 显隐 / 不透明度 / 混合模式 / 折叠
+    GROUP_DEL: 'group:del',         // { groupId, withLayers? } 默认是**解散组**（图层留在原位）
+    GROUP_MOVE: 'group:move',       // { groupId, dir: 1|-1 } 整组（连同组内所有图层）上移 / 下移一格
+    LAYER_GROUP: 'layer:group',     // { layerId, groupId } 把图层挪进某组；groupId 为 null 表示移出组
+
+    // ---- 工程文件（.chahu）装载：分片传，避开单条 12MB 的 ws 上限 ----
+    // 三条一起构成一次原子替换：收齐之前房间内容不变，收不齐就整批丢弃。
+    // 只允许房主，且只应该在刚建好的空房里用（会把现有图层和笔迹全部换掉）。
+    PROJECT_BEGIN: 'project:begin', // { count } 开始装载，服务端开暂存区
+    PROJECT_LAYER: 'project:layer', // { index, name, visible, opacity, locked, alphaLock, blend, png }
+    PROJECT_END: 'project:end',     // {} 收齐后整体替换房间文档
 
     CHAT: 'chat',                   // { text, img? } —— 游戏中时 text 会被当成猜词
     CURSOR: 'cursor',               // { x, y, active, tool }
@@ -103,7 +122,7 @@
     ERROR: 'error',              // { code, message }
     ROOM_LIST: 'room:list',      // { rooms: [{id,name,online,strokes,createdAt}] }
 
-    ROOM_JOINED: 'room:joined',  // { room, layers, members, chat, you, history }
+    ROOM_JOINED: 'room:joined',  // { room, layers, groups, members, chat, you, history }
     ROOM_LEFT: 'room:left',
     ROOM_DESTROYED: 'room:destroyed', // { by }
     ROOM_DELETED: 'room:deleted',   // { id, by } 房间被删除（房主/GC）
@@ -119,7 +138,7 @@
     STROKE_CANCEL: 'stroke:cancel', // { id }
     STROKE_REMOVED: 'stroke:removed',   // { ids, reason, scope?, layerId? }
     STROKE_ADDED: 'stroke:added',       // { stroke }
-    LAYERS: 'layers',                   // { layers, baseImages? }
+    LAYERS: 'layers',                   // { layers, groups, baseImages? } 图层表与组表总是成对下发
     CHAT: 'chat',                       // { id, userId, name, color, text, img?, ts }
     CURSOR: 'cursor',                   // { userId, x, y, active }
     PONG: 'pong',                       // { t0 }

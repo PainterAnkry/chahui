@@ -24,6 +24,15 @@ contextBridge.exposeInMainWorld('chahuDesktop', {
     }
   },
   getInfo: () => ipcRenderer.invoke('chahu:get-info'),
+  openFile: (kind) => ipcRenderer.invoke('chahu:open', kind),
+  clipboardImage: () => ipcRenderer.invoke('chahu:clipboard-image'),
+  // 更新包下载：主进程下（没有 CORS 限制），进度通过事件回推
+  downloadUpdate: (url, name) => ipcRenderer.invoke('chahu:download-update', url, name),
+  onUpdateProgress: (cb) => {
+    const fn = (_e, p) => { try { cb(p); } catch (err) { /* ignore */ } };
+    ipcRenderer.on('chahu:update-progress', fn);
+    return () => ipcRenderer.removeListener('chahu:update-progress', fn);
+  },
   setServer: (url) => ipcRenderer.invoke('chahu:set-server', url),
   setEmbeddedServer: (on) => ipcRenderer.invoke('chahu:set-embedded', on),
   getServerInfo: () => ipcRenderer.invoke('chahu:server-info')

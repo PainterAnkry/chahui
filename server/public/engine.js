@@ -788,6 +788,15 @@
     this.background = '#ffffff';
 
     this.layers = [];
+    /**
+     * 图层组表。组**没有像素**，它只是一条「子图层怎么合到一起」的规则
+     * （组自己的不透明度 + 混合模式），所以它不占 this.layers 里的位置。
+     *
+     * 不变式（和服务端一致）：**同一组的图层在 this.layers 里连续**，
+     * 「组在哪」= 「它那一块在哪」。见 renderUnits()。
+     */
+    this.groups = [];
+    this.groupById = new Map();
     this.activeLayerId = null;
 
     this.strokes = [];          // 全部已确认笔迹，按 seq 升序
@@ -813,6 +822,7 @@
 
     this.replayMode = false;
     this.replayCanvas = null;
+    this.replayBaseCanvas = null;   // 「已播完」那部分的基底快照
 
     /* 协作视图（纯本机显示，不同步、不进文档） */
     this.dimMode = 'off';          // 'off' | 'soft' | 'faint' | 'hide'
@@ -821,6 +831,15 @@
     this.localHidden = new Set();  // 「只对我隐藏」的图层 id
     this.replayStrokes = [];
     this.replayCursor = 0;
+    this.replayTotal = 0;
+    this.replayAt = 0;
+
+    /* 洋葱皮（回放时把前后几笔染成残影）——纯本机显示，不进文档、不上传 */
+    this.onion = { on: false, before: 1, after: 1 };
+    this.onionWarm = null;         // 前影（暖色）小组画布
+    this.onionCool = null;         // 后影（冷色）小组画布
+    this.onionTmp = null;          // 建残影时的中转画布
+    this._onionKey = '';           // 缓存键：残影只在「当前笔」换了之后重建
 
     this.view = null; this.viewCtx = null;
     this.overlay = null; this.overlayCtx = null;
@@ -896,6 +915,7 @@
     this.scratchPool.length = 0;
     this.baseComposite = null;
     this.baseKey = '';
+    this.setGroups(meta.groups || []);
     (meta.layers || []).forEach(function (l) { self.addLayerMeta(l); });
     if (!this.layers.length) this.addLayerMeta({ id: P.rid('L'), name: '图层 1' });
     this.activeLayerId = this.layers[this.layers.length - 1].id;
@@ -914,6 +934,7 @@
       locked: !!meta.locked,
       alphaLock: !!meta.alphaLock,
       blend: P.BLEND_MODES.indexOf(meta.blend) >= 0 ? meta.blend : 'normal',
+      groupId: meta.groupId || null,
       baseSeq: meta.baseSeq || 0,
       baseImage: null,
       canvas: null, ctx: null,
@@ -950,6 +971,130 @@
     img.src = dataUrl;
   };
 
+  /* ---------------- 图层组 ----------------
+   * 组没有像素，只有「子图层怎么合到一起」的规则。所以它不占 this.layers 的位置，
+   * 位置由「它那一块图层在哪」决定 —— 见 renderUnits()。
+   */
+
+  CanvasEngine.prototype.setGroups = function (list) {
+    this.groups = (list || []).map(function (g) {
+      return {
+        id: g.id,
+        name: g.name || '组',
+        visible: g.visible !== false,
+        opacity: typeof g.opacity === 'number' ? g.opacity : 1,
+        blend: P.BLEND_MODES.indexOf(g.blend) >= 0 ? g.blend : 'normal',
+        collapsed: !!g.collapsed
+      };
+    });
+    this.groupById = new Map(this.groups.map(function (g) { return [g.id, g]; }));
+  };
+
+  CanvasEngine.prototype.getGroup = function (id) {
+    return id ? (this.groupById.get(id) || null) : null;
+  };
+
+  CanvasEngine.prototype.groupList = function () {
+    var self = this;
+    return this.groups.map(function (g) {
+      return {
+        id: g.id, name: g.name, visible: g.visible, opacity: g.opacity,
+        blend: g.blend, collapsed: g.collapsed,
+        count: self.layers.reduce(function (n, l) { return n + (l.groupId === g.id ? 1 : 0); }, 0)
+      };
+    });
+  };
+
+  /** 图层所属的组对象；不在组里、或那个组已经不在了（本地还没同步到）都返回 null */
+  CanvasEngine.prototype.groupOf = function (layer) {
+    if (!layer || !layer.groupId) return null;
+    return this.getGroup(layer.groupId);
+  };
+
+  /** 这一刻该不该画出这一层：自身可见 + 没被「只对我隐藏」 + 所属的组可见 */
+  CanvasEngine.prototype.layerDrawable = function (layer) {
+    if (!layer || !layer.visible) return false;
+    if (this.isLocallyHidden(layer)) return false;
+    var g = this.groupOf(layer);
+    if (g && !g.visible) return false;
+    return true;
+  };
+
+  CanvasEngine.prototype.drawableLayers = function (layers) {
+    var self = this;
+    return layers.filter(function (l) { return self.layerDrawable(l); });
+  };
+
+  /** layerId → 这一刻该不该显示（层自己 + 所属组）。回放 / 洋葱皮的可见性快照复用它 */
+  CanvasEngine.prototype.visibleMap = function () {
+    var vis = {};
+    for (var i = 0; i < this.layers.length; i++) {
+      var l = this.layers[i];
+      var g = this.groupOf(l);
+      vis[l.id] = !!l.visible && !(g && !g.visible);
+    }
+    return vis;
+  };
+
+  /**
+   * 自下而上把图层归拢成「渲染单元」：
+   *   普通图层 → { group: null, layers: [它自己] }
+   *   同一组   → { group: 组对象, layers: [组内所有图层，自下而上] }
+   * 三处合成（基底 / 活动层重绘 / 导出）都走这一条，免得各写各的走样。
+   */
+  CanvasEngine.prototype.renderUnits = function () {
+    var out = [], seen = {};
+    for (var i = 0; i < this.layers.length; i++) {
+      var l = this.layers[i];
+      var g = this.groupOf(l);
+      if (!g) { out.push({ group: null, layers: [l] }); continue; }
+      if (seen[g.id]) continue;                  // 同一组只出一个单元
+      seen[g.id] = 1;
+      var members = [];
+      for (var j = 0; j < this.layers.length; j++) {
+        if (this.layers[j].groupId === g.id) members.push(this.layers[j]);
+      }
+      out.push({ group: g, layers: members });
+    }
+    return out;
+  };
+
+  /**
+   * 把「一组图层」按组的不透明度 / 混合模式落到 dstCtx。
+   * 组内各层先合到一张临时画布上（各自套自己的浓度与混合模式），
+   * 最后**整组一次性**落下去 —— 这就是组和「一堆普通图层」的全部区别：
+   * 组那层参数只作用一次。要是逐层乘下去，「组 50% + 组内 5 层」会淡成 3%，
+   * 而用户按 50% 的直觉是「整组半透明」。
+   */
+  CanvasEngine.prototype.composeGroup = function (dstCtx, group, layers, opts) {
+    var gs = this.takeScratch();
+    var gctx = gs.ctx;
+    clearCtx(gctx, this.width, this.height);
+    gctx.setTransform(1, 0, 0, 1, 0, 0);
+    gctx.globalAlpha = 1; gctx.globalCompositeOperation = 'source-over'; gctx.filter = 'none';
+    for (var i = 0; i < layers.length; i++) {
+      var t = this.takeScratch();
+      this.composeLayer(gctx, t.ctx, t.canvas, layers[i], opts);
+      this.releaseScratch(t.canvas);
+    }
+    dstCtx.globalAlpha = group.opacity;
+    dstCtx.globalCompositeOperation = blendOp(group.blend);
+    dstCtx.drawImage(gs.canvas, 0, 0);
+    dstCtx.globalAlpha = 1;
+    dstCtx.globalCompositeOperation = 'source-over';
+    this.releaseScratch(gs.canvas);
+  };
+
+  CanvasEngine.prototype.activeGroupIds = function () {
+    var set = new Set();
+    var self = this;
+    this.pending.forEach(function (e) {
+      var g = self.groupOf(e.layer);
+      if (g) set.add(g.id);
+    });
+    return set;
+  };
+
   CanvasEngine.prototype.getLayer = function (id) {
     for (var i = 0; i < this.layers.length; i++) if (this.layers[i].id === id) return this.layers[i];
     return null;
@@ -963,12 +1108,13 @@
     return this.layers.map(function (l) {
       return {
         id: l.id, name: l.name, visible: l.visible, opacity: l.opacity,
-        locked: l.locked, alphaLock: l.alphaLock, blend: l.blend, baseSeq: l.baseSeq
+        locked: l.locked, alphaLock: l.alphaLock, blend: l.blend,
+        groupId: l.groupId || null, baseSeq: l.baseSeq
       };
     });
   };
 
-  CanvasEngine.prototype.setLayers = function (list, baseImages) {
+  CanvasEngine.prototype.setLayers = function (list, baseImages, groups) {
     var self = this;
     var byId = new Map(this.layers.map(function (l) { return [l.id, l]; }));
     var next = [];
@@ -982,6 +1128,7 @@
         l.locked = !!meta.locked;
         l.alphaLock = !!meta.alphaLock;
         l.blend = P.BLEND_MODES.indexOf(meta.blend) >= 0 ? meta.blend : 'normal';
+        l.groupId = meta.groupId || null;
         var oldSeq = l.baseSeq;
         l.baseSeq = meta.baseSeq || 0;
         // 只要服务端给了底图、而本地这份底图对不上（版本变了，或者刚被 clearScope 清空），就要重新加载。
@@ -1007,6 +1154,8 @@
       }
     });
     this.layers = next;
+    // 组表必须先于「图层数组定稿」生效：后面 baseKey / 合成全都按分组走
+    if (Array.isArray(groups)) this.setGroups(groups);
     if (!this.layers.length) this.addLayerMeta({ id: P.rid('L'), name: '图层 1' });
     if (!this.getLayer(this.activeLayerId)) this.activeLayerId = this.layers[this.layers.length - 1].id;
     this.baseDirty = true;
@@ -1071,7 +1220,11 @@
       lineHeight: Math.max(0.8, Math.min(3, Number(info.lineHeight) || 1.35)),
       seed: br.seed || P.newSeed(),
       points: [],
+      // ts / te = 这一笔的起止时刻，只有回放用得上。
+      // 服务端不打这两个字段（strokeHeader 不含），由**收到消息的这一端本地打点** ——
+      // 所以两台机器上「笔与笔之间的相对节奏」一致，绝对时刻各自本地，不必对表。
       ts: info.ts || Date.now(),
+      te: info.te || 0,
       seq: info.seq || 0
     };
   };
@@ -1149,6 +1302,9 @@
     if (!e) return null;
     this.pending.delete(strokeId);
     var stroke = e.stroke;
+    // 收笔时刻（回放用）。本地落笔和远端笔迹都走这里，
+    // 所以两端都能拿到「这一笔持续了多久」。
+    if (!stroke.te) stroke.te = Date.now();
     this.previewStroke = null;
     this.selectPreview = null;
     if (stroke.points.length === 0) {
@@ -1439,8 +1595,16 @@
     return s + '|' + Array.from(this.localHidden).sort().join(',');
   };
 
+  /**
+   * 「只对我隐藏」对**组**同样有效。
+   * 传图层对象：它自己被隐藏、或者它所属的组被隐藏，都算。
+   * 传 id 字符串：只查这一个 id（组行上直接用组 id 调它）。
+   */
   CanvasEngine.prototype.isLocallyHidden = function (layer) {
-    return !!(layer && this.localHidden.has(layer.id));
+    if (!layer) return false;
+    if (typeof layer === 'string') return this.localHidden.has(layer);
+    if (this.localHidden.has(layer.id)) return true;
+    return !!(layer.groupId && this.localHidden.has(layer.groupId));
   };
 
   /** 显示用的那份图层画布（没有开协作视图时就是文档本身，零开销） */
@@ -2413,10 +2577,23 @@
 
   CanvasEngine.prototype.rebuildBase = function () {
     var active = this.replayMode ? new Set() : this.activeLayerIds();
-    var key = active.size + '|' + this.width + 'x' + this.height + '|' + this.background + '|' +
+    // 有进行中笔迹的**组**整组排除在基底之外，交给 compose() 连笔迹一起整组重画。
+    // 只排掉那一层是不够的：组的不透明度 / 混合模式要作用在整组上，
+    // 把组里单独一层画到基底上面，那一层就绕开了组的参数 ——
+    // 组半透明时，手上那一笔会比周围浓。
+    var activeGroups = this.replayMode ? new Set() : this.activeGroupIds();
+    this.activeGroupsCache = activeGroups;
+    // 缓存键里必须放**具体哪些**在画，而不只是「有几个」：
+    // 笔数一样但换了一支笔时，只比数量的话缓存不会失效，画面就停在上一笔。
+    var key = active.size + '|' + Array.from(active).sort().join(',') + '|' +
+      this.width + 'x' + this.height + '|' + this.background + '|' +
       'dim:' + this.dimKey() + '|' +
+      'g:' + this.groups.map(function (g) {
+        return g.id + (g.visible ? '1' : '0') + g.opacity + g.blend;
+      }).join(',') + '|' +
       this.layers.map(function (l) {
         return l.id + (l.visible ? '1' : '0') + l.opacity + l.blend + ':' +
+          l.groupId + ':' +
           l.strokes.length + '/' + (l.baseSeq || 0) + '/' + (l.alphaLock ? 1 : 0);
       }).join(',');
     if (!this.baseDirty && key === this.baseKey && this.baseComposite) return;
@@ -2432,9 +2609,19 @@
     ctx.clearRect(0, 0, this.width, this.height);
     ctx.fillStyle = this.background;
     ctx.fillRect(0, 0, this.width, this.height);
-    for (var i = 0; i < this.layers.length; i++) {
-      var l = this.layers[i];
-      if (!l.visible || this.isLocallyHidden(l) || active.has(l.id)) continue;
+    var units = this.renderUnits();
+    for (var u = 0; u < units.length; u++) {
+      var unit = units[u];
+      if (unit.group) {
+        if (!unit.group.visible) continue;                    // 组隐藏 = 整组不画
+        if (activeGroups.has(unit.group.id)) continue;        // 有笔在画 → 交给 compose
+        var mem = this.drawableLayers(unit.layers);
+        if (!mem.length) continue;
+        this.composeGroup(ctx, unit.group, mem);
+        continue;
+      }
+      var l = unit.layers[0];
+      if (!this.layerDrawable(l) || active.has(l.id)) continue;
       ctx.globalAlpha = l.opacity;
       ctx.globalCompositeOperation = blendOp(l.blend);
       ctx.drawImage(this.displayCanvas(l), 0, 0);
@@ -2528,11 +2715,23 @@
       ctx.drawImage(this.baseComposite, 0, 0);
 
       var active = this.activeIdsCache || this.activeLayerIds();
+      var activeGroups = this.activeGroupsCache || this.activeGroupIds();
       if (active.size) {
         var tmp = this.takeTmp();
-        for (var i = 0; i < this.layers.length; i++) {
-          var l = this.layers[i];
-          if (!l.visible || this.isLocallyHidden(l) || !active.has(l.id)) continue;
+        var units = this.renderUnits();
+        for (var u = 0; u < units.length; u++) {
+          var unit = units[u];
+          if (unit.group) {
+            // 不在基底里被整组跳过的组，说明现在没人在组里画
+            if (!activeGroups.has(unit.group.id)) continue;
+            if (!unit.group.visible) continue;
+            var mem = this.drawableLayers(unit.layers);
+            if (!mem.length) continue;
+            this.composeGroup(ctx, unit.group, mem);
+            continue;
+          }
+          var l = unit.layers[0];
+          if (!active.has(l.id) || !this.layerDrawable(l)) continue;
           this.composeLayer(ctx, tmp.ctx, tmp.canvas, l);
         }
         this.releaseScratch(tmp.canvas);
@@ -2555,8 +2754,22 @@
     }
     var includeActive = opts.includeActive !== false;
     var tmp = mkCanvas(w, h, false);
-    for (var i = 0; i < this.layers.length; i++) {
-      var l = this.layers[i];
+    // 「只要一层」的调用（导出某层 / 合并 / 复制）不套组：它们要的是那一层自己的像素，
+    // 把组的不透明度乘进来反而是错的。
+    var useGroups = !opts.onlyLayer && !opts.rawLayer;
+    var units = useGroups
+      ? this.renderUnits()
+      : this.layers.map(function (l) { return { group: null, layers: [l] }; });
+    for (var u = 0; u < units.length; u++) {
+      var unit = units[u];
+      if (unit.group) {
+        if (!unit.group.visible) continue;
+        var mem = unit.layers.filter(function (x) { return x.visible; });
+        if (!mem.length) continue;
+        this.renderGroupInto(out.ctx, unit.group, mem, tmp, includeActive);
+        continue;
+      }
+      var l = unit.layers[0];
       if (opts.onlyLayer && opts.onlyLayer !== l.id) continue;
       if (!l.visible && !opts.onlyLayer) continue;
       // 图层覆盖（滤镜预览）这里也要认，否则会出现「画布上是预览效果、
@@ -2587,6 +2800,44 @@
       }
     }
     return out;
+  };
+
+  /**
+   * renderDocument 里的「一组」：组内各层先落到一张临时画布（各套自己的浓度与混合模式），
+   * 再整组按组自己的浓度 / 混合模式落下去 —— 和屏幕上的 composeGroup 是同一条规则。
+   * 区别只在于这条路要的是**成品像素**，所以逐层都不带「别人笔迹淡一点」那层。
+   */
+  CanvasEngine.prototype.renderGroupInto = function (dstCtx, group, layers, tmp, includeActive) {
+    var gs = this.takeScratch();
+    var gctx = gs.ctx;
+    clearCtx(gctx, this.width, this.height);
+    gctx.setTransform(1, 0, 0, 1, 0, 0);
+    gctx.globalAlpha = 1; gctx.globalCompositeOperation = 'source-over'; gctx.filter = 'none';
+    for (var i = 0; i < layers.length; i++) {
+      var l = layers[i];
+      var ovd = this.layerOverride;
+      if (ovd && ovd.layerId === l.id && ovd.canvas) {
+        gctx.globalAlpha = l.opacity;
+        gctx.globalCompositeOperation = blendOp(l.blend);
+        gctx.drawImage(ovd.canvas, 0, 0);
+        gctx.globalAlpha = 1; gctx.globalCompositeOperation = 'source-over';
+        continue;
+      }
+      if (includeActive && this.hasPendingOn(l)) {
+        this.composeLayer(gctx, tmp.ctx, tmp.canvas, l, { raw: true });
+      } else {
+        gctx.globalAlpha = l.opacity;
+        gctx.globalCompositeOperation = blendOp(l.blend);
+        gctx.drawImage(l.canvas, 0, 0);
+        gctx.globalAlpha = 1; gctx.globalCompositeOperation = 'source-over';
+      }
+    }
+    dstCtx.globalAlpha = group.opacity;
+    dstCtx.globalCompositeOperation = blendOp(group.blend);
+    dstCtx.drawImage(gs.canvas, 0, 0);
+    dstCtx.globalAlpha = 1;
+    dstCtx.globalCompositeOperation = 'source-over';
+    this.releaseScratch(gs.canvas);
   };
 
   /** 图层「原始像素」（含进行中笔迹，但不套用图层浓度与混合模式）——合并 / 复制用 */
@@ -2932,69 +3183,373 @@
 
   /* ---------------- 回放 ---------------- */
 
+  /**
+   * 一笔在时间轴上的时长。
+   *   ① 真实值：begin 打的 ts → 收笔打的 te
+   *   ② 兜底：到下一笔开始之前的空档
+   *   ③ 再兜底：一个名义时长
+   * 夹在 [120, 2600] 之间 —— 作者去泡了杯茶留下的长空档照搬，会让回放干等着不动。
+   */
+  var REPLAY_MIN_MS = 120;
+  var REPLAY_MAX_MS = 2600;
+  function replaySpanOf(s, nextTs) {
+    var dur = 0;
+    if (s.te && s.ts && s.te > s.ts) dur = s.te - s.ts;
+    else if (nextTs && nextTs > (s.ts || 0)) dur = nextTs - s.ts;
+    if (!dur) dur = 400;
+    return Math.max(REPLAY_MIN_MS, Math.min(REPLAY_MAX_MS, dur));
+  }
+
+  /**
+   * 排时间轴。返回笔数。
+   *
+   * `_roff` / `_rdur` = 这一笔在时间轴上的起跑点与时长，挂在笔迹对象上。
+   * 关键一步是 `acc = max(真实起点, 上一笔的终点)`：两个人同时画时笔迹在时间上会重叠，
+   * 而一块画布一帧只能画一笔 —— 重叠的按列表顺序串起来。列表顺序就是最终画面的
+   * 叠放顺序（ts, seq 排序），所以**末帧一定等于成品**。
+   */
   CanvasEngine.prototype.prepareReplay = function () {
-    if (!this.replayCanvas || this.replayCanvas.width !== this.width ||
-        this.replayCanvas.height !== this.height) {
+    var need = !this.replayCanvas ||
+      this.replayCanvas.width !== this.width || this.replayCanvas.height !== this.height;
+    if (need) {
       var c = mkCanvas(this.width, this.height, false);
       this.replayCanvas = c.canvas;
       this.replayCtx = c.ctx;
     }
-    this.replayStrokes = this.strokes.slice().sort(function (a, b) {
+    if (!this.replayBaseCanvas || this.replayBaseCanvas.width !== this.width ||
+        this.replayBaseCanvas.height !== this.height) {
+      var b = mkCanvas(this.width, this.height, false);
+      this.replayBaseCanvas = b.canvas;
+      this.replayBaseCtx = b.ctx;
+    }
+    var src = this.strokes.slice().sort(function (a, b) {
       return (a.ts || 0) - (b.ts || 0) || (a.seq - b.seq);
     });
-    this.replayCursor = 0;
+    var t0 = src.length ? (src[0].ts || 0) : 0;
+    var acc = 0;
+    for (var i = 0; i < src.length; i++) {
+      var s = src[i];
+      var next = i + 1 < src.length ? (src[i + 1].ts || 0) : 0;
+      acc = Math.max(Math.max(0, (s.ts || t0) - t0), acc);
+      s._roff = acc;
+      s._rdur = replaySpanOf(s, next);
+      acc += s._rdur;
+    }
+    this.replayStrokes = src;
+    this.replayTotal = acc;
+    this.replayReset();
     return this.replayStrokes.length;
   };
 
-  CanvasEngine.prototype.replayDrawUpTo = function (index) {
-    var self = this;
-    var ctx = this.replayCtx;
-    if (index < this.replayCursor) {
-      clearCtx(ctx, this.width, this.height);
-      ctx.fillStyle = this.background;
-      ctx.fillRect(0, 0, this.width, this.height);
+  /**
+   * 回到起点：背景 + 各层底图铺好，一笔不剩。
+   * 显示画布和「固化基底」两块的初始状态必须**逐像素一致** ——
+   * 回放显示 = 基底 + 正在画的那一笔，基底错了整段回放都错。
+   */
+  CanvasEngine.prototype.replayReset = function () {
+    if (!this.replayCtx || !this.replayBaseCtx) return;
+    var targets = [this.replayCtx, this.replayBaseCtx];
+    for (var t = 0; t < targets.length; t++) {
+      var g = targets[t];
+      clearCtx(g, this.width, this.height);
+      g.globalAlpha = 1;
+      g.globalCompositeOperation = 'source-over';
+      g.fillStyle = this.background;
+      g.fillRect(0, 0, this.width, this.height);
       for (var k = 0; k < this.layers.length; k++) {
         var bl = this.layers[k];
-        if (bl.baseImage && bl.visible) ctx.drawImage(bl.baseImage, 0, 0, this.width, this.height);
+        if (bl.baseImage && this.layerDrawable(bl)) {
+          g.drawImage(bl.baseImage, 0, 0, this.width, this.height);
+        }
       }
-      this.replayCursor = 0;
     }
-    var vis = {};
-    for (var v = 0; v < this.layers.length; v++) vis[this.layers[v].id] = this.layers[v].visible;
-    for (var i = this.replayCursor; i < index; i++) {
+    this.replayCursor = 0;
+    this.replayAt = 0;
+    this._onionKey = '';        // 回到起点 = 残影缓存作废（prepareReplay 也走这里）
+  };
+
+  /** 把一笔画到目标画布（显示画布与固化基底共用这一条渲染路径） */
+  CanvasEngine.prototype.replayStampOne = function (ctx, canvas, s) {
+    if (isFill(s)) {
+      var pt = s.points && s.points[0];
+      if (pt) floodFill(ctx, this.width, this.height, Math.round(pt[0]), Math.round(pt[1]),
+        s.color, s.tolerance, s.opacity, s.expand);
+      return;
+    }
+    var sc = this.takeScratch();
+    this.paintToScratch(sc.ctx, s);
+    if (isBlur(s)) {
+      applyBlurMaskedTo(ctx, canvas, sc.canvas, s, this.width, this.height,
+        this.takeScratch.bind(this), this.releaseScratch.bind(this));
+    } else {
+      this.stampStroke(ctx, null, s, sc.canvas);
+    }
+    this.releaseScratch(sc.canvas);
+  };
+
+  /** 把 [cursor, upTo) 这些「已经播完」的笔固化到基底上 */
+  CanvasEngine.prototype.replayCommit = function (upTo) {
+    if (!this.replayBaseCtx) return;
+    var vis = this.visibleMap();
+    for (var i = this.replayCursor; i < upTo; i++) {
       var s = this.replayStrokes[i];
       if (!s) continue;
       if (vis[s.layerId] === false) continue;
-      if (isFill(s)) {
-        var pt = s.points[0];
-        if (pt) floodFill(ctx, this.width, this.height, Math.round(pt[0]), Math.round(pt[1]), s.color, s.tolerance, s.opacity, s.expand);
-        continue;
-      }
-      var sc = this.takeScratch();
-      this.paintToScratch(sc.ctx, s);
-      if (isBlur(s)) {
-        applyBlurMaskedTo(ctx, this.replayCanvas, sc.canvas, s, this.width, this.height,
-          this.takeScratch.bind(this), this.releaseScratch.bind(this));
-      } else {
-        this.stampStroke(ctx, null, s, sc.canvas);
-      }
-      this.releaseScratch(sc.canvas);
+      this.replayStampOne(this.replayBaseCtx, this.replayBaseCanvas, s);
     }
-    this.replayCursor = Math.max(this.replayCursor, index);
+    this.replayCursor = Math.max(this.replayCursor, upTo);
   };
 
+  /**
+   * 显示 = 基底 + 「正在画的那一笔」的前 k 个落点。
+   * 每帧只是一次整幅 drawImage + 一笔的部分重绘，**帧率与总笔数无关**。
+   * 部分重绘必须画在基底副本上、而不是叠在上一帧上 —— 否则同一笔会被反复叠加越来越深。
+   *
+   * 洋葱皮开着时再多两小组残影：**刚画完的几笔**（暖色）压在正在画的那一笔下面，
+   * **马上要画的几笔**（冷色）盖在最上面。残影是纯显示的，不进基底、不进文档。
+   */
+  CanvasEngine.prototype.replayShow = function (s, k) {
+    var ctx = this.replayCtx;
+    if (!ctx || !this.replayBaseCanvas) return;
+    var vis = this.visibleMap();
+    if (s && vis[s.layerId] === false) s = null;
+
+    // 一起算残影：`s` 就是「正在画的那一笔」，为 null 说明此刻落在两笔之间的停顿里
+    var onion = !!(this.onion.on && this.replayStrokes && this.replayStrokes.length);
+    if (onion) this.replayOnionPrep(this.replayCursor, !!s, vis);
+
+    clearCtx(ctx, this.width, this.height);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.drawImage(this.replayBaseCanvas, 0, 0);
+    if (onion) this.replayOnionDraw(ctx, true);
+
+    if (s) {
+      var np = (s.points && s.points.length) || 0;
+      if (k >= np) {
+        this.replayStampOne(ctx, this.replayCanvas, s);
+      } else {
+        // 截短落点的副本；**原笔迹一个字段都不动**（末帧与导出还要用它）
+        var part = Object.assign({}, s);
+        part.points = s.points.slice(0, Math.max(1, k));
+        this.replayStampOne(ctx, this.replayCanvas, part);
+      }
+    }
+    if (onion) this.replayOnionDraw(ctx, false);
+  };
+
+  /* ---------------- 洋葱皮 ---------------- */
+
+  /**
+   * 残影配色：前一暖后一冷，跟动画软件的约定一致（红=已有，青=将画）。
+   * 浓度按「离当前笔多远」递减 —— 最远那一笔已经很淡了。
+   */
+  var ONION_WARM = '#ff3b30';
+  var ONION_COOL = '#00a8ff';
+  var ONION_WARM_ALPHA = 0.42;
+  var ONION_COOL_ALPHA = 0.30;
+  var ONION_FADE = [1, 0.6, 0.36];
+
+  /**
+   * 这一笔能不能做残影。排除的几类都有硬理由，不是挑肥拣瘦：
+   *   · 油漆桶：在**透明**画布上从一点灌水会把整张画布灌满 → 残影变成一块全屏色块
+   *   · 模糊 / 涂抹 / 液化：读的是「目标像素」，透明底上读不到东西，画了等于没画
+   *   · 选区：只有蚂蚁线，没有墨迹
+   */
+  function onionGhostable(s) {
+    return !isFill(s) && !isBlur(s) && !isSmudge(s) && !isLiquify(s) &&
+      !isSelectTool(s) && !isRegionSelect(s);
+  }
+
+  /**
+   * 把 `idx` 里这几笔的**墨迹本身**染成一种颜色，放到一张透明画布上。
+   * `idx` 是笔迹索引，**近 → 远**排好（最近的那笔在最前，浓度也最高）。
+   *
+   * 为什么不直接把「那一刻的整幅画面」当残影：回放画面是不透明的（铺了背景），
+   * 把上一帧整幅叠上来只会把整张图压暗，看不出「哪几笔是刚出现的」——
+   * 所以残影只包含**这几笔自己**。
+   *
+   * 染色走 source-atop：只作用在已有像素上。于是残影的形状就是笔迹的形状而不是一块色块，
+   * 笔迹半透明的边缘也原样保留。
+   */
+  CanvasEngine.prototype.buildOnion = function (idx, vis, tint) {
+    if (!idx || !idx.length) return null;
+    if (!this.onionTmp || this.onionTmp.width !== this.width || this.onionTmp.height !== this.height) {
+      this.onionTmp = mkCanvas(this.width, this.height, false).canvas;
+    }
+    var tmp = this.onionTmp;
+    var tctx = tmp.getContext('2d');
+    var group = mkCanvas(this.width, this.height, false);
+    var gctx = group.ctx;
+    var any = false;
+    // idx 是**近 → 远**排好的，但要从远往近画（近的压在上面）。
+    // 浓淡也按同一份顺序取：最近那笔最浓，越远越淡。
+    for (var d = idx.length - 1; d >= 0; d--) {
+      var s = this.replayStrokes[idx[d]];
+      if (!s || vis[s.layerId] === false || !onionGhostable(s)) continue;
+      clearCtx(tctx, this.width, this.height);
+      this.replayStampOne(tctx, tmp, s);
+      // 浓淡只能靠**合成这一下**给：paintOnto 内部把 globalAlpha 重置成了 1，
+      // 所以在 replayStampOne 之前设 globalAlpha 是白设 —— 这是这一段的坑。
+      gctx.save();
+      gctx.setTransform(1, 0, 0, 1, 0, 0);
+      gctx.globalAlpha = ONION_FADE[Math.min(d, ONION_FADE.length - 1)];
+      gctx.globalCompositeOperation = 'source-over';
+      gctx.filter = 'none';
+      gctx.drawImage(tmp, 0, 0);
+      gctx.restore();
+      any = true;
+    }
+    if (!any) return null;
+    gctx.save();
+    gctx.setTransform(1, 0, 0, 1, 0, 0);
+    gctx.globalAlpha = 1;
+    gctx.globalCompositeOperation = 'source-atop';
+    gctx.fillStyle = tint;
+    gctx.fillRect(0, 0, this.width, this.height);
+    gctx.restore();
+    return group.canvas;
+  };
+
+  /**
+   * 备好两组残影画布。**只在「当前笔」变了之后才重建** ——
+   * 一笔画的过程中残影是固定的（前影=已播完的笔，后影=还没开画的笔），
+   * 每帧重建等于每帧重画好几整笔，帧率就没了。
+   *
+   * `playing` 决定「后影从哪一笔开始数」：正在画的那一笔不该算进「马上要画」里。
+   */
+  CanvasEngine.prototype.replayOnionPrep = function (base, playing, vis) {
+    var before = this.onion.before, after = this.onion.after;
+    var visKey = '';
+    for (var v = 0; v < this.groups.length; v++) {
+      visKey += this.groups[v].visible ? '1' : '0' + this.groups[v].id;
+    }
+    for (var w = 0; w < this.layers.length; w++) visKey += this.layers[w].visible ? '1' : '0';
+    var key = base + '|' + (playing ? 1 : 0) + '|' + before + '|' + after + '|' + visKey;
+    if (key === this._onionKey) return;
+    this._onionKey = key;
+    var n = this.replayStrokes.length;
+    // 两组都按**近 → 远**排好再交出去：浓淡就是照这份顺序递减的，最近那笔最清楚。
+    // 「近」的定义：前影里离当前笔最近的是 base-1；后影里最近的是 coolFrom 自己。
+    // 做不了残影的笔（油漆桶 / 模糊…）在**这里**就剔掉，别让它占掉一档浓度。
+    var warm = [], cool = [];
+    for (var i = 1; i <= before && base - i >= 0; i++) {
+      var sw = this.replayStrokes[base - i];
+      if (sw && vis[sw.layerId] !== false && onionGhostable(sw)) warm.push(base - i);
+    }
+    var coolFrom = base + (playing ? 1 : 0);
+    for (var j = 0; j < after && coolFrom + j < n; j++) {
+      var sc = this.replayStrokes[coolFrom + j];
+      if (sc && vis[sc.layerId] !== false && onionGhostable(sc)) cool.push(coolFrom + j);
+    }
+    this.onionWarm = this.buildOnion(warm, vis, ONION_WARM);
+    this.onionCool = this.buildOnion(cool, vis, ONION_COOL);
+  };
+
+  CanvasEngine.prototype.replayOnionDraw = function (ctx, warm) {
+    var cv = warm ? this.onionWarm : this.onionCool;
+    if (!cv) return;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = warm ? ONION_WARM_ALPHA : ONION_COOL_ALPHA;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.filter = 'none';
+    ctx.drawImage(cv, 0, 0);
+    ctx.restore();
+  };
+
+  /**
+   * 开关洋葱皮。开着的时候要**立刻**把当前这一帧重画出来，否则要等下一次 seek 才看得到，
+   * 用户点完按钮会觉得没反应。`replaySeek(当前时刻)` 是幂等的，重进一次是安全的。
+   */
+  CanvasEngine.prototype.setOnion = function (opts) {
+    opts = opts || {};
+    if (opts.on !== undefined) this.onion.on = !!opts.on;
+    var b = Math.round(Number(opts.before));
+    if (isFinite(b)) this.onion.before = clamp(b, 0, 3);
+    var a = Math.round(Number(opts.after));
+    if (isFinite(a)) this.onion.after = clamp(a, 0, 3);
+    this._onionKey = '';
+    if (this.replayMode) this.replaySeek(this.replayAt || 0);
+    else this.invalidate();
+    this.emit('onion', { on: this.onion.on, before: this.onion.before, after: this.onion.after });
+    return this.onion;
+  };
+
+  CanvasEngine.prototype.onionOn = function () { return !!this.onion.on; };
+  CanvasEngine.prototype.onionState = function () {
+    return { on: this.onion.on, before: this.onion.before, after: this.onion.after };
+  };
+
+  /** 按**索引**整笔推进（保留给旧调用方；内部照旧走基底 + 显示这条路） */
+  CanvasEngine.prototype.replayDrawUpTo = function (index) {
+    if (!this.replayStrokes) return;
+    if (index < this.replayCursor) this.replayReset();
+    var n = this.replayStrokes.length;
+    var upTo = Math.max(0, Math.min(index, n));
+    this.replayCommit(upTo);
+    this.replayAt = upTo >= n ? this.replayTotal : this.replayStrokes[upTo]._roff;
+    this.replayShow(null, 0);
+    this.invalidate();
+  };
+
+  /**
+   * 定位到时间轴第 t 毫秒。
+   * 往前推进是增量的；往回退则整条重建（拖进度条才会发生，一笔一笔重画代价可控）。
+   */
   CanvasEngine.prototype.replaySeek = function (t) {
-    var i = 0;
-    while (i < this.replayStrokes.length && (this.replayStrokes[i].ts - this.replayStrokes[0].ts) <= t) i++;
-    this.replayDrawUpTo(i);
+    if (!this.replayStrokes || !this.replayStrokes.length) return 0;
+    if (t < this.replayAt) this.replayReset();
+    var n = this.replayStrokes.length;
+    var i = Math.max(0, this.replayCursor);
+    while (i < n && t >= this.replayStrokes[i]._roff + this.replayStrokes[i]._rdur) i++;
+    this.replayCommit(i);
+    var s = this.replayStrokes[i];
+    var k = 0, playing = false;
+    if (s && t >= s._roff) {
+      playing = true;
+      var np = (s.points && s.points.length) || 1;
+      k = Math.max(1, Math.round(np * Math.min(1, (t - s._roff) / s._rdur)));
+    }
+    this.replayShow(playing ? s : null, k);
+    this.replayAt = t;
     this.invalidate();
     return i;
   };
 
   CanvasEngine.prototype.replayDuration = function () {
-    if (!this.replayStrokes.length) return 0;
-    var a = this.replayStrokes[0].ts, b = this.replayStrokes[this.replayStrokes.length - 1].ts;
-    return Math.max(1000, b - a + 800);
+    if (!this.replayStrokes || !this.replayStrokes.length) return 0;
+    return Math.max(1000, (this.replayTotal || 0) + 600);
+  };
+
+  /**
+   * 把「此刻的回放画面」画到任意 ctx —— 导出回放视频用。
+   * 注意 `renderInto` 画的是**成品文档**，回放画布只在屏幕合成里用；
+   * 想录下「过程」就必须走这里，否则录出来是一张静止的完成图。
+   */
+  CanvasEngine.prototype.replayInto = function (ctx) {
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.filter = 'none';
+    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    if (this.replayCanvas) ctx.drawImage(this.replayCanvas, 0, 0, this.width, this.height);
+    ctx.restore();
+    return this.replayCanvas;
+  };
+
+  /**
+   * 此刻正在「画」的那一笔（回放条上标作者用）。
+   * 落在两笔之间的停顿里就返回 null —— 那段时间画面本来就不动，标谁都不对。
+   * `replaySeek` 把已播完的都固化进 base 了，所以游标位置就是正在画的那一笔，O(1)。
+   */
+  CanvasEngine.prototype.replayCurrent = function () {
+    var s = this.replayStrokes && this.replayStrokes[this.replayCursor];
+    if (!s) return null;
+    var t = this.replayAt;
+    if (t < s._roff || t >= s._roff + s._rdur) return null;
+    return { index: this.replayCursor, stroke: s };
   };
 
   CanvasEngine.prototype.setReplayMode = function (on) {

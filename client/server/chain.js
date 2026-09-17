@@ -321,9 +321,14 @@ class ChainGame {
     return rows;
   }
 
+  /**
+   * 只读观众不进池子 —— 跟 game.js 的 playerList 一个道理：
+   * 他画不了，轮到他那一步整条链就卡住了。
+   */
   playerList() {
     const out = [];
     for (const m of this.room.members.values()) {
+      if (m.readonly) continue;
       out.push({ userId: m.userId, name: m.name, color: m.color });
       this.names.set(m.userId, m.name);
     }

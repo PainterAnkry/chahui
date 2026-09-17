@@ -65,6 +65,16 @@
           ]
         }),
         SEP,
+        // 工程文件（.chahu）：画布 + 图层 + 每层像素的一份自包含快照。
+        // 「打开工程」= 新建一个房间来承载它，所以 Ctrl+Shift+O 而不是接管 Ctrl+O
+        // （Ctrl+O 在这个软件里是「加入房间」）。
+        def('file', 'file.openProject', '打开工程（.chahu）…', {
+          mnemonic: 'P', key: 'Ctrl+Shift+O', run: function () { A().openProject(); }
+        }),
+        def('file', 'file.saveProject', '保存工程（.chahu）', {
+          mnemonic: 'G', key: 'Ctrl+Alt+S', run: function () { A().saveProject(); }
+        }),
+        SEP,
         def('file', 'file.export', '保存', { mnemonic: 'S', key: 'Ctrl+S', run: function () { A().exportAs('png'); } }),
         def('file', 'file.saveAs', '另存为', { mnemonic: 'A', key: 'Ctrl+Shift+S', run: function () { A().openExportDialog(); } }),
         def('file', 'file.exportSub', '导出', {
@@ -75,7 +85,8 @@
             sub('file', 'file.export.bmp', 'BMP（.bmp，24 位）', { run: function () { A().exportAs('bmp'); } }),
             sub('file', 'file.export.tga', 'TGA（.tga，32 位）', { run: function () { A().exportAs('tga'); } }),
             sub('file', 'file.export.more', '更多格式 / 画质…', { run: function () { A().openExportDialog(); } }),
-            sub('file', 'file.export.webm', '导出录制视频（WebM）', { run: function () { A().toggleRecord(); } })
+            sub('file', 'file.export.webm', '导出录制视频（WebM）', { run: function () { A().toggleRecord(); } }),
+            sub('file', 'file.export.replay', '导出回放视频（WebM，按当前倍速）', { run: function () { A().exportReplayVideo(); } })
           ]
         }),
         SEP,
@@ -99,7 +110,7 @@
         SEP,
         off('edit', '剪切', 'T', 'Ctrl+X'),
         def('edit', 'edit.copy', '拷贝', { mnemonic: 'C', key: 'Ctrl+C', run: function () { A().copySelection(); } }),
-        off('edit', '粘贴', 'P', 'Ctrl+V'),
+        def('edit', 'edit.paste', '粘贴', { mnemonic: 'P', key: 'Ctrl+V', run: function () { A().pasteImage(); } }),
         SEP,
         def('edit', 'edit.copySel', '拷贝选区', { mnemonic: 'S', run: function () { A().copySelection(); } }),
         off('edit', '粘贴（不取消选区）', 'W'),
@@ -140,6 +151,11 @@
     {
       id: 'layer', name: '图层', mnemonic: 'L', items: [
         def('layer', 'layer.add', '新建图层', { mnemonic: 'N', key: 'Ctrl+Shift+N', run: function () { A().addLayer(); } }),
+        // 图层组：组合 / 进出组 / 解散。组本身没有像素，它只是一条
+        // 「子图层怎么合到一起」的规则（组自己的不透明度 + 混合模式）。
+        def('layer', 'layer.groupAdd', '组合（当前图层装进新建的组）', { mnemonic: 'G', key: 'Ctrl+G', run: function () { A().groupAdd(); } }),
+        def('layer', 'layer.groupToggle', '移入 / 移出组', { mnemonic: 'P', run: function () { A().groupToggle(); } }),
+        def('layer', 'layer.groupUngroup', '解散选中的组', { mnemonic: 'K', run: function () { A().groupUngroup(); } }),
         def('layer', 'layer.text', '添加文字图层…', { mnemonic: 'T', key: 'Ctrl+Shift+T', run: function () { A().openTextDialog(); } }),
         def('layer', 'layer.dup', '复制图层', { mnemonic: 'D', run: function () { A().dupLayer(); } }),
         def('layer', 'layer.del', '删除图层', { mnemonic: 'E', run: function () { A().delLayer(); } }),
@@ -281,6 +297,15 @@
           mnemonic: 'N', key: '',
           run: function () { A().toggleNav(); },
           check: function () { var s = A().state; return !!(s && s.navOpen); }
+        }),
+        SEP,
+        // 回放洋葱皮：茶绘没有帧动画，回放是唯一有时间轴的地方 ——
+        // 把刚画完的几笔染成暖色、马上要画的几笔染成冷色，看清运笔在往哪走。
+        // 纯本机显示（不上传、不进文档），和「参考图」「协作视图」同一类。
+        def('view', 'view.onion', '回放洋葱皮（前后几笔残影）', {
+          mnemonic: 'K', key: 'Ctrl+Shift+K',
+          run: function () { A().toggleOnion(); },
+          check: function () { var e = A().engine; return !!(e && e.onion && e.onion.on); }
         })
       ]
     },

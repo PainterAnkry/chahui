@@ -123,10 +123,16 @@ class Game {
     return false;
   }
 
-  /** 在线玩家（画手从这个池子里选，猜词也只认池子里的人） */
+  /**
+   * 在线玩家（画手从这个池子里选，猜词也只认池子里的人）。
+   *
+   * **只读观众不在池子里** —— 他画不了，抽到他这回合就废了；
+   * 也顺带意味着「只剩观众」时开局会因为人不够而被拒。
+   */
   playerList() {
     const out = [];
     for (const m of this.room.members.values()) {
+      if (m.readonly) continue;
       out.push({ userId: m.userId, name: m.name, color: m.color });
       this.names.set(m.userId, m.name);
     }

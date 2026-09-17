@@ -1,8 +1,9 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const https = require('https');
 
 const isDev = !!process.env.CHAHU_DEV;
 let win = null;
@@ -101,6 +102,7 @@ ipcMain.handle('chahu:save', async (e, name, payload) => {
   if (/\.png$/i.test(n)) filters.push({ name: 'PNG 图片', extensions: ['png'] });
   else if (/\.webm$/i.test(n)) filters.push({ name: 'WebM 视频', extensions: ['webm'] });
   else if (/\.json$/i.test(n)) filters.push({ name: 'JSON', extensions: ['json'] });
+  else if (/\.chahu$/i.test(n)) filters.push({ name: '茶绘工程', extensions: ['chahu'] });
   filters.push({ name: '全部文件', extensions: ['*'] });
 
   const dir = app.getPath('pictures');
@@ -129,10 +131,126 @@ ipcMain.handle('chahu:save', async (e, name, payload) => {
   }
 });
 
+/**
+ * 打开一份本地文件，返回文本内容。只给工程文件（.chahu）用。
+ * 主进程**不解析内容** —— 是不是一份合法工程交给渲染层判断，
+ * 报错语句才能是用户看得懂的那句（见 project.js 的 parse）。
+ */
+ipcMain.handle('chahu:open', async (e, kind) => {
+  const filters = kind === 'project'
+    ? [{ name: '茶绘工程', extensions: ['chahu'] }, { name: '全部文件', extensions: ['*'] }]
+    : [{ name: '全部文件', extensions: ['*'] }];
+  const res = await dialog.showOpenDialog(win, {
+    title: kind === 'project' ? '打开茶绘工程' : '打开文件',
+    properties: ['openFile'],
+    filters
+  });
+  if (res.canceled || !res.filePaths || !res.filePaths.length) return { canceled: true };
+  const p = res.filePaths[0];
+  try {
+    const buf = fs.readFileSync(p);
+    // 上限跟着 ws 的 maxPayload（12MB）来：比这大的工程本来也传不进房间，
+    // 与其读完再失败，不如在这里就说清楚。
+    if (buf.length > 24 * 1024 * 1024) return { ok: false, error: '这个文件太大了（超过 24MB）' };
+    return { ok: true, path: p, name: path.basename(p), text: buf.toString('utf8') };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+/**
+ * 读系统剪贴板里的位图（「编辑 → 粘贴」用）。
+ *
+ * 走主进程读是刻意的：渲染进程的 navigator.clipboard.read() 要授权、
+ * 还可能被 Chromium 的 user-gesture 规则挡掉，而主进程这边没有任何门槛。
+ * 返回 data URL；剪贴板里没有图片就是 null（调用方继续走它的下一级兜底）。
+ */
+ipcMain.handle('chahu:clipboard-image', () => {
+  try {
+    const img = clipboard.readImage();
+    if (!img || img.isEmpty()) return null;
+    return img.toDataURL();
+  } catch (err) {
+    return null;
+  }
+});
+
+/**
+ * 更新包下载（「关于 → 检查更新」点下载走这里）。
+ *
+ * 为什么放在主进程：渲染进程 fetch 跨域的 GitHub 资产会被 CORS 挡掉，
+ * 而主进程一点限制都没有，还能顺手把下好的安装包交给系统去跑。
+ *
+ * 直连失败会自动换 ghfast.top 镜像再试一次 —— 国内直连 GitHub 的下载
+ * 经常是几十 KB/s 甚至直接断，而仓库本身就是公开的，走镜像没有任何额外的暴露。
+ * 用了镜像会在返回值里带 mirror=true，界面会明说一句，不偷偷换源。
+ */
+function httpDownload(url, dest, onProgress) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { headers: { 'User-Agent': 'chahui-updater' } }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        resolve(httpDownload(new URL(res.headers.location, url).toString(), dest, onProgress));
+        return;
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        reject(new Error('HTTP ' + res.statusCode));
+        return;
+      }
+      const total = Number(res.headers['content-length']) || 0;
+      let got = 0;
+      const out = fs.createWriteStream(dest);
+      res.on('data', (c) => {
+        got += c.length;
+        if (onProgress) onProgress(total ? got / total : 0);
+      });
+      res.on('error', reject);
+      out.on('error', reject);
+      out.on('finish', () => out.close(() => resolve({ bytes: got })));
+      res.pipe(out);
+    });
+    req.on('error', reject);
+    req.setTimeout(60000, () => req.destroy(new Error('下载超时')));
+  });
+}
+
+ipcMain.handle('chahu:download-update', async (e, url, name) => {
+  const raw = String(url || '');
+  if (!/^https:\/\//i.test(raw)) return { ok: false, error: '下载地址不合法' };
+  const safe = String(name || 'chahui-update.exe').replace(/[^\w.\-]+/g, '_').slice(0, 80);
+  const dir = path.join(app.getPath('userData'), 'updates');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (err) { /* ignore */ }
+  const dest = path.join(dir, safe);
+
+  const attempts = [raw];
+  if (/^https:\/\/github\.com\//i.test(raw)) attempts.push('https://ghfast.top/' + raw);
+
+  let lastErr = null;
+  for (let i = 0; i < attempts.length; i++) {
+    try {
+      const r = await httpDownload(attempts[i], dest, (p) => {
+        try { e.sender.send('chahu:update-progress', { percent: p, mirror: i > 0 }); } catch (err) { /* ignore */ }
+      });
+      let launched = false;
+      if (process.platform === 'win32' && /\.exe$/i.test(dest)) {
+        // 交给系统跑安装程序（UAC 弹窗由安装包自己出）
+        const err2 = await shell.openPath(dest);
+        launched = !err2;
+      } else {
+        shell.showItemInFolder(dest);
+      }
+      return { ok: true, path: dest, bytes: r.bytes, launched: launched, mirror: i > 0 };
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  return { ok: false, error: (lastErr && lastErr.message) || '下载失败' };
+});
+
 /* ---------------- 生命周期 ---------------- */
 
 Menu.setApplicationMenu(null);
-
 app.whenReady().then(async () => {
   const cfg = readConfig();
   // 默认开内置服务器：双击 exe 就能自己开房联机，不需要另外装 Node / 起服务端。

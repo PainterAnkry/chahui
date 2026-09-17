@@ -740,6 +740,46 @@ body.tool-dragging { cursor: grabbing; user-select: none; }
   font-size: 10px;
   margin-left: 4px;
 }
+
+/* ---- 图层组 ---- */
+/* 组行比普通图层行重一点：底色、稍微加粗，一眼能和子层分开 */
+.layer-item.group-row {
+  background: #eef3fa;
+  border-top: 1px solid var(--line-soft);
+}
+.layer-item.group-row:hover { background: #e5edf8; }
+.layer-item.group-row.active { background: var(--accent-soft); }
+.layer-item .fold {
+  width: 14px; height: 20px; flex: none;
+  border: none; background: transparent; cursor: pointer;
+  color: var(--text-dim); font-size: 10px; line-height: 1;
+  display: grid; place-items: center; padding: 0;
+}
+.layer-item .fold:hover { color: var(--text); }
+/* 组里的图层缩进一格 —— 「谁在谁里面」靠这个一眼看出来 */
+.layer-item.in-group { padding-left: 20px; }
+.layer-item .thumb.group-thumb {
+  background: repeating-linear-gradient(135deg, #d7e0ee 0 4px, #e8eef7 4px 8px);
+  border-radius: 3px;
+}
+.layer-item .gbadge {
+  font-size: 9px; font-style: normal; font-weight: 700;
+  margin-left: 4px; padding: 0 4px; border-radius: 3px;
+  background: var(--accent-soft); color: #1d5dad; vertical-align: 1px;
+}
+.layer-item .rowbtn {
+  flex: none; border: none; background: transparent; cursor: pointer;
+  font-size: 11px; color: var(--text-dim); padding: 2px 4px; border-radius: 4px;
+}
+.layer-item .rowbtn:hover { background: #dbe6f5; color: var(--text); }
+.layer-item .rowbtn.danger:hover { background: #fbe0e0; color: #b03030; }
+.sel-tag {
+  font-size: 10px; font-weight: 600; color: #1d5dad;
+  background: var(--accent-soft); border-radius: 3px; padding: 1px 5px;
+  margin-left: 2px; max-width: 96px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.sel-tag.hidden { display: none; }
 .layer-item .eye {
   width: 20px; height: 20px; flex: none;
   border: none; background: transparent; cursor: pointer;
@@ -934,6 +974,28 @@ body.tool-dragging { cursor: grabbing; user-select: none; }
 }
 .replay-bar input[type=range] { width: 240px; }
 #replayTime { font-size: 11.5px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+
+/* 回放 = 只看不画。落笔已经在 JS 里挡掉了（app.js 的 pointerdown 分支），
+   这里只把光标从「画笔」换成中性箭头 —— 否则光标还在装画笔，用户会以为能画。 */
+#stage.replaying #view { cursor: default; }
+
+/* 回放条上的「正在画的是谁」：作者色小圆点 + 名字。
+   圆点用 --author-color（由 JS 按成员色塞进来），文字保持弱色，别整段染成作者色。 */
+.replay-author {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11.5px; color: var(--text-dim);
+  padding: 2px 8px; border-radius: 999px;
+  background: rgba(0,0,0,.05);
+  white-space: nowrap;
+}
+.replay-author::before {
+  content: ''; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--author-color, currentColor);
+}
+
+/* 提示气泡也在底部正中（.toast-wrap 是 #stage 的兄弟节点），回放时正好压在回放条上 ——
+   而回放期间「回放中 · N 笔」这类提示是必然会弹的。回放时把气泡抬到条上方。 */
+#stage.replaying ~ .toast-wrap { bottom: 62px; }
 
 /* ============================== 右栏：聊天 / 成员 / 笔迹 ============================== */
 
@@ -1136,6 +1198,24 @@ body.tool-dragging { cursor: grabbing; user-select: none; }
 }
 .member .m-dim:hover { border-color: var(--accent); color: var(--accent); }
 .member .m-dim.on { border-color: var(--accent); background: var(--accent-soft); color: #1d5dad; font-weight: 600; }
+/* 房主的「设观众 / 恢复作画」开关。
+   它和上面那个 m-dim 是两码事：m-dim 只改我自己屏幕上看到的，这个是**房内权限**，
+   一按所有人都收到，所以用一套更重的样子（琥珀色实心）区分，别让人误点。 */
+.member .m-role {
+  flex: none;
+  height: 20px;
+  margin-left: 6px;
+  padding: 0 6px;
+  font-size: 10px; line-height: 1;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.member .m-role:hover { border-color: var(--accent); color: var(--accent); }
+.member .m-role.on { border-color: #d08a2a; background: #fdf3e2; color: #9a6412; font-weight: 600; }
+.badge.guest { background: #fdf3e2; color: #9a6412; }
 .badge {
   font-size: 10px;
   background: var(--accent-soft);
@@ -1651,6 +1731,9 @@ body.panel-dragging * { cursor: grabbing !important; }
 }
 .about-update .hint { flex: 1; min-width: 0; }
 .about-update.has-new { background: #fff8e8; border-color: #f0d9a8; }
+/* 有新版本时说明文字会变两行（版本号 + 要下的文件名），允许换行撑开一行高 */
+.about-update { flex-wrap: wrap; }
+.about-update .hint { line-height: 1.5; }
 .about-tabs { display: flex; gap: 4px; margin-bottom: 8px; }
 .about-body {
   max-height: 48vh; overflow: auto;
@@ -2918,4 +3001,21 @@ body.panel-dragging * { cursor: grabbing !important; }
   .quickbar, .game-hud, .game-score, .round-card,
   .float-win, .ref-badge, .game-lock-tip,
   .chain-task, .chain-progress { z-index: 12; }
+}
+
+/* ================================================================
+   回放条：一整排是「退出 / 时间轴 / 时间 / 作者 / 暂停 / 倍速 / 洋葱皮 /
+   前后几笔 / 导出视频」，窄屏一条横排塞不下 —— 会溢出到屏幕外，
+   那几个按钮就点不到了。允许换行 + 收窄时间轴即可。
+   同样必须写在文件末尾：`.replay-bar` 的原定义在上面，同优先级后写的赢。
+   ================================================================ */
+@media (max-width: 1080px) {
+  .replay-bar {
+    flex-wrap: wrap;
+    justify-content: center;
+    row-gap: 6px;
+    max-width: calc(100% - 20px);
+    border-radius: 14px;
+  }
+  .replay-bar input[type=range] { width: 160px; }
 }

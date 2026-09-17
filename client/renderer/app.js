@@ -48,7 +48,11 @@
   /* ============================================================ 状态 */
 
   var S = {
-    me: { userId: null, name: '', color: '#888', isOwner: false },
+    me: { userId: null, name: '', color: '#888', isOwner: false, readonly: false },
+    // 图层面板里当前选中的「组」（null = 选中的是某个图层）。
+    // 组和图层**共用**头顶栏（混合模式 / 不透明度）与那几个操作按钮，
+    // 靠这个字段决定它们作用在谁身上 —— 见 selKind() / syncLayerHead()。
+    selGroup: null,
     room: null,
     members: [],
     chat: [],
@@ -115,6 +119,9 @@
     historyTotal: 0,
     historyDraining: false,
     replay: { playing: false, t: 0, speed: 4, raf: null, last: 0 },
+    // 回放洋葱皮：把前后各几笔染成残影。纯本机显示（不上传、不进文档），偏好跟着人走
+    onionOn: lsGet('chahu.onion', '0') === '1',
+    onionCount: Math.min(3, Math.max(1, parseInt(lsGet('chahu.onion.n', '1'), 10) || 1)),
     recording: null,
     joined: false,
     lastSent: 0,
@@ -342,11 +349,13 @@
     renderMembers();
   }
 
-  /** 图层「只对我隐藏」：跟同步的显示/隐藏分开，别人那边不受影响 */
-  function toggleLocalHidden(layerId) {
-    var on = engine.toggleLocalHidden(layerId);
-    var l = engine.getLayer(layerId);
-    toast('「' + (l ? l.name : '图层') + '」' + (on ? '只对你隐藏了（别人还看得见）' : '对你重新显示'));
+  /** 「只对我隐藏」：跟同步的显示/隐藏分开，别人那边不受影响。图层组也走它 */
+  function toggleLocalHidden(id) {
+    var on = engine.toggleLocalHidden(id);
+    var l = engine.getLayer(id);
+    var g = l ? null : engine.getGroup(id);
+    var nm = l ? l.name : (g ? g.name : '图层');
+    toast('「' + nm + '」' + (on ? '只对你隐藏了（别人还看得见）' : '对你重新显示'));
     renderLayers();
   }
 
@@ -1944,84 +1953,224 @@
 
   /* ============================================================ 图层 */
 
+  var EYE_ON = '<svg viewBox="0 0 24 24"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.6"/></svg>';
+  var EYE_OFF = '<svg viewBox="0 0 24 24"><path d="M4 4l16 16"/><path d="M9.5 5.4A9.9 9.9 0 0 1 12 5c6.4 0 10 6 10 6a17 17 0 0 1-3 3.4M6.3 7.2A17.5 17.5 0 0 0 2 11s3.6 6 10 6c1 0 1.9-.1 2.7-.4"/></svg>';
+
+  /** 头顶栏和那几个操作按钮现在在改谁：'group' 还是 'layer' */
+  function selKind() {
+    return (S.selGroup && engine.getGroup(S.selGroup)) ? 'group' : 'layer';
+  }
+  function selectedGroup() {
+    return S.selGroup ? engine.getGroup(S.selGroup) : null;
+  }
+
   function renderLayers() {
     var box = $('#layerList');
     box.innerHTML = '';
-    var list = engine.layers.slice().reverse();
-    list.forEach(function (l) {
-      var row = document.createElement('div');
-      row.className = 'layer-item' + (l.id === engine.activeLayerId ? ' active' : '') +
-        (l.visible ? '' : ' hidden-layer') + (l.locked ? ' locked-layer' : '') +
-        (engine.isLocallyHidden(l) ? ' local-hidden-layer' : '');
-      row.dataset.id = l.id;
-
-      var eye = document.createElement('button');
-      eye.className = 'eye';
-      eye.innerHTML = l.visible
-        ? '<svg viewBox="0 0 24 24"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.6"/></svg>'
-        : '<svg viewBox="0 0 24 24"><path d="M4 4l16 16"/><path d="M9.5 5.4A9.9 9.9 0 0 1 12 5c6.4 0 10 6 10 6a17 17 0 0 1-3 3.4M6.3 7.2A17.5 17.5 0 0 0 2 11s3.6 6 10 6c1 0 1.9-.1 2.7-.4"/></svg>';
-      eye.title = l.visible
-        ? '对所有人隐藏这一层（会同步给别人）—— 只想自己看不到就点右边那只眼睛'
-        : '对所有人显示这一层（会同步给别人）';
-      eye.onclick = function (e) {
-        e.stopPropagation();
-        net.send(P.C2S.LAYER_UPD, { layerId: l.id, patch: { visible: !l.visible } });
-      };
-      row.appendChild(eye);
-
-      // 第二只眼睛：只对我隐藏（不同步、不影响导出）
-      var mine = document.createElement('button');
-      mine.className = 'eye mine-eye' + (engine.isLocallyHidden(l) ? ' local' : '');
-      mine.innerHTML = '<svg viewBox="0 0 24 24"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.6"/></svg>';
-      mine.title = engine.isLocallyHidden(l)
-        ? '只对我隐藏（别人不受影响，导出也照样包含）—— 点一下恢复'
-        : '只对我隐藏这一层：看底稿用，别人那边不受影响，导出也照样包含';
-      mine.onclick = function (e) {
-        e.stopPropagation();
-        toggleLocalHidden(l.id);
-      };
-      row.appendChild(mine);
-
-      var th = document.createElement('div');
-      th.className = 'thumb';
-      if (l.thumb) th.style.backgroundImage = 'url(' + l.thumb + ')';
-      row.appendChild(th);
-
-      var nm = document.createElement('div');
-      nm.className = 'lname';
-      nm.innerHTML = '<span>' + esc(l.name) + '</span>' +
-        '<span class="lmeta">' + esc(P.BLEND_LABELS[l.blend] || l.blend) + ' · ' + Math.round(l.opacity * 100) + '%' +
-        (l.alphaLock ? ' · 锁' : '') + '</span>';
-      nm.title = '双击重命名';
-      nm.ondblclick = function (e) {
-        e.stopPropagation();
-        var inp = document.createElement('input');
-        inp.value = l.name;
-        nm.innerHTML = '';
-        nm.appendChild(inp);
-        inp.focus(); inp.select();
-        var commit = function () {
-          var v = inp.value.trim() || l.name;
-          net.send(P.C2S.LAYER_UPD, { layerId: l.id, patch: { name: v } });
-        };
-        inp.onblur = commit;
-        inp.onkeydown = function (ev) {
-          if (ev.key === 'Enter') inp.blur();
-          if (ev.key === 'Escape') { inp.value = l.name; inp.blur(); }
-          ev.stopPropagation();
-        };
-      };
-      row.appendChild(nm);
-
-      row.onclick = function () { engine.setActiveLayer(l.id); };
-      box.appendChild(row);
-    });
+    // 面板自上而下 = 合成顺序（自下而上）倒过来。组行画在**它那一块的最上面**
+    // （和 PS / SAI 一致），所以从顶往下扫，第一次碰到某组的成员时就在那里插组行。
+    var list = engine.layers;
+    var emitted = {};
+    for (var i = list.length - 1; i >= 0; i--) {
+      var l = list[i];
+      var g = engine.groupOf(l);
+      if (!g) { box.appendChild(layerRowEl(l, false)); continue; }
+      if (!emitted[g.id]) {
+        emitted[g.id] = 1;
+        box.appendChild(groupRowEl(g));
+      }
+      // 折叠**只影响面板**：画布上照样在合成（PS 的折叠也是这个意思）
+      if (!g.collapsed) box.appendChild(layerRowEl(l, true));
+    }
     syncLayerHead();
   }
 
+  /** 行内改名（图层与组共用同一套） */
+  function renameInline(box, current, commit) {
+    var inp = document.createElement('input');
+    inp.value = current;
+    box.innerHTML = '';
+    box.appendChild(inp);
+    inp.focus(); inp.select();
+    inp.onblur = function () { commit(inp.value.trim() || current); };
+    inp.onkeydown = function (ev) {
+      if (ev.key === 'Enter') inp.blur();
+      if (ev.key === 'Escape') { inp.value = current; inp.blur(); }
+      ev.stopPropagation();
+    };
+  }
+
+  function layerRowEl(l, inGroup) {
+    var row = document.createElement('div');
+    row.className = 'layer-item' + (inGroup ? ' in-group' : '') +
+      (l.id === engine.activeLayerId && selKind() === 'layer' ? ' active' : '') +
+      (l.visible ? '' : ' hidden-layer') + (l.locked ? ' locked-layer' : '') +
+      (engine.isLocallyHidden(l) ? ' local-hidden-layer' : '');
+    row.dataset.id = l.id;
+
+    var eye = document.createElement('button');
+    eye.className = 'eye';
+    eye.innerHTML = l.visible ? EYE_ON : EYE_OFF;
+    eye.title = l.visible
+      ? '对所有人隐藏这一层（会同步给别人）—— 只想自己看不到就点右边那只眼睛'
+      : '对所有人显示这一层（会同步给别人）';
+    eye.onclick = function (e) {
+      e.stopPropagation();
+      net.send(P.C2S.LAYER_UPD, { layerId: l.id, patch: { visible: !l.visible } });
+    };
+    row.appendChild(eye);
+
+    // 第二只眼睛：只对我隐藏（不同步、不影响导出）
+    var mine = document.createElement('button');
+    mine.className = 'eye mine-eye' + (engine.isLocallyHidden(l) ? ' local' : '');
+    mine.innerHTML = EYE_ON;
+    mine.title = engine.isLocallyHidden(l)
+      ? '只对我隐藏（别人不受影响，导出也照样包含）—— 点一下恢复'
+      : '只对我隐藏这一层：看底稿用，别人那边不受影响，导出也照样包含';
+    mine.onclick = function (e) {
+      e.stopPropagation();
+      toggleLocalHidden(l.id);
+    };
+    row.appendChild(mine);
+
+    var th = document.createElement('div');
+    th.className = 'thumb';
+    if (l.thumb) th.style.backgroundImage = 'url(' + l.thumb + ')';
+    row.appendChild(th);
+
+    var nm = document.createElement('div');
+    nm.className = 'lname';
+    nm.innerHTML = '<span>' + esc(l.name) + '</span>' +
+      '<span class="lmeta">' + esc(P.BLEND_LABELS[l.blend] || l.blend) + ' · ' + Math.round(l.opacity * 100) + '%' +
+      (l.alphaLock ? ' · 锁' : '') + '</span>';
+    nm.title = '双击重命名';
+    nm.ondblclick = function (e) {
+      e.stopPropagation();
+      renameInline(nm, l.name, function (v) {
+        net.send(P.C2S.LAYER_UPD, { layerId: l.id, patch: { name: v } });
+      });
+    };
+    row.appendChild(nm);
+
+    row.onclick = function () {
+      S.selGroup = null;
+      engine.setActiveLayer(l.id);      // 会触发 renderLayers
+      syncLayerHead();
+    };
+    return row;
+  }
+
+  /**
+   * 组行。折叠箭头 / 眼睛 / 名字 / 「N 层」，外加两个**后果差很远**的按钮：
+   * 「解散」把图层留在原位，「✕」连组里的图层一起删 —— 所以分成两个，
+   * 不合成一个「确定吗」的弹窗。
+   */
+  function groupRowEl(g) {
+    var n = engine.layers.reduce(function (c, x) { return c + (x.groupId === g.id ? 1 : 0); }, 0);
+    var row = document.createElement('div');
+    row.className = 'layer-item group-row' +
+      (selKind() === 'group' && S.selGroup === g.id ? ' active' : '') +
+      (g.visible ? '' : ' hidden-layer') +
+      (engine.isLocallyHidden(g.id) ? ' local-hidden-layer' : '');
+    row.dataset.groupId = g.id;
+
+    var fold = document.createElement('button');
+    fold.className = 'fold';
+    fold.textContent = g.collapsed ? '▸' : '▾';
+    fold.title = g.collapsed ? '展开这个组' : '折叠这个组（只影响面板，画布上照样显示）';
+    fold.onclick = function (e) {
+      e.stopPropagation();
+      net.send(P.C2S.GROUP_UPD, { groupId: g.id, patch: { collapsed: !g.collapsed } });
+    };
+    row.appendChild(fold);
+
+    var eye = document.createElement('button');
+    eye.className = 'eye';
+    eye.innerHTML = g.visible ? EYE_ON : EYE_OFF;
+    eye.title = g.visible
+      ? '对所有人隐藏整个组（组里的图层都不显示）'
+      : '对所有人显示整个组';
+    eye.onclick = function (e) {
+      e.stopPropagation();
+      net.send(P.C2S.GROUP_UPD, { groupId: g.id, patch: { visible: !g.visible } });
+    };
+    row.appendChild(eye);
+
+    var mine = document.createElement('button');
+    mine.className = 'eye mine-eye' + (engine.isLocallyHidden(g.id) ? ' local' : '');
+    mine.innerHTML = EYE_ON;
+    mine.title = engine.isLocallyHidden(g.id)
+      ? '只对我隐藏这个组（别人不受影响，导出也照样包含）—— 点一下恢复'
+      : '只对我隐藏这个组：看底稿用，别人那边不受影响，导出也照样包含';
+    mine.onclick = function (e) {
+      e.stopPropagation();
+      toggleLocalHidden(g.id);
+    };
+    row.appendChild(mine);
+
+    var th = document.createElement('div');
+    th.className = 'thumb group-thumb';
+    row.appendChild(th);
+
+    var nm = document.createElement('div');
+    nm.className = 'lname';
+    nm.innerHTML = '<span>' + esc(g.name) + '<i class="gbadge">组</i></span>' +
+      '<span class="lmeta">' + esc(P.BLEND_LABELS[g.blend] || g.blend) + ' · ' +
+      Math.round(g.opacity * 100) + '% · ' + n + ' 层</span>';
+    nm.title = '双击重命名';
+    nm.ondblclick = function (e) {
+      e.stopPropagation();
+      renameInline(nm, g.name, function (v) {
+        net.send(P.C2S.GROUP_UPD, { groupId: g.id, patch: { name: v } });
+      });
+    };
+    row.appendChild(nm);
+
+    var un = document.createElement('button');
+    un.className = 'rowbtn';
+    un.textContent = '解散';
+    un.title = '解散这个组，组里的图层留在原位（组的不透明度 / 混合模式会跟着消失）';
+    un.onclick = function (e) { e.stopPropagation(); groupUngroup(g); };
+    row.appendChild(un);
+
+    var del = document.createElement('button');
+    del.className = 'rowbtn danger';
+    del.textContent = '✕';
+    del.title = '删除这个组，连同组里的图层一起删掉';
+    del.onclick = function (e) { e.stopPropagation(); groupDelWithLayers(g); };
+    row.appendChild(del);
+
+    row.onclick = function () {
+      S.selGroup = g.id;
+      renderLayers();
+      syncLayerHead();
+    };
+    return row;
+  }
+
   function syncLayerHead() {
-    var l = engine.activeLayer();
     $('#layerCount').textContent = engine.layers.length;
+    var tag = $('#layerSelTag');
+    var g = selectedGroup();
+    if (tag) {
+      tag.textContent = g ? ('正在编辑：' + g.name) : '';
+      tag.classList.toggle('hidden', !g);
+    }
+    if (g) {
+      $('#layerBlend').value = g.blend;
+      $('#layerOpacity').value = Math.round(g.opacity * 100);
+      $('#layerOpacityVal').textContent = Math.round(g.opacity * 100);
+      // 锁定 / 保护不透明度是**逐层**的东西，组没有这两样，直接禁用，
+      // 免得勾了没反应、看起来像坏了
+      $('#lockChk').checked = false;
+      $('#alphaLockChk').checked = false;
+      $('#lockChk').disabled = true;
+      $('#alphaLockChk').disabled = true;
+      return;
+    }
+    $('#lockChk').disabled = false;
+    $('#alphaLockChk').disabled = false;
+    var l = engine.activeLayer();
     if (!l) return;
     $('#layerBlend').value = l.blend;
     $('#layerOpacity').value = Math.round(l.opacity * 100);
@@ -2030,14 +2179,25 @@
     $('#lockChk').checked = !!l.locked;
   }
 
+  /** 头顶栏改了：作用在「当前选中的组」还是「当前图层」 */
   function patchActiveLayer(patch) {
     if (!S.joined) return;
+    var g = selectedGroup();
+    if (g) { net.send(P.C2S.GROUP_UPD, { groupId: g.id, patch: patch }); return; }
     var l = engine.activeLayer();
     if (!l) return;
     net.send(P.C2S.LAYER_UPD, { layerId: l.id, patch: patch });
   }
 
+  /** 下面这几个只对单个图层有意义；选中组时按下了就明说，别默默作用到别的图层上 */
+  function needLayer(what) {
+    if (selKind() !== 'group') return false;
+    toast('「' + what + '」只对单个图层有效，先在组里选一层', 'err', 2600);
+    return true;
+  }
+
   function layerDup() {
+    if (needLayer('复制图层')) return;
     var l = engine.activeLayer();
     if (!l || !S.joined) return;
     var png = engine.renderLayerRaw(l.id).toDataURL('image/png');
@@ -2045,6 +2205,7 @@
   }
 
   async function layerClear() {
+    if (needLayer('清除图层')) return;
     var l = engine.activeLayer();
     if (!l || !S.joined) return;
     if (!await confirmDialog('清除图层「' + l.name + '」上的所有内容？', { danger: true })) return;
@@ -2052,22 +2213,51 @@
   }
 
   async function layerDel() {
+    // 选中的是组 → 「删除」就是「连组里的图层一起删」。解散走组行上那个「解散」按钮，
+    // 两件事后果差得远，不共用一个按钮。
+    var sel = selectedGroup();
+    if (sel) { await groupDelWithLayers(sel); return; }
     var l = engine.activeLayer();
     if (!l || !S.joined) return;
     if (!await confirmDialog('删除图层「' + l.name + '」？', { danger: true })) return;
     net.send(P.C2S.LAYER_DEL, { layerId: l.id });
   }
 
+  function groupSpanOf(l) {
+    var i = engine.layers.indexOf(l);
+    var lo = i, hi = i;
+    for (var k = 0; k < engine.layers.length; k++) {
+      if (engine.layers[k].groupId !== l.groupId) continue;
+      if (k < lo) lo = k;
+      if (k > hi) hi = k;
+    }
+    return [lo, hi];
+  }
+
   function layerMove(dir) {
+    if (!S.joined) return;
+    // 选中组 → 整组（连同组里所有图层）挪一格
+    var g0 = selectedGroup();
+    if (g0) { net.send(P.C2S.GROUP_MOVE, { groupId: g0.id, dir: dir }); return; }
     var l = engine.activeLayer();
-    if (!l || !S.joined) return;
+    if (!l) return;
     var i = engine.layers.indexOf(l);
     var to = i + dir;
     if (to < 0 || to >= engine.layers.length) { toast('已经到头了'); return; }
+    // 组内图层只能在本组那一块里挪。到头了要明说 —— 不然按钮点了没动静，
+    // 看起来像坏了（想离开这个组得用「进/出组」）。
+    if (l.groupId && engine.groupOf(l)) {
+      var span = groupSpanOf(l);
+      if (to < span[0] || to > span[1]) {
+        toast('已经在组的最' + (dir > 0 ? '上' : '下') + '面了，用「进/出组」才能离开这一组');
+        return;
+      }
+    }
     net.send(P.C2S.LAYER_MOVE, { layerId: l.id, to: to });
   }
 
   function layerMerge() {
+    if (needLayer('向下合并')) return;
     if (!S.joined) return;
     var i = engine.layers.findIndex(function (l) { return l.id === engine.activeLayerId; });
     if (i <= 0) { toast('最下面的图层没有可合并的对象', 'err'); return; }
@@ -2086,6 +2276,78 @@
       png: merged.toDataURL('image/png'), upToSeq: engine.seq
     });
     toast('正在合并「' + src.name + '」到「' + dst.name + '」…');
+  }
+
+  /* ---------------- 图层组的操作 ---------------- */
+
+  /**
+   * 组合：把当前图层装进一个新建的组。
+   * 组 id 由**客户端**指定（和新建图层一个道理）：建完要立刻把它选中、
+   * 好直接改名字和不透明度，不能等一个来回才知道它叫什么。
+   */
+  function groupAdd() {
+    if (!S.joined) { toast('还没有进入房间'); return; }
+    var bm = canvasBlockMsg();
+    if (bm) { toast(bm, 'err', 1800); return; }
+    if (S.selGroup && !engine.getGroup(S.selGroup)) S.selGroup = null;
+    if (S.selGroup) { toast('当前选中的就是一个组，先选它里面的某一层', 'err', 2400); return; }
+    var l = engine.activeLayer();
+    if (!l) return;
+    var id = P.rid('G');
+    net.send(P.C2S.GROUP_ADD, { id: id, name: l.name || '组', layerId: l.id });
+    S.selGroup = id;              // 建完直接选中，方便马上调组的浓度
+    toast('已把「' + l.name + '」装进一个新组', 'ok', 2200);
+  }
+
+  /** 进/出组：不在组里就挪进「紧挨着它上面的那个组」，已经在组里就挪出来 */
+  function groupToggle() {
+    if (!S.joined) { toast('还没有进入房间'); return; }
+    var bm = canvasBlockMsg();
+    if (bm) { toast(bm, 'err', 1800); return; }
+    if (selKind() === 'group') { toast('先选中组里的某一层', 'err', 2200); return; }
+    var l = engine.activeLayer();
+    if (!l) return;
+    if (l.groupId && engine.groupOf(l)) {
+      net.send(P.C2S.LAYER_GROUP, { layerId: l.id, groupId: null });
+      toast('已把「' + l.name + '」移出组', 'ok', 2200);
+      return;
+    }
+    // 「上面」= 合成顺序里索引更大的方向（面板上看到的是它在上面）
+    var i = engine.layers.indexOf(l);
+    var target = null;
+    for (var k = i + 1; k < engine.layers.length; k++) {
+      var g = engine.groupOf(engine.layers[k]);
+      if (g) { target = g; break; }
+    }
+    if (!target) { toast('上面没有可以进的组，先用「组合」建一个'); return; }
+    net.send(P.C2S.LAYER_GROUP, { layerId: l.id, groupId: target.id });
+    toast('已把「' + l.name + '」移进「' + target.name + '」', 'ok', 2400);
+  }
+
+  /** 解散组：图层留在原位。组的不透明度/混合模式会跟着消失，画面是会变的 */
+  function groupUngroup(g) {
+    g = g || selectedGroup();
+    if (!g) { toast('先选中一个组', 'err', 2000); return; }
+    if (!S.joined) return;
+    var bm = canvasBlockMsg();
+    if (bm) { toast(bm, 'err', 1800); return; }
+    net.send(P.C2S.GROUP_DEL, { groupId: g.id, withLayers: false });
+    if (S.selGroup === g.id) S.selGroup = null;
+    toast('已解散「' + g.name + '」，里面的图层留在原位');
+  }
+
+  /** 删除组及组内所有图层 */
+  async function groupDelWithLayers(g) {
+    g = g || selectedGroup();
+    if (!g) { toast('先选中一个组', 'err', 2000); return; }
+    if (!S.joined) return;
+    var bm = canvasBlockMsg();
+    if (bm) { toast(bm, 'err', 1800); return; }
+    var n = engine.layers.reduce(function (c, x) { return c + (x.groupId === g.id ? 1 : 0); }, 0);
+    if (!await confirmDialog('删除组「' + g.name + '」以及里面的 ' + n + ' 个图层？',
+        { danger: true })) return;
+    net.send(P.C2S.GROUP_DEL, { groupId: g.id, withLayers: true });
+    if (S.selGroup === g.id) S.selGroup = null;
   }
 
   async function layerFlatten() {
@@ -2351,6 +2613,8 @@
   function renderMembers() {
     var box = $('#memberList');
     $('#memberCount').textContent = S.members.length;
+    // 顶栏那个「观众」标签跟着一起刷新 —— 保证「我能不能画」在界面上永远有出处
+    renderMeRole();
     box.innerHTML = '';
     S.members.forEach(function (m) {
       var el = document.createElement('div');
@@ -2359,8 +2623,29 @@
         '<div class="ava" style="background:' + esc(m.color) + '">' + esc((m.name || '?').slice(0, 1)) + '</div>' +
         '<div class="info"><b>' + esc(m.name) +
         (m.isOwner ? '<span class="badge">房主</span>' : '') +
+        (m.readonly ? '<span class="badge guest">观众</span>' : '') +
         (m.userId === S.me.userId ? '<span class="badge me">我</span>' : '') +
-        '</b><span>' + (m.drawing ? '<span class="live">正在作画…</span>' : '在房间里') + '</span></div>';
+        '</b><span>' + (m.readonly ? '只能看'
+          : (m.drawing ? '<span class="live">正在作画…</span>' : '在房间里')) + '</span></div>';
+
+      // 房主的「设观众 / 恢复作画」开关。这是**房内权限**（一按所有人都会收到），
+      // 和旁边只管自己屏幕的「笔迹淡化」是两回事，所以样式也分开。
+      // 不排除自己：房主把自己设成观众是合法的（把画板让给别人、自己讲解），
+      // 而且这条消息不走写操作闸门，随时能改回来。
+      if (S.joined && S.me.isOwner) {
+        var role = document.createElement('button');
+        role.className = 'm-role' + (m.readonly ? ' on' : '');
+        role.textContent = m.readonly ? '观众' : '可画';
+        role.title = m.readonly
+          ? '点一下恢复 ' + m.name + ' 的作画权限'
+          : '点一下把 ' + m.name + ' 设为只读观众（能看、能聊，不能改画布）';
+        role.onclick = function (e) {
+          e.stopPropagation();
+          setReadonly(m.userId, !m.readonly);
+        };
+        el.appendChild(role);
+      }
+
       // 别人的笔迹显示得多清楚 —— 点一下循环：跟随全局 → 原样 → 淡 → 隐藏 → 跟随全局
       // （纯本地设置，只改我自己屏幕上看到的）
       if (m.userId !== S.me.userId) {
@@ -2776,7 +3061,8 @@
     var layer = engine.activeLayer();
     if (!layer || !S.joined) return;
     // 你画我猜：非画手不许落笔。这里只是「别让人白画一笔」，真正的拦截在服务端。
-    if (gameLocked()) { toast('这一回合只有画手能画', 'err', 1600); return; }
+    var _bm = canvasBlockMsg();
+    if (_bm) { toast(_bm, 'err', 1600); return; }
     if (layer.locked) { toast('图层「' + layer.name + '」已锁定'); return; }
 
     var usePressure = S.pressure && pointerType && pointerType !== 'mouse';
@@ -2979,6 +3265,10 @@
         view.setPointerCapture(e.pointerId);
         return;
       }
+      // 回放是「只看不画」。这里不挡的话，看着看着手一抖就会在**共享文档**上留下
+      // 一笔（自己屏幕上还看不见，因为回放画布盖在上面），事后谁都不知道是谁画的。
+      // 位置放在平移分支之后：回放里还能拖动/缩放画面凑近看细节。
+      if (engine.replayMode) return;
       if (e.button !== 0) return;
       if (!S.joined) { openEntry(true); return; }
       var sp = stagePoint(e);
@@ -3178,7 +3468,8 @@
   function startTransform() {
     if (engine.transform) return;
     if (!S.joined) { openEntry(true); return; }
-    if (gameLocked()) { toast('游戏进行中只有画手能改画布', 'err', 1800); return; }
+    var _bm = canvasBlockMsg();
+    if (_bm) { toast(_bm, 'err', 1800); return; }
     var layer = engine.activeLayer();
     if (!layer) return;
     if (layer.locked) { toast('图层「' + layer.name + '」已锁定', 'err'); return; }
@@ -3342,6 +3633,7 @@
         S.me.name = msg.you.name;
         S.me.color = msg.you.color;
         S.me.isOwner = !!msg.you.isOwner;
+        S.me.readonly = !!msg.you.readonly;
         S.joined = true;
         S.pendingJoin = null;
         // 「他人笔触」要靠这个判断哪些笔是自己的
@@ -3351,7 +3643,9 @@
 
         engine.init({
           width: msg.room.width, height: msg.room.height,
-          background: msg.room.background, layers: msg.layers
+          background: msg.room.background, layers: msg.layers,
+          // 入房就要带上组表：房间可能本来就有组，漏了它新来的人看到的是「散开的图层」
+          groups: msg.groups || []
         });
         S.joinCount = (S.joinCount || 0) + 1;
         // 服务端 seq 是权威水位（撤销/重做会让它领先于最大笔迹 seq）
@@ -3432,11 +3726,31 @@
       }
 
       case P.S2C.LAYERS: {
-        engine.setLayers(msg.layers || [], msg.baseImages || null);
+        // 第三份是组表：**必须传**。少了它，engine 里永远没有组对象，
+        // layerRowEl 就不缩进、合成也不按组走 —— 看起来像「组创建成功但一点效果都没有」。
+        engine.setLayers(msg.layers || [], msg.baseImages || null, msg.groups || null);
+        // 不变式：engine.seq 必须 ≥ 每一层的 baseSeq。
+        // 新笔迹拿到的 seq 是 ++engine.seq，一旦它 ≤ 某个图层的 baseSeq，
+        // renderLayerFromHistory 就会把这笔当「已固化的旧笔迹」跳过 ——
+        // 症状是「画了一笔，一重绘就没了」。工程装载会把 baseSeq 直接推到 room.seq+1，
+        // 而这条路径**不经过入房的 lastSeq**，所以这里得自己兜住。
+        var seqFloor = 0;
+        (msg.layers || []).forEach(function (l) {
+          var b = l.baseSeq || 0;
+          if (b > seqFloor) seqFloor = b;
+        });
+        if (seqFloor > engine.seq) engine.seq = seqFloor;
         pruneUndo();
         renderLayers();
         renderHistory();
         refreshNav();
+        // 工程装载的收尾：服务端把图层表整体换掉之后才会走到这里
+        if (S.projectLoad && S.projectLoad.ending) {
+          var n = (msg.layers || []).length;
+          S.projectLoad = null;
+          toast('工程已装载：' + n + ' 个图层', 'ok', 5000);
+          renderRoomChip();
+        }
         break;
       }
 
@@ -3580,6 +3894,11 @@
           $('#passErr').classList.remove('hidden');
           toast(msg.message || '房间密码不正确', 'err');
           break;
+        }
+        // 工程装载被服务端拒了（层数超限 / 顺序错乱 / 不是房主…）：
+        // 别把一个半截的装载任务留在后台，用户会以为还在传
+        if (S.projectLoad && /project/.test(String(msg.code || ''))) {
+          S.projectLoad = null;
         }
         toast(msg.message || '出错了', 'err');
         setStatus('错误：' + (msg.message || msg.code));
@@ -3762,6 +4081,8 @@
         refreshNav();
         // 「图像大小」带缩放改尺寸：等新尺寸重新同步完，再把缩放好的图层像素回传
         flushPendingPixels();
+        // 打开工程：房间内容和笔迹都落地了，才轮到往上灌工程的图层
+        uploadProjectLayers();
         return;
       }
       var n = 0;
@@ -3931,6 +4252,8 @@
     S.replay.t = 0; S.replay.playing = true; S.replay.last = performance.now();
     $('#btnReplayToggle').textContent = '暂停';
     $('#replayRange').value = 0;
+    syncOnionUi();
+    updateReplayAuthor();
     loopReplay();
     toast('回放中 · ' + engine.replayStrokes.length + ' 笔', 'ok');
   }
@@ -3938,16 +4261,23 @@
   function loopReplay() {
     if (!S.replay.playing) return;
     var now = performance.now();
-    var dt = now - S.replay.last;
+    // dt 必须夹住：切到别的标签页时 requestAnimationFrame 会停，回来那一帧的 dt
+    // 是「你离开的整段时间」，不夹的话回放会一步跳到结尾。
+    var dt = Math.min(250, now - S.replay.last);
     S.replay.last = now;
     var dur = engine.replayDuration();
     S.replay.t = Math.min(dur, S.replay.t + dt * S.replay.speed);
     engine.replaySeek(S.replay.t);
+    updateReplayAuthor();
+    // 导出回放视频时，录制画面跟时间轴同一拍推进（顺序不能颠倒：先 seek 再录）
+    if (S.recording && S.recording.kind === 'replay' && S.recording.draw) S.recording.draw();
     $('#replayRange').value = Math.round(S.replay.t / dur * 1000);
     $('#replayTime').textContent = fmtClock(S.replay.t) + ' / ' + fmtClock(dur);
     if (S.replay.t >= dur) {
       S.replay.playing = false;
       $('#btnReplayToggle').textContent = '重播';
+      // 导出回放视频：播完自动收工（再点一次「导出视频」也能提前结束）
+      if (S.recording && S.recording.kind === 'replay') S.recording.rec.stop();
       return;
     }
     S.replay.raf = requestAnimationFrame(loopReplay);
@@ -3956,9 +4286,147 @@
   function stopReplay() {
     S.replay.playing = false;
     cancelAnimationFrame(S.replay.raf);
+    // 正在导出回放视频时退出回放 = 提前收工：把已经录到的部分存下来（别让录制器空转）
+    if (S.recording && S.recording.kind === 'replay') S.recording.rec.stop();
     engine.setReplayMode(false);
     $('#replayBar').classList.add('hidden');
     $('#stage').classList.remove('replaying');
+    var el = $('#replayAuthor');
+    if (el) el.classList.add('hidden');
+  }
+
+  /** 回放条上标出「这一刻是谁在画」。落在两笔之间的停顿里就藏起来 —— 那段时间画面本来就不动。 */
+  function updateReplayAuthor() {
+    var el = $('#replayAuthor');
+    if (!el) return;
+    var cur = engine.replayMode ? engine.replayCurrent() : null;
+    if (!cur) { el.classList.add('hidden'); return; }
+    var mem = (S.members || []).filter(function (m) { return m.userId === cur.stroke.userId; })[0];
+    el.textContent = mem ? mem.name : '茶友';
+    el.style.setProperty('--author-color', (mem && mem.color) || '#9aa0a8');
+    el.classList.remove('hidden');
+  }
+
+  /* ---------------- 洋葱皮（回放时看清前后几笔） ----------------
+   *
+   * 茶绘没有帧动画，「洋葱皮」只能落在唯一有时间轴的地方 —— 回放：
+   * 把**刚画完的几笔**染成暖色（红）、**马上要画的几笔**染成冷色（青）叠在画面上，
+   * 一眼看清运笔在往哪走、刚才那一笔落在哪儿。
+   *
+   * 三点是有意的：
+   *   · 纯本机显示：不上传、不进文档，别人看不到 —— 和「参考图」「协作视图」同一类
+   *   · 开关立刻生效：`setOnion` 内部会把当前这一帧重画一次，不用等下一次 seek
+   *   · 导出回放视频会把残影一起录进去（录的就是当前画面），想干净就关掉再导
+   */
+  function syncOnionUi() {
+    var st = engine.onionState();
+    var btn = $('#btnReplayOnion');
+    if (btn) btn.classList.toggle('active', st.on);
+    var sel = $('#onionCount');
+    if (sel) {
+      sel.classList.toggle('hidden', !st.on);
+      sel.value = String(st.before);
+    }
+    return st;
+  }
+
+  function applyOnion(on, n) {
+    engine.setOnion({ on: !!on, before: n, after: n });
+    S.onionOn = !!engine.onion.on;
+    return syncOnionUi();
+  }
+
+  function toggleOnion() {
+    var st = applyOnion(!engine.onion.on, S.onionCount);
+    lsSet('chahu.onion', st.on ? '1' : '0');
+    toast(st.on
+      ? '洋葱皮：开 · 暖色=刚画完的几笔，冷色=马上要画的几笔'
+      : '洋葱皮：关', st.on ? 'ok' : undefined, 3200);
+    return st;
+  }
+
+  function setOnionCount(n) {
+    var v = Math.min(3, Math.max(1, Math.round(Number(n)) || 1));
+    S.onionCount = v;
+    lsSet('chahu.onion.n', String(v));
+    var st = applyOnion(engine.onion.on, v);
+    if (st.on) toast('洋葱皮：前后各 ' + v + ' 笔');
+    return st;
+  }
+
+  /**
+   * 导出回放视频：按当前倍速从 0 播到底，全程录成一个 WebM。
+   *
+   * 录制源必须是**回放画布**（`engine.replayInto`）。现成的 `renderInto` 走的是
+   * `renderDocument`，录出来只有一张静止的完成图 —— 那正是「录制」按钮在回放模式下的
+   * 表现（看着像坏了，其实是录错了东西），所以这里不能复用它。
+   */
+  function exportReplayVideo() {
+    if (S.recording) { toast('已经有一个录制在进行', 'err'); return; }
+    if (typeof MediaRecorder === 'undefined') { toast('当前环境不支持录制', 'err'); return; }
+    if (!engine.strokes.length) { toast('还没有笔迹可以回放'); return; }
+
+    if (!engine.replayMode) {
+      engine.setReplayMode(true);
+      $('#replayBar').classList.remove('hidden');
+      $('#stage').classList.add('replaying');
+    }
+    // 先摆到起点并停住，等录制器就绪再一起开跑（否则开头会漏掉一截）
+    S.replay.playing = false;
+    cancelAnimationFrame(S.replay.raf);
+    engine.replaySeek(0);
+    var dur = engine.replayDuration();
+    S.replay.t = 0;
+    S.replay.last = performance.now();
+    $('#replayRange').value = 0;
+    $('#replayTime').textContent = fmtClock(0) + ' / ' + fmtClock(dur);
+    $('#btnReplayToggle').textContent = '暂停';
+    updateReplayAuthor();
+
+    var c = document.createElement('canvas');
+    c.width = engine.width; c.height = engine.height;
+    var rctx = c.getContext('2d');
+    var stream = c.captureStream(30);
+    var types = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+    var mime = '';
+    for (var i = 0; i < types.length; i++) {
+      if (MediaRecorder.isTypeSupported(types[i])) { mime = types[i]; break; }
+    }
+    var rec;
+    try {
+      rec = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 8000000 } : undefined);
+    } catch (e) { toast('录制初始化失败：' + e.message, 'err'); return; }
+
+    var chunks = [];
+    rec.ondataavailable = function (e) { if (e.data && e.data.size) chunks.push(e.data); };
+    rec.onstop = function () {
+      S.recording = null;
+      var btn = $('#btnReplayExport');
+      btn.classList.remove('active');
+      btn.textContent = '导出视频';
+      if (!chunks.length) { toast('没有录到内容', 'err'); return; }
+      var blob = new Blob(chunks, { type: 'video/webm' });
+      var url = URL.createObjectURL(blob);
+      // stampName() = 茶绘-20260917-113045，这里插一个「回放」进去
+      download(stampName().replace('茶绘-', '茶绘-回放-') + '.webm', url);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+      toast('回放视频已导出 · ' + fmtBytes(blob.size), 'ok');
+    };
+
+    // 每帧由 loopReplay 驱动（跟时间轴同一拍），保证录到的第 N 帧就是回放的第 N 帧；
+    // 另起一个 RAF 会跟回放的 RAF 抢执行顺序，偶尔录到上一帧的画面。
+    S.recording = {
+      rec: rec, kind: 'replay', raf: 0,
+      draw: function () { engine.replayInto(rctx); }
+    };
+    rec.start(1000);
+    $('#btnReplayExport').classList.add('active');
+    $('#btnReplayExport').textContent = '录制中…';
+
+    S.replay.playing = true;
+    S.replay.last = performance.now();
+    loopReplay();
+    toast('正在导出回放视频（' + S.replay.speed + '×，' + fmtClock(dur) + '）…', 'ok', 4000);
   }
 
   /* ============================================================ 录制 */
@@ -4014,6 +4482,7 @@
   function bake() {
     if (!S.room) return;
     if (!S.me.isOwner) { toast('只有房主可以固化底图', 'err'); return; }
+    if (readonlyMe()) { toast('你现在是观众，不能固化底图', 'err', 1800); return; }
     if (gameLocked()) { toast('游戏进行中不能固化底图', 'err', 1800); return; }
     if (!engine.strokes.length) { toast('没有需要固化的笔迹'); return; }
     var upToSeq = engine.seq;
@@ -4717,6 +5186,8 @@
     S.gameRoundKey = '';
     S.gameWordShown = '';
     S.joined = false;
+    S.me.isOwner = false;
+    S.me.readonly = false;
     S.room = null;
     S.members = [];
     S.myUndo = [];
@@ -5343,6 +5814,30 @@
     $('#serverInput').addEventListener('change', function () { applyServer(this.value); this.value = net.url; });
     $('#btnCreateRoom').addEventListener('click', doCreate);
 
+    /* ---- 工程文件 ---- */
+    var btnProjEntry = $('#btnOpenProjectEntry');
+    if (btnProjEntry) btnProjEntry.addEventListener('click', pickProjectFile);
+    var btnDraftRestore = $('#btnDraftRestore');
+    if (btnDraftRestore) btnDraftRestore.addEventListener('click', restoreDraft);
+    var btnDraftDrop = $('#btnDraftDrop');
+    if (btnDraftDrop) btnDraftDrop.addEventListener('click', dropDraft);
+    var projInput = $('#projectFileInput');
+    if (projInput) {
+      projInput.addEventListener('change', function () {
+        var f = projInput.files && projInput.files[0];
+        projInput.value = '';
+        if (!f) return;
+        var fr = new FileReader();
+        fr.onload = function () { loadProjectText(String(fr.result || ''), f.name); };
+        fr.onerror = function () { toast('这个文件读不出来', 'err'); };
+        fr.readAsText(f);
+      });
+    }
+    // 关页面 / 刷新：同步记一笔「干净退出」，下次启动才知道要不要提示恢复草稿
+    global.addEventListener('beforeunload', markCleanExit);
+    global.addEventListener('pagehide', markCleanExit);
+    setInterval(autosaveTick, AUTOSAVE_MS);
+
     $('#roomChip').addEventListener('click', function () {
       if (S.room) showInfo();
       else openEntry(true);
@@ -5497,8 +5992,17 @@
       S.replay.t = Number(this.value) / 1000 * dur;
       engine.replaySeek(S.replay.t);
       $('#replayTime').textContent = fmtClock(S.replay.t) + ' / ' + fmtClock(dur);
+      updateReplayAuthor();
     });
     $('#replaySpeed').addEventListener('change', function () { S.replay.speed = Number(this.value); });
+    // 洋葱皮：前后各几笔染成残影（纯本机显示）。按钮开着的时候才显示「前后几笔」选择
+    $('#btnReplayOnion').addEventListener('click', toggleOnion);
+    $('#onionCount').addEventListener('change', function () { setOnionCount(this.value); });
+    // 导出回放视频：录制中再点一次 = 提前收工（已经录到的部分照样存下来）
+    $('#btnReplayExport').addEventListener('click', function () {
+      if (S.recording && S.recording.kind === 'replay') { S.recording.rec.stop(); return; }
+      exportReplayVideo();
+    });
 
     $('#btnZoomIn').addEventListener('click', function () { engine.setZoom(engine.scale * 1.25); });
     $('#btnZoomOut').addEventListener('click', function () { engine.setZoom(engine.scale / 1.25); });
@@ -5522,6 +6026,8 @@
     $('#btnLayerClear').addEventListener('click', layerClear);
     $('#btnLayerDel').addEventListener('click', layerDel);
     $('#btnLayerFlatten').addEventListener('click', layerFlatten);
+    $('#btnGroupAdd').addEventListener('click', groupAdd);
+    $('#btnGroupToggle').addEventListener('click', groupToggle);
 
     $('#btnSend').addEventListener('click', sendChat);
     $('#chatInput').addEventListener('keydown', function (e) {
@@ -5596,6 +6102,18 @@
     var was = !!S.me.isOwner;
     S.me.isOwner = !!(mine && mine.isOwner);
     if (S.joined && S.me.isOwner && !was) toast('原房主离开了，现在你是房主', 'ok', 3200);
+
+    // 房主可能在成员列表里把我设成「只读观众」、也可能又放开 —— 跟着变。
+    // 一定得当面说一声：不说的话，人只会觉得「我的笔怎么画不出来了」。
+    var wasRO = !!S.me.readonly;
+    S.me.readonly = !!(mine && mine.readonly);
+    if (S.joined && S.me.readonly !== wasRO) {
+      if (S.me.readonly) toast('房主把你设成了观众：能看、能聊，不能改画布', 'err', 4200);
+      else toast('房主放开了作画权限，可以画了', 'ok', 3200);
+    }
+
+    renderMeRole();
+    renderGameLockTip();
     updateGameDialog();
     renderGameHud();
   }
@@ -5612,6 +6130,34 @@
    * 注意这只是「别让交互误导人」——真正的权限在服务端（非画手的笔迹根本不会被广播）。
    */
   function gameLocked() { return !!(S.game && S.game.locked && S.joined); }
+
+  /** 我是「只读观众」吗？（房主设的；真正的权限在服务端） */
+  function readonlyMe() { return !!(S.joined && S.me.readonly); }
+
+  /**
+   * 现在改不了画布的话，返回该对用户说的那句话；能改就返回 ''。
+   *
+   * 「你是观众」和「这一回合不是画手」必须分开说 —— 提示语对不上，
+   * 用户会对着画布一直试，找不到真正的原因。
+   */
+  function canvasBlockMsg() {
+    if (readonlyMe()) return '你现在是观众，只能看着 —— 想画请让房主取消';
+    if (gameLocked()) return '这一回合只有画手能画';
+    return '';
+  }
+
+  /** 顶栏那个「观众」小标签 */
+  function renderMeRole() {
+    var el = $('#meRole');
+    if (el) el.classList.toggle('hidden', !readonlyMe());
+  }
+
+  /** 房主给某人设 / 取消「只读观众」——发出去就完事，以服务端回来的 MEMBERS 为准 */
+  function setReadonly(userId, readonly) {
+    if (!S.joined || !userId) return;
+    if (!S.me.isOwner) { toast('只有房主可以设观众', 'err'); return; }
+    net.send(P.C2S.MEMBER_ROLE, { userId: userId, readonly: !!readonly });
+  }
 
   function gameImDrawer() { return !!(S.game && S.game.isDrawer); }
 
@@ -5839,13 +6385,19 @@
   /** 只能看着的时候，在画布下方给一个明确的说明，免得对着画布狂点还以为卡了 */
   function renderGameLockTip() {
     var el = $('#gameLockTip');
-    var show = gameLocked();
+    var show = gameLocked() || readonlyMe();
     if (!show) { if (el) el.remove(); return; }
     if (!el) {
       el = document.createElement('div');
       el.id = 'gameLockTip';
       el.className = 'game-lock-tip';
       $('#stage').appendChild(el);
+    }
+    // 「观众」是身份，跟有没有在玩这局游戏无关：房主一设就是。
+    // 放在最前面 —— 否则下面 `S.game` 为 null 时会直接抛异常。
+    if (readonlyMe()) {
+      el.textContent = '观众模式 —— 房主只给了你「看」的权限：能看、能聊天，不能改画布';
+      return;
     }
     var g = S.game;
     if (g.mode === 'chain') {
@@ -6997,6 +7549,7 @@
     applyPanelOrder();
     bindUI();
     bindKeys();
+    bindPaste();
     bindCanvas();
     bindViewBar();
     bindWheel();
@@ -7038,6 +7591,8 @@
     // 你画我猜的倒计时：本地每 250ms 按服务端 deadline 刷新一次，
     // 不靠服务端逐秒推送（那样每条消息都要过一遍压缩，纯属浪费）
     setInterval(updateGameTimer, 250);
+    // 回放洋葱皮的偏好：开机就灌进引擎，免得到时候点开回放还得再开一次
+    applyOnion(S.onionOn, S.onionCount);
     engine.attach($('#view'), $('#overlay'));
 
     loadBrush(S.brushId);
@@ -7086,6 +7641,8 @@
     }
 
     setTimeout(function () { engine.fitView(); }, 120);
+    // 入口页那条「上次没正常结束，要不要恢复」的提示条
+    refreshDraftBar();
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
@@ -7120,6 +7677,8 @@
     if (!confirm('离开当前房间？')) return;
     net.send(P.C2S.ROOM_LEAVE, {});
     S.joined = false;
+    // 「观众」标签也得顺手摘掉 —— 它看的是 S.joined，不刷新就会一直挂在顶栏上
+    renderMeRole();
     engine.strokes = [];
     engine.byId = new Map();
     engine.pending.clear();
@@ -7401,6 +7960,150 @@
       }
     } catch (e) { /* 没权限就算了，S.clip 里还留着一份 */ }
     toast('已拷贝 ' + out.width + ' × ' + out.height + '（茶绘内部剪贴板）', 'ok');
+  }
+
+  /* ---------------- 编辑：粘贴 ---------------- */
+
+  /**
+   * 从剪贴板里取一张图片。三级兜底 —— 三种运行环境的限制完全不一样：
+   *   ① 桌面端：走主进程的 clipboard.readImage()，没有权限弹窗，最稳；
+   *   ② 网页版：navigator.clipboard.read()，要用户手势 + 授权，失败往下走；
+   *   ③ 兜底：茶绘**内部**剪贴板 S.clip —— 「拷贝」在没拿到系统权限时也会留一份。
+   */
+  async function readClipboardImage() {
+    if (global.chahuDesktop && global.chahuDesktop.clipboardImage) {
+      try {
+        var d = await global.chahuDesktop.clipboardImage();
+        if (d) {
+          var im = await loadImage(d);
+          if (im && im.width) return im;
+        }
+      } catch (e) { /* 没读到就往下试 */ }
+    }
+    try {
+      if (navigator.clipboard && navigator.clipboard.read) {
+        var items = await navigator.clipboard.read();
+        for (var i = 0; i < items.length; i++) {
+          var types = items[i].types || [];
+          var type = null;
+          for (var j = 0; j < types.length; j++) if (/^image\//.test(types[j])) { type = types[j]; break; }
+          if (!type) continue;
+          var blob = await items[i].getType(type);
+          var url = URL.createObjectURL(blob);
+          var img = await loadImage(url);
+          URL.revokeObjectURL(url);
+          if (img && img.width) return img;
+        }
+      }
+    } catch (e) { /* 没权限 / 剪贴板里没图，落到内部剪贴板 */ }
+    if (S.clip && S.clip.png) {
+      var own = await loadImage(S.clip.png);
+      if (own && own.width) return own;
+    }
+    return null;
+  }
+
+  /** 粘贴的共同前置检查：不满足就提示并返回 false（菜单和右键两条路都走它） */
+  function pasteAllowed() {
+    if (!S.joined) { toast('先进入一个房间', 'err'); return false; }
+    if (engine.transform) { toast('先按 Enter 确定当前的变换'); return false; }
+    var _bm = canvasBlockMsg();
+    if (_bm) { toast(_bm, 'err', 1800); return false; }
+    var max = global.ChaProject ? global.ChaProject.MAX_LAYERS : 16;
+    if (engine.layers.length >= max) {
+      toast('图层数已达上限 ' + max + '，先删掉一层再贴', 'err', 3600);
+      return false;
+    }
+    return true;
+  }
+
+  /** 把图片摆成「整幅画布大小」的一张画布：居中；比画布大就等比缩到放得下 */
+  function composeImageOnCanvas(img) {
+    var W = engine.width, H = engine.height;
+    var c = document.createElement('canvas');
+    c.width = W; c.height = H;
+    var ctx = c.getContext('2d');
+    // 必须是透明的：这张图会**整层替换**目标图层像素，不能带上底色
+    ctx.clearRect(0, 0, W, H);
+    var k = Math.min(1, W / img.width, H / img.height);
+    var w = Math.max(1, Math.round(img.width * k));
+    var h = Math.max(1, Math.round(img.height * k));
+    ctx.drawImage(img, Math.round((W - w) / 2), Math.round((H - h) / 2), w, h);
+    return { canvas: c, w: w, h: h, scaled: k < 1 };
+  }
+
+  /** 轮询等某个图层在本地出现 —— 图层是服务端建的，广播回来才算数 */
+  function waitForLayer(layerId, cb, tries) {
+    var l = engine.getLayer(layerId);
+    if (l) { cb(l); return; }
+    if ((tries || 0) > 60) { toast('新建图层超时，请重试', 'err'); return; }   // 60 × 50ms ≈ 3s
+    setTimeout(function () { waitForLayer(layerId, cb, (tries || 0) + 1); }, 50);
+  }
+
+  /**
+   * 把一张图片贴成一个**新图层**，居中放好。
+   *
+   * 走的是和「变换 / 滤镜」同一条通道：像素没法用笔迹重放表达，所以客户端
+   * 烘焙成 PNG 回传给服务端（LAYER_PIXELS），服务端依旧只当哑存储。
+   *
+   * 图层 id 由客户端**自己指定**（服务端会校验格式与冲突）。这一点是必须的：
+   * 「先建层、再往里写像素」中间有一段时间差，而本地和服务端对「认不出的 layerId
+   * 该兜底到哪一层」的规则并不一样（客户端兜底到活动图层、服务端兜底到最后一层），
+   * 不自己指定就会两端分家 —— 「文字图层」此前就是这么错的。
+   */
+  function placeImageOnNewLayer(img, name) {
+    var id = P.rid('L');
+    var view = composeImageOnCanvas(img);
+    var png = view.canvas.toDataURL('image/png');
+    net.send(P.C2S.LAYER_ADD, { name: name, id: id });
+    waitForLayer(id, function () {
+      var before = snapshotLayer(id);                  // 新层，这份就是一张透明图
+      engine.applyTransformResult(id, view.canvas);    // 本地立刻可见
+      net.send(P.C2S.LAYER_PIXELS, { layerId: id, png: png });
+      // 撤销 = 把这一层清回透明（图层的壳留着，想删再自己删）
+      pushOp({ type: 'pixels', layerId: id, before: before, after: png, label: name });
+      engine.setActiveLayer(id);
+      renderLayers(); renderHistory(); refreshNav();
+      toast(name + '完成' + (view.scaled
+        ? '（图比画布大，已等比缩到 ' + view.w + ' × ' + view.h + '）' : '') +
+        '　Ctrl+Z 可撤回', 'ok', 3600);
+    });
+  }
+
+  /** 编辑 → 粘贴：把剪贴板里的图片贴成一个新图层 */
+  async function pasteImage() {
+    if (!pasteAllowed()) return;
+    var img = await readClipboardImage();
+    if (!img) { toast('剪贴板里没有图片（复制一张图或截个屏再试）', 'err', 3600); return; }
+    placeImageOnNewLayer(img, '粘贴');
+  }
+
+  /**
+   * 真·粘贴事件（右键 → 粘贴 / 浏览器原生粘贴）。
+   * 快捷键 Ctrl+V 走的是菜单那套，两条路都汇到 placeImageOnNewLayer。
+   * 焦点在输入框里时**一律不抢** —— 聊天框和文字对话框要能正常粘文字。
+   */
+  function bindPaste() {
+    document.addEventListener('paste', function (e) {
+      var t = e.target || {};
+      var tag = (t.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || t.isContentEditable) return;
+      var dt = e.clipboardData;
+      if (!dt || !dt.items) return;
+      var file = null;
+      for (var i = 0; i < dt.items.length; i++) {
+        var it = dt.items[i];
+        if (it.kind === 'file' && /^image\//.test(it.type)) { file = it.getAsFile(); break; }
+      }
+      if (!file) return;                       // 不是图片就放行，不拦
+      e.preventDefault();
+      if (!pasteAllowed()) return;
+      var url = URL.createObjectURL(file);
+      loadImage(url).then(function (img) {
+        URL.revokeObjectURL(url);
+        if (img && img.width) placeImageOnNewLayer(img, '粘贴');
+      });
+    });
   }
 
   /* ---------------- 图层 ---------------- */
@@ -7884,16 +8587,159 @@
    * 更新检测：读 GitHub 的最新 release 和当前版本比。
    * 只为「提示有新版」，不自动下载、不自动安装。
    */
+  /** 这台机器是什么平台、是不是桌面端 —— 决定挑哪个安装包、怎么下 */
+  var updateInfo = { platform: '', desktop: false };
+  /** 本次检查出来的可下载资产（null = 没有 / 还没检查） */
+  var updateReady = null;
+
+  /**
+   * 现在该按哪个平台挑包。
+   * 桌面端问主进程（它当然知道自己在哪个系统上跑）；网页版只能按 UA 猜。
+   */
+  function detectPlatform() {
+    var ua = String((global.navigator && global.navigator.userAgent) || '');
+    var guess = /Mac/i.test(ua) ? 'darwin'
+      : (/Linux/i.test(ua) && !/Android/i.test(ua)) ? 'linux' : 'win32';
+    if (global.chahuDesktop && global.chahuDesktop.getInfo) {
+      updateInfo.desktop = true;
+      return global.chahuDesktop.getInfo().then(function (i) {
+        updateInfo.platform = (i && i.platform) || guess;
+        return updateInfo.platform;
+      }).catch(function () { updateInfo.platform = guess; return guess; });
+    }
+    updateInfo.desktop = false;
+    updateInfo.platform = guess;
+    return Promise.resolve(guess);
+  }
+
+  /**
+   * 从 release 的资产列表里挑出「这台机器该下的那一个」。
+   *
+   * **纯函数**：不碰 DOM、不碰网络，所以能直接拿假数据测（见 tools/test-update.js）。
+   * 认不出平台、或者这个 release 里根本没有像样的包（比如只发了源码 zip）时返回 null，
+   * 调用方退回「去 Releases 页面」那条路。
+   *
+   * Windows 上**安装包优先于便携版**：安装包带卸载器和开始菜单项，
+   * 是给「本来就在用的人」升级的那条路；便携版是自己解压用的。
+   */
+  function pickUpdateAsset(rel, platform) {
+    var list = ((rel && rel.assets) || []).filter(function (a) {
+      return a && a.name && a.browser_download_url;
+    });
+    if (!list.length) return null;
+    var plat = String(platform || '').toLowerCase();
+    var want;
+    if (plat === 'darwin' || plat === 'mac' || plat === 'macos') {
+      want = [/\.dmg$/i, /\.zip$/i];
+    } else if (plat === 'linux') {
+      want = [/\.AppImage$/i, /\.tar\.gz$/i, /\.deb$/i];
+    } else {
+      want = [/^chahui-setup-.*\.exe$/i, /-setup-.*\.exe$/i, /^chahui-portable-.*\.exe$/i, /\.exe$/i];
+    }
+    for (var i = 0; i < want.length; i++) {
+      for (var j = 0; j < list.length; j++) {
+        if (want[i].test(list[j].name)) return list[j];
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 真正把包拿下来。
+   * 桌面端交给主进程 —— 渲染进程 fetch 跨域的 GitHub 资产会被 CORS 挡掉，
+   * 主进程没有这个限制，还能顺手把下好的安装包交给系统跑。
+   * 网页版先试「抓成 blob 再存」（页面不跳转）；GitHub 的资产下载是跨域的、
+   * 拿不到 CORS 头时 fetch 会直接失败，那就退回一个隐藏的 <a download>：
+   * 响应本身是 attachment，浏览器会直接下载，同样不会把人带去 GitHub 页面。
+   */
+  async function downloadUpdate(url, name) {
+    if (updateInfo.desktop && global.chahuDesktop.downloadUpdate) {
+      return await global.chahuDesktop.downloadUpdate(url, name);
+    }
+    try {
+      var res = await fetch(url);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      var blob = await res.blob();
+      var a = document.createElement('a');
+      a.href = global.URL.createObjectURL(blob);
+      a.download = name || 'chahui-update';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () { global.URL.revokeObjectURL(a.href); a.remove(); }, 5000);
+      return { ok: true, via: 'blob' };
+    } catch (e) {
+      var link = document.createElement('a');
+      link.href = url;
+      link.download = name || '';
+      link.style.display = 'none';
+      document.body.appendChild(link);
+      link.click();
+      setTimeout(function () { link.remove(); }, 5000);
+      return { ok: true, via: 'link' };
+    }
+  }
+
+  /** 点「下载更新」之后的事：进度、结果、出错提示 */
+  async function runUpdateDownload(btn) {
+    if (!updateReady) return;
+    var msg = $('#aboutUpdateMsg');
+    var label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '正在下载…';
+    msg.textContent = '正在准备下载 ' + updateReady.name + '…';
+    var off = null;
+    if (global.chahuDesktop && global.chahuDesktop.onUpdateProgress) {
+      off = global.chahuDesktop.onUpdateProgress(function (p) {
+        if (p && typeof p.percent === 'number') {
+          msg.textContent = '正在下载 ' + updateReady.name + '… ' + Math.round(p.percent * 100) + '%';
+        }
+      });
+    }
+    try {
+      var res = await downloadUpdate(updateReady.url, updateReady.name);
+      if (res && res.mirror) toast('直连 GitHub 没成功，已改用镜像下载', 'ok', 3600);
+      if (!res || !res.ok) throw new Error((res && res.error) || '下载失败');
+      if (res.launched) {
+        msg.textContent = '安装包已下载，正在启动安装程序…';
+        toast('正在启动安装程序', 'ok', 3200);
+      } else if (res.path) {
+        msg.textContent = '已下载到 ' + res.path + '（打开它就能安装）';
+        $('#aboutUpdateMsg').title = res.path;
+        toast('更新已下载', 'ok', 3200);
+      } else {
+        msg.textContent = '已开始下载 ' + updateReady.name;
+      }
+    } catch (e) {
+      msg.textContent = '下载失败（' + ((e && e.message) || e) +
+        '）。可以点上面的链接去 Releases 页面手动下载。';
+      toast('更新下载失败', 'err', 3600);
+    }
+    if (off) off();
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+
+  /**
+   * 更新检测：读 GitHub 的最新 release，和当前版本比。
+   * 有新版本时**直接把该下的那个包找出来并提供下载**，
+   * 不用跳去 Releases 页面自己找文件名 —— 那一步正是最容易下错的地方。
+   */
   function checkUpdate() {
     var box = $('#aboutUpdate');
     var msg = $('#aboutUpdateMsg');
+    var btn = $('#btnDoUpdate');
     var cur = (global.CHAHU_CONFIG && global.CHAHU_CONFIG.appVersion) || '0.0.0';
     box.classList.remove('has-new');
+    updateReady = null;
+    if (btn) { btn.classList.add('hidden'); btn.onclick = null; btn.disabled = false; btn.textContent = '下载更新'; }
+    msg.removeAttribute('title');
     msg.textContent = '正在检查更新…';
     var ac = global.AbortController ? new global.AbortController() : null;
     var timer = setTimeout(function () { if (ac) ac.abort(); }, 8000);
-    fetch('https://api.github.com/repos/' + REPO + '/releases/latest',
-      { headers: { Accept: 'application/vnd.github+json' }, signal: ac ? ac.signal : undefined })
+    return detectPlatform().then(function () {
+      return fetch('https://api.github.com/repos/' + REPO + '/releases/latest',
+        { headers: { Accept: 'application/vnd.github+json' }, signal: ac ? ac.signal : undefined });
+    })
       .then(function (r) { clearTimeout(timer);
         if (!r.ok) throw new Error('GitHub 返回 ' + r.status);
         return r.json();
@@ -7901,12 +8747,27 @@
       .then(function (rel) {
         var tag = String(rel.tag_name || '').replace(/^v/, '');
         if (!tag) throw new Error('没有读到版本号');
-        if (cmpVer(tag, cur) > 0) {
-          box.classList.add('has-new');
-          msg.innerHTML = '有新版本 <b>v' + esc(tag) + '</b> 可用（当前 v' + esc(cur) + '）' +
-            ' <a href="' + esc(rel.html_url || '') + '" target="_blank" rel="noreferrer">去下载</a>';
-        } else {
+        if (cmpVer(tag, cur) <= 0) {
           msg.textContent = '已经是最新版（v' + cur + '）';
+          return;
+        }
+        var asset = pickUpdateAsset(rel, updateInfo.platform);
+        if (!asset) {
+          // 这个 release 里没有认得出的安装包 → 老实给个入口，别假装能一键下
+          msg.innerHTML = '有新版本 <b>v' + esc(tag) + '</b> 可用（当前 v' + esc(cur) +
+            '），但这个版本里没有认得出的安装包 <a href="' + esc(rel.html_url || '') +
+            '" target="_blank" rel="noreferrer">去 Releases 页面看看</a>';
+          return;
+        }
+        updateReady = { url: asset.browser_download_url, name: asset.name };
+        box.classList.add('has-new');
+        msg.innerHTML = '有新版本 <b>v' + esc(tag) + '</b> 可用（当前 v' + esc(cur) + '）' +
+          '<br><span class="hint">将下载 ' + esc(asset.name) +
+          (asset.size ? '（' + fmtBytes(asset.size) + '）' : '') + '</span>';
+        if (btn) {
+          btn.classList.remove('hidden');
+          btn.textContent = updateInfo.desktop ? '下载并安装' : '直接下载';
+          btn.onclick = function () { runUpdateDownload(btn); };
         }
       })
       .catch(function (e) {
@@ -8257,7 +9118,8 @@
 
   /** 点画布上的位置 → 记下来，等用户在对话框里点「放到画布上」 */
   function placeTextAt(dp) {
-    if (gameLocked()) { toast('这一回合只有画手能改画布', 'err', 1600); return; }
+    var _bm = canvasBlockMsg();
+    if (_bm) { toast(_bm, 'err', 1600); return; }
     S.textAt = { x: dp.x, y: dp.y };
     buildTextFamilies();
     $('#textMask').classList.remove('hidden');
@@ -8312,7 +9174,7 @@
       renderHistory();
       toast('文字已放到画布上', 'ok', 3000);
     };
-    if (needLayer) setTimeout(doIt, 260);      // 等图层建好
+    if (needLayer) waitForLayer(layerId, doIt);   // 等图层真的到位，别拿固定 sleep 赌
     else doIt();
   }
 
@@ -8488,6 +9350,236 @@
     setSideCollapsed(!S.sideCollapsed);
   }
 
+  /* ================================================================
+   * 工程文件（.chahu）：保存 / 打开 / 自动保存草稿
+   *
+   * 语义先说清楚：茶绘的画布归**房间**所有、服务端是权威，所以
+   * 「打开工程」= 新建一个房间来承载它，而不是往当前房间里灌
+   * （灌进当前房间会覆盖别人的画）。文件结构和取舍见 project.js 顶部注释。
+   * ================================================================ */
+
+  var PJ = global.ChahuProject;
+  var LS_EXIT_AT = 'chahu.exitAt';   // 上次「干净退出」的时刻，只有正常刷新/关页面才写
+  var AUTOSAVE_MS = 25000;           // 自动保存节流：最快 25 秒一份
+  var autosaveSig = '';              // 上次自动保存时的文档指纹
+  var autosaveBusy = false;
+
+  /**
+   * 文档指纹：任何会改变画面的东西动了，指纹就变。自动保存靠它判断
+   * 「值不值得花几十毫秒抓一遍图」，不用真去抓。
+   * 光看笔数不够 —— 变换 / 滤镜 / 清除是像素级操作，不进 strokes，
+   * 只能靠图层表的 baseSeq 变化体现出来。
+   */
+  function docSignature() {
+    var ls = engine.layerList();
+    var acc = [engine.width, engine.height, engine.seq, engine.strokes.length];
+    for (var i = 0; i < ls.length; i++) {
+      var l = ls[i];
+      acc.push(l.id, l.name, l.visible ? 1 : 0, l.opacity, l.blend,
+        l.locked ? 1 : 0, l.alphaLock ? 1 : 0, l.baseSeq || 0);
+    }
+    return acc.join(',');
+  }
+
+  function appVersion() {
+    return (global.CHAHU_CONFIG && global.CHAHU_CONFIG.appVersion) ||
+      (Cfg && Cfg.appVersion) || '';
+  }
+
+  function captureProject() {
+    return PJ.capture(engine, {
+      app: appVersion(),
+      name: (S.room && S.room.name) || ''
+    });
+  }
+
+  /* ------------------------------------------------ 保存工程 */
+
+  function saveProject() {
+    if (!S.joined) { toast('先进入一个房间再保存工程', 'err'); return; }
+    var pj;
+    try { pj = captureProject(); }
+    catch (e) { toast('保存失败：' + e.message, 'err', 7000); return; }
+    var text = PJ.stringify(pj);
+    download(PJ.fileName(pj, (S.room && S.room.name) || '未命名'), PJ.textToDataUrl(text));
+    // 刚存过一遍，别让自动保存马上又抓一次同样的内容
+    autosaveSig = docSignature();
+  }
+
+  /* ------------------------------------------------ 打开工程 */
+
+  function pickProjectFile() {
+    if (global.chahuDesktop && global.chahuDesktop.openFile) {
+      global.chahuDesktop.openFile('project').then(function (r) {
+        if (!r || r.canceled) return;
+        if (!r.ok) { toast('打开失败：' + (r.error || '未知错误'), 'err', 7000); return; }
+        loadProjectText(r.text, r.name);
+      });
+      return;
+    }
+    var input = $('#projectFileInput');
+    if (!input) return;
+    input.value = '';
+    input.click();
+  }
+
+  function loadProjectText(text, fileName) {
+    var pj;
+    try { pj = PJ.parse(text); }
+    catch (e) { toast('打不开这份工程：' + e.message, 'err', 9000); return; }
+    if (!pj.name && fileName) pj.name = String(fileName).replace(/\.chahu$/i, '');
+    openProjectDoc(pj);
+  }
+
+  function openProjectDoc(pj, opts) {
+    opts = opts || {};
+    if (!net.isOpen()) { toast('还没连上服务器', 'err'); return; }
+    if (S.joined && !opts.noConfirm) {
+      if (!confirm('打开工程会新建一个房间来承载它，并离开当前房间' +
+        (S.room ? '「' + S.room.name + '」' : '') +
+        '。\n\n当前房间的内容在服务器上，不会丢。继续？')) return;
+    }
+    S.projectLoad = { doc: pj.doc, sent: 0, ending: false };
+    net.send(P.C2S.ROOM_CREATE, {
+      name: String(pj.name || '打开的画').slice(0, 20),
+      user: S.me.name,
+      width: pj.doc.width,
+      height: pj.doc.height,
+      background: pj.doc.background
+    });
+    setStatus('正在准备装载工程…');
+  }
+
+  /**
+   * 入房同步完成后，把工程的图层分片传上去。
+   * 分片是为了绕开 ws 单条 12MB 的上限 —— 一层一条，多大的画都不会顶到。
+   * 钩子在 drainHistory 收尾处，所以「入房同步完」这件事只在此刻成立一次。
+   */
+  function uploadProjectLayers() {
+    var job = S.projectLoad;
+    if (!job || job.sent) return;
+    if (!S.joined) return;
+    job.sent = 1;
+
+    var layers = job.doc.layers;
+    if (layers.length > PJ.MAX_LAYERS) {
+      toast('这份工程有 ' + layers.length + ' 层，超过上限 ' + PJ.MAX_LAYERS + '，只装载前 ' +
+        PJ.MAX_LAYERS + ' 层', 'err', 9000);
+      layers = layers.slice(0, PJ.MAX_LAYERS);
+    }
+    // 组表跟着 BEGIN 走：它很小（没有像素），而且必须比第一个图层先到，
+    // 服务端要拿它判断各层的 groupId 有效不有效
+    net.send(P.C2S.PROJECT_BEGIN, { count: layers.length, groups: job.doc.groups || [] });
+
+    var i = 0;
+    function step() {
+      if (i >= layers.length) {
+        job.ending = true;
+        net.send(P.C2S.PROJECT_END, {});
+        setStatus('工程已上传，正在重建画布…');
+        return;
+      }
+      var l = layers[i];
+      net.send(P.C2S.PROJECT_LAYER, {
+        index: i,
+        name: l.name, visible: l.visible, opacity: l.opacity,
+        locked: l.locked, alphaLock: l.alphaLock, blend: l.blend,
+        groupId: l.groupId || null,
+        png: l.png
+      });
+      i++;
+      setStatus('正在装载工程… ' + i + '/' + layers.length + ' 层');
+      setTimeout(step, 0);
+    }
+    step();
+  }
+
+  /** 装载失败 / 房间没了：别留着一个半截的装载任务在后台 */
+  function dropProjectLoad(why) {
+    if (!S.projectLoad) return;
+    S.projectLoad = null;
+    if (why) toast(why, 'err', 7000);
+  }
+
+  /* ------------------------------------------------ 自动保存草稿 */
+
+  /**
+   * 草稿写进 IndexedDB（不是 localStorage：一份工程几层 PNG 很容易过 5MB，
+   * 而 localStorage 超限是同步抛异常）。
+   * 只有「文档确实变了、且距上次至少 25 秒」才真去抓图，平时这个循环几乎不花时间。
+   */
+  function autosaveTick() {
+    if (!S.joined || !S.room || autosaveBusy || !PJ.draft) return;
+    var sig = docSignature();
+    if (sig === autosaveSig) return;
+    autosaveBusy = true;
+    var pj;
+    try { pj = captureProject(); }
+    catch (e) { autosaveBusy = false; return; }
+    PJ.draft.save(pj, {
+      roomId: S.room.id,
+      roomName: S.room.name,
+      strokeCount: engine.strokes.length
+    }).then(function () {
+      autosaveSig = sig;
+      autosaveBusy = false;
+    }).catch(function () {
+      // 存不下就算了（隐私模式 / 配额满），不影响画画这件正事
+      autosaveBusy = false;
+    });
+  }
+
+  /**
+   * 启动时决定要不要提示恢复草稿。
+   *
+   * 判据：草稿的写入时刻 vs 上次「干净退出」的时刻。
+   *   - 崩了 / 被强杀 → beforeunload 没跑 → exitAt 是上一次会话的旧值，
+   *     草稿比它新 → 提示；
+   *   - 正常刷新 / 关页面 → exitAt 刚写过，比草稿新 → 不提示
+   *     （内容本来就在服务器上，提示只会变成噪音）。
+   */
+  function refreshDraftBar() {
+    var bar = $('#draftBar');
+    if (!bar || !PJ || !PJ.draft) return;
+    bar.classList.add('hidden');
+    PJ.draft.load().then(function (rec) {
+      if (!rec || !rec.project) return;
+      var exitAt = 0;
+      try { exitAt = parseInt(localStorage.getItem(LS_EXIT_AT) || '0', 10) || 0; } catch (e) { exitAt = 0; }
+      if (rec.savedAt <= exitAt) return;
+      S.draftRecord = rec;
+      var info = $('#draftInfo');
+      if (info) {
+        var t = new Date(rec.savedAt);
+        info.textContent = (rec.roomName ? '「' + rec.roomName + '」· ' : '') +
+          PJ.describe(rec.project) + ' · 自动保存于 ' +
+          pad2(t.getMonth() + 1) + '-' + pad2(t.getDate()) + ' ' +
+          pad2(t.getHours()) + ':' + pad2(t.getMinutes());
+      }
+      bar.classList.remove('hidden');
+    }).catch(function () { /* 没有 IndexedDB 的环境直接跳过 */ });
+  }
+
+  function restoreDraft() {
+    var rec = S.draftRecord;
+    if (!rec || !rec.project) return;
+    $('#draftBar').classList.add('hidden');
+    openProjectDoc(rec.project, { noConfirm: !S.joined });
+  }
+
+  function dropDraft() {
+    S.draftRecord = null;
+    $('#draftBar').classList.add('hidden');
+    if (PJ && PJ.draft) PJ.draft.clear().catch(function () { /* ignore */ });
+    toast('已丢弃本地草稿');
+  }
+
+  /* 退出时同步记一笔「我是干净退出的」。必须在 beforeunload / pagehide 里同步做完，
+     IndexedDB 的异步写在这个时机不保证能提交，localStorage 可以。 */
+  function markCleanExit() {
+    try { localStorage.setItem(LS_EXIT_AT, String(Date.now())); } catch (e) { /* ignore */ }
+  }
+
   global.ChaApp = {
     engine: engine, net: net, state: S, undo: undo, redo: redo, toast: toast,
     // 笔刷导入（给测试用，也让控制台里能手动导一支试试）
@@ -8496,12 +9588,33 @@
     applyImported: applyImported,
     removeImported: removeImported,
     tipThumb: tipThumb,
+    // 工程文件（.chahu）。openProject 走「选文件」那条路，测试里可以直接
+    // 调 loadProjectText 灌一段 JSON 进来，不用真的去开文件对话框。
+    saveProject: saveProject,
+    openProject: pickProjectFile,
+    loadProjectText: loadProjectText,
+    openProjectDoc: openProjectDoc,
+    dropDraft: dropDraft,
+    // 自动保存本来是 25 秒一次的定时器；测试里等不起，直接给个「现在就存一遍」的入口
+    autosaveNow: autosaveTick,
+    refreshDraftBar: refreshDraftBar,
 
     /* ---- 菜单栏 / 快捷键要用到的动作（菜单结构见 menu.js） ---- */
     openEntry: openEntry, doExport: doExport, doShare: doShare, showInfo: showInfo,
     toggleRecord: toggleRecord,
     toggleReplay: function () { if (engine.replayMode) stopReplay(); else startReplay(); },
+    exportReplayVideo: exportReplayVideo,
+    toggleOnion: toggleOnion, setOnionCount: setOnionCount, onionState: syncOnionUi,
     leaveRoom: leaveRoom,
+    // 图层组（给测试用，也让控制台里能手动试）
+    groupAdd: groupAdd,
+    groupToggle: groupToggle,
+    groupUngroup: groupUngroup,
+    groupDelWithLayers: groupDelWithLayers,
+    selKind: selKind,
+    // 更新检测（纯函数，给测试直接喂假 release 数据）
+    pickUpdateAsset: pickUpdateAsset,
+    checkUpdate: checkUpdate,
     addLayer: addLayer, moveLayer: moveLayer, clearLayer: clearLayer,
     openCanvasDialog: openCanvasDialog, openCanvasSizeDialog: openCanvasSizeDialog, bake: bake,
     flipImage: flipImage, rotateImage: rotateImage, cropToSelection: cropToSelection,
@@ -8520,6 +9633,10 @@
     /* ---- 照 SAI2 菜单结构补齐的动作 ---- */
     quitApp: quitApp,
     copySelection: copySelection,
+    pasteImage: pasteImage,
+    // 只读观众：给别人设 / 取消（只有房主说了算），以及「我是不是观众」
+    setReadonly: setReadonly,
+    myReadonly: readonlyMe,
     dupLayer: dupLayer, delLayer: delLayer, mergeDown: mergeDown, mergeVisible: mergeVisible,
     setBackground: setBackground,
     toggleMarchingAnts: toggleMarchingAnts,

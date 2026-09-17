@@ -289,9 +289,15 @@ function historyChunks(room) {
   return chunks;
 }
 
-/** 图层变更广播；baseImages 只在像素真的变了（复制/合并/固化）时才附带，避免无谓的大包 */
+/**
+ * 图层变更广播；baseImages 只在像素真的变了（复制/合并/固化）时才附带，避免无谓的大包。
+ *
+ * **组表永远和图层表一起发**：组的「位置」就是它那一块图层的位置，
+ * 只发其中一个的话，客户端会拿新图层配旧组表，合成出来的东西和谁都不一样。
+ * 组表本身很小（最多十几条、没有像素），不值得为它省这个包。
+ */
 function broadcastLayers(room, baseImages) {
-  const payload = { layers: room.layerList() };
+  const payload = { layers: room.layerList(), groups: room.groupList() };
   if (baseImages && Object.keys(baseImages).length) payload.baseImages = baseImages;
   roomBroadcast(room, P.S2C.LAYERS, payload);
 }
@@ -431,9 +437,19 @@ function resetGameCanvas(room) {
   broadcastLayers(room);
 }
 
-/** 游戏进行中，非当事者的写操作一律挡在服务端（前端禁用只是「提示」，不是权限） */
-function gameBlocked(ws, room, member) {
-  if (!room || !member || !room.game) return false;
+/**
+ * 写操作总闸：**只读观众**与**游戏进行中的非当事者**，一律挡在服务端。
+ *
+ * 前端把工具置灰、弹提示，都只是「别让人白点一笔」，不是权限 —— 谁改一下前端就能绕过去。
+ * 所以每一处「改画布」的消息都要先过这里（落笔另有 canDraw，见 STROKE_BEGIN）。
+ */
+function writeBlocked(ws, room, member) {
+  if (!member) return false;
+  if (member.readonly) {
+    send(ws, P.S2C.ERROR, { code: 'readonly', message: '你现在是观众，只能看着 —— 想画让房主取消' });
+    return true;
+  }
+  if (!room || !room.game) return false;
   if (!room.game.lockedFor(member.userId)) return false;
   const msg = room.game.mode === 'chain'
     ? '接龙这一步轮不到你动笔'
@@ -533,6 +549,8 @@ function joinRoom(ws, room, name, avatar) {
     ws,
     joinedAt: Date.now(),
     drawing: false,
+    // 只读观众：房主在成员列表里能给人扣掉作画权限。默认人人都能画。
+    readonly: false,
     lastChat: 0
   };
   room.members.set(ws._connId, member);
@@ -546,9 +564,10 @@ function joinRoom(ws, room, name, avatar) {
   send(ws, P.S2C.ROOM_JOINED, {
     room: room.meta(),
     layers: room.layerList(),
+    groups: room.groupList(),
     members: room.memberList(),
     chat: room.chat,
-    you: { userId: member.userId, name: member.name, color: member.color, isOwner: member.userId === room.ownerId },
+    you: { userId: member.userId, name: member.name, color: member.color, isOwner: member.userId === room.ownerId, readonly: !!member.readonly },
     // 游戏状态随入房一起给：新进来的人立刻就能看到 HUD，不用等下一次状态同步
     game: room.game && room.game.active ? room.game.snapshotFor(member.userId) : null,
     history: {
@@ -667,9 +686,10 @@ function handle(ws, msg) {
     case P.C2S.RESYNC: {
       if (!room) return;
       send(ws, P.S2C.ROOM_JOINED, {
-        room: room.meta(), layers: room.layerList(), members: room.memberList(),
+        room: room.meta(), layers: room.layerList(), groups: room.groupList(),
+        members: room.memberList(),
         chat: room.chat,
-        you: { userId: member.userId, name: member.name, color: member.color, isOwner: member.userId === room.ownerId },
+        you: { userId: member.userId, name: member.name, color: member.color, isOwner: member.userId === room.ownerId, readonly: !!member.readonly },
         game: room.game && room.game.active ? room.game.snapshotFor(member.userId) : null,
         history: {
           count: room.strokes.length, lastSeq: room.seq,
@@ -729,7 +749,7 @@ function handle(ws, msg) {
 
     case P.C2S.ROOM_INFO: {
       if (!room) return;
-      if (gameBlocked(ws, room, member)) return;
+      if (writeBlocked(ws, room, member)) return;
       if (member.userId !== room.ownerId) {
         return send(ws, P.S2C.ERROR, { code: 'not_owner', message: '只有房主可以修改房间设置' });
       }
@@ -741,9 +761,56 @@ function handle(ws, msg) {
       return;
     }
 
+    /*
+     * 房主把某人设成「只读观众」/ 恢复作画。
+     *
+     * 这条消息**故意不过 writeBlocked**：房主完全可能把自己设成观众（比如把画板让给
+     * 别人，自己只做讲解）。要是它也归写操作管，那一刻起就再没人能取消，房间会永久
+     * 失去作画权限 —— 和「房主不移交」是同一类死锁。
+     */
+    case P.C2S.MEMBER_ROLE: {
+      if (!room || !member) return;
+      if (member.userId !== room.ownerId) {
+        return send(ws, P.S2C.ERROR, { code: 'not_owner', message: '只有房主可以设观众' });
+      }
+      const who = sanitizeText(msg.userId, 40);
+      let target = null;
+      for (const m of room.members.values()) if (m.userId === who) target = m;
+      if (!target) {
+        return send(ws, P.S2C.ERROR, { code: 'no_member', message: '这个人已经不在房间里了' });
+      }
+      const want = !!msg.readonly;
+      if (!!target.readonly === want) return;      // 状态没变，不刷屏
+
+      // 正在作画的人不能当场变观众：他手上那一笔会卡在半空，整局干等到超时。
+      if (want && room.game && room.game.phase === 'draw' && room.game.drawerId === target.userId) {
+        return send(ws, P.S2C.ERROR, {
+          code: 'drawer_busy',
+          message: target.name + ' 正在作画，等这一回合结束再设为观众'
+        });
+      }
+
+      target.readonly = want;
+      // 已经落下半截的笔要掐掉，否则它会带着半截轨迹提交上去
+      const st = want && target.ws && target.ws._activeStroke;
+      if (st) {
+        target.ws._activeStroke = null;
+        target.drawing = false;
+        roomBroadcast(room, P.S2C.STROKE_CANCEL, { id: st.id });
+      }
+      // 成员是**运行时**状态，不落盘（重启后大家重新进房），所以这里不 markDirty
+      roomBroadcast(room, P.S2C.MEMBERS, { members: room.memberList() });
+      roomBroadcast(room, P.S2C.CHAT, {
+        id: P.rid('m'), userId: 'system', name: '系统', color: '#8b8b8b',
+        text: target.name + (want ? ' 现在是观众，只能看' : ' 可以作画了'),
+        ts: Date.now(), system: true
+      });
+      return;
+    }
+
     case P.C2S.ROOM_RESIZE: {
       if (!room || !member) return;
-      if (gameBlocked(ws, room, member)) return;
+      if (writeBlocked(ws, room, member)) return;
       if (member.userId !== room.ownerId) {
         return send(ws, P.S2C.ERROR, { code: 'not_owner', message: '只有房主可以调整画布分辨率' });
       }
@@ -928,6 +995,9 @@ function handle(ws, msg) {
         roomBroadcast(room, P.S2C.STROKE_CANCEL, { id: stroke.id }, ws._connId);
         return;
       }
+      // 补上结束时刻（起始时刻 buildStroke 里已打 ts）。
+      // 存档里的历史笔迹会带着 ts/te 回到新客户端，回放才放得出真实的「一笔画了多久」。
+      stroke.te = Date.now();
       room.addStroke(stroke);
       store.markDirty(room);
       roomBroadcast(room, P.S2C.STROKE_END, { id: stroke.id, seq: stroke.seq }, ws._connId);
@@ -975,7 +1045,7 @@ function handle(ws, msg) {
     case P.C2S.STROKE_CLEAR: {
       if (!room || !member) return;
       const scope = msg.scope === 'all' ? 'all' : 'layer';
-      if (gameBlocked(ws, room, member)) return;
+      if (writeBlocked(ws, room, member)) return;
       if (scope === 'all' && member.userId !== room.ownerId) {
         return send(ws, P.S2C.ERROR, { code: 'not_owner', message: '只有房主可以清空整个画布' });
       }
@@ -989,11 +1059,22 @@ function handle(ws, msg) {
     /* ---------------- 图层 ---------------- */
     case P.C2S.LAYER_ADD: {
       if (!room || !member) return;
-      if (gameBlocked(ws, room, member)) return;
+      if (writeBlocked(ws, room, member)) return;
       if (room.layers.length >= MAX_LAYERS) {
         return send(ws, P.S2C.ERROR, { code: 'layer_limit', message: '图层数量上限为 ' + MAX_LAYERS });
       }
-      room.addLayer(sanitizeName(msg.name, ''), msg.at);
+      // 客户端可以指定图层 id —— 和 ROOM_CREATE 一个套路。
+      // 为什么必须认它：「文字图层」和「粘贴图片」都是「先建层、再往里写
+      // 笔迹 / 像素」，客户端得提前知道 id 才能一次到位。不认的话，
+      // 客户端 newStroke 会兜底到**活动图层**、服务端这里会兜底到**最后一层**，
+      // 两边一旦不是同一层，作者看到字在自己图层、别人看到在另一层。
+      const wanted = (typeof msg.id === 'string' && /^[A-Za-z0-9_-]{4,32}$/.test(msg.id)) ? msg.id : null;
+      if (wanted && room.getLayer(wanted)) {
+        return send(ws, P.S2C.ERROR, { code: 'layer_exists', message: '图层 id 冲突，请重试' });
+      }
+      const gid = (typeof msg.groupId === 'string' && room.getGroup(msg.groupId))
+        ? msg.groupId : null;
+      room.addLayer(sanitizeName(msg.name, ''), msg.at, wanted || undefined, gid || undefined);
       store.markDirty(room);
       broadcastLayers(room);
       return;
@@ -1001,7 +1082,7 @@ function handle(ws, msg) {
 
     case P.C2S.LAYER_DEL: {
       if (!room || !member) return;
-      if (gameBlocked(ws, room, member)) return;
+      if (writeBlocked(ws, room, member)) return;
       const l = room.getLayer(sanitizeText(msg.layerId, 40));
       if (!l) return;
       if (!room.layerIsSolo(l.id, member.userId) && member.userId !== room.ownerId) {
@@ -1016,7 +1097,7 @@ function handle(ws, msg) {
 
     case P.C2S.LAYER_UPD: {
       if (!room || !member) return;
-      if (gameBlocked(ws, room, member)) return;
+      if (writeBlocked(ws, room, member)) return;
       room.updateLayer(sanitizeText(msg.layerId, 40), msg.patch || {});
       store.markDirty(room);
       broadcastLayers(room);
@@ -1025,7 +1106,7 @@ function handle(ws, msg) {
 
     case P.C2S.LAYER_MOVE: {
       if (!room || !member) return;
-      if (gameBlocked(ws, room, member)) return;
+      if (writeBlocked(ws, room, member)) return;
       room.moveLayer(sanitizeText(msg.layerId, 40), Number(msg.to) || 0);
       store.markDirty(room);
       broadcastLayers(room);
@@ -1034,7 +1115,7 @@ function handle(ws, msg) {
 
     case P.C2S.LAYER_DUP: {
       if (!room || !member) return;
-      if (gameBlocked(ws, room, member)) return;
+      if (writeBlocked(ws, room, member)) return;
       if (room.layers.length >= MAX_LAYERS) {
         return send(ws, P.S2C.ERROR, { code: 'layer_limit', message: '图层数量上限为 ' + MAX_LAYERS });
       }
@@ -1049,7 +1130,7 @@ function handle(ws, msg) {
 
     case P.C2S.LAYER_CLEAR: {
       if (!room || !member) return;
-      if (gameBlocked(ws, room, member)) return;
+      if (writeBlocked(ws, room, member)) return;
       const l = room.getLayer(sanitizeText(msg.layerId, 40));
       if (!l) return;
       if (!room.layerIsSolo(l.id, member.userId) && member.userId !== room.ownerId) {
@@ -1075,7 +1156,7 @@ function handle(ws, msg) {
      */
     case P.C2S.LAYER_PIXELS: {
       if (!room || !member) return;
-      if (gameBlocked(ws, room, member)) return;
+      if (writeBlocked(ws, room, member)) return;
       const l = room.getLayer(sanitizeText(msg.layerId, 40));
       if (!l) return;
       if (!room.layerIsSolo(l.id, member.userId) && member.userId !== room.ownerId) {
@@ -1093,7 +1174,7 @@ function handle(ws, msg) {
 
     case P.C2S.LAYER_MERGE: {
       if (!room || !member) return;
-      if (gameBlocked(ws, room, member)) return;
+      if (writeBlocked(ws, room, member)) return;
       const srcId = sanitizeText(msg.srcId, 40);
       const dstId = sanitizeText(msg.dstId, 40);
       if (!room.layerIsSolo(srcId, member.userId) || !room.layerIsSolo(dstId, member.userId)) {
@@ -1110,7 +1191,7 @@ function handle(ws, msg) {
 
     case P.C2S.LAYER_FLATTEN: {
       if (!room || !member) return;
-      if (gameBlocked(ws, room, member)) return;
+      if (writeBlocked(ws, room, member)) return;
       if (member.userId !== room.ownerId) {
         return send(ws, P.S2C.ERROR, { code: 'not_owner', message: '只有房主可以合并所有图层' });
       }
@@ -1120,10 +1201,193 @@ function handle(ws, msg) {
       return;
     }
 
+    /* ---------------- 图层组 ---------------- */
+    // 组没有像素，只有一条「子图层怎么合到一起」的规则（组自己的不透明度 + 混合模式）。
+    // 不变式见 protocol.js：**同一组的图层在 room.layers 里永远连续**，
+    // 由 rooms.js 的 normalizeGroups() 在每次结构变更后维持。
+
+    case P.C2S.GROUP_ADD: {
+      if (!room || !member) return;
+      if (writeBlocked(ws, room, member)) return;
+      // id 同样由客户端指定（道理和 LAYER_ADD 一样）：建完要立刻选中这个组、
+      // 直接改它的名字 / 不透明度，不能等一个来回才知道它叫什么。
+      const wanted = (typeof msg.id === 'string' && /^[A-Za-z0-9_-]{4,32}$/.test(msg.id)) ? msg.id : null;
+      if (wanted && room.getGroup(wanted)) {
+        return send(ws, P.S2C.ERROR, { code: 'group_exists', message: '组 id 冲突，请重试' });
+      }
+      // 组必须有成员（没有成员的组没有位置可言），所以建组一定要指定装哪一层
+      const l = room.getLayer(sanitizeText(msg.layerId, 40));
+      if (!l) return send(ws, P.S2C.ERROR, { code: 'no_layer', message: '不知道要把哪一层装进组' });
+      room.addGroup({ id: wanted || undefined, name: sanitizeName(msg.name, '') || '组' }, l.id);
+      store.markDirty(room);
+      broadcastLayers(room);
+      return;
+    }
+
+    case P.C2S.GROUP_UPD: {
+      if (!room || !member) return;
+      if (writeBlocked(ws, room, member)) return;
+      const g = room.getGroup(sanitizeText(msg.groupId, 40));
+      if (!g) return;
+      room.updGroup(g.id, msg.patch || {});
+      store.markDirty(room);
+      broadcastLayers(room);
+      return;
+    }
+
+    case P.C2S.GROUP_DEL: {
+      if (!room || !member) return;
+      if (writeBlocked(ws, room, member)) return;
+      const g = room.getGroup(sanitizeText(msg.groupId, 40));
+      if (!g) return;
+      // 组里有别人的成果 → 只有房主能动。**解散也算破坏性操作**：
+      // 组那层不透明度 / 混合模式会跟着消失，画面是真的会变，
+      // 不能因为「没删像素」就当成无损操作放给所有人。
+      if (!room.groupIsSolo(g.id, member.userId) && member.userId !== room.ownerId) {
+        return send(ws, P.S2C.ERROR, {
+          code: 'not_owner', message: '这个组里有别人的成果，只有房主可以解散或删除'
+        });
+      }
+      const res = room.delGroup(g.id, !!msg.withLayers);
+      if (!res) return;
+      if (res.error === 'last_layer') {
+        return send(ws, P.S2C.ERROR, { code: 'last_layer', message: '至少要保留一个图层' });
+      }
+      store.markDirty(room);
+      broadcastLayers(room);
+      return;
+    }
+
+    case P.C2S.GROUP_MOVE: {
+      if (!room || !member) return;
+      if (writeBlocked(ws, room, member)) return;
+      const g = room.getGroup(sanitizeText(msg.groupId, 40));
+      if (!g) return;
+      room.moveGroup(g.id, Number(msg.dir) < 0 ? -1 : 1);
+      store.markDirty(room);
+      broadcastLayers(room);
+      return;
+    }
+
+    case P.C2S.LAYER_GROUP: {
+      if (!room || !member) return;
+      if (writeBlocked(ws, room, member)) return;
+      const l = room.getLayer(sanitizeText(msg.layerId, 40));
+      if (!l) return;
+      const gid = (typeof msg.groupId === 'string' && msg.groupId)
+        ? sanitizeText(msg.groupId, 40) : null;
+      if (gid && !room.getGroup(gid)) {
+        return send(ws, P.S2C.ERROR, { code: 'no_group', message: '这个组已经不在了' });
+      }
+      room.setLayerGroup(l.id, gid);
+      store.markDirty(room);
+      broadcastLayers(room);
+      return;
+    }
+
+    /* ---------------- 工程文件装载（分片，避开单条 12MB 的 ws 上限） ---------------- */
+    // 一次装载 = BEGIN + N×LAYER + END。三条都要房主；中间任何一步不合法就整批丢弃，
+    // 房间保持原样 —— 宁可装载失败，也不要留半个错位的图层表。
+
+    case P.C2S.PROJECT_BEGIN: {
+      if (!room || !member) return;
+      if (writeBlocked(ws, room, member)) return;
+      if (member.userId !== room.ownerId) {
+        return send(ws, P.S2C.ERROR, { code: 'not_owner', message: '只有房主可以装载工程' });
+      }
+      const count = Math.round(Number(msg.count) || 0);
+      if (!(count >= 1 && count <= MAX_LAYERS)) {
+        return send(ws, P.S2C.ERROR, {
+          code: 'bad_project',
+          message: '工程的图层数要在 1~' + MAX_LAYERS + ' 之间（收到 ' + count + '）'
+        });
+      }
+      // 组表跟着 BEGIN 一起传：它很小（没有像素），而且必须在第一个图层之前
+      // 就到齐 —— 服务端要拿它判断各层的 groupId 是否有效。
+      const groups = [];
+      if (Array.isArray(msg.groups)) {
+        for (const g of msg.groups.slice(0, MAX_LAYERS)) {
+          if (!g || typeof g.id !== 'string' || !/^[A-Za-z0-9_-]{4,32}$/.test(g.id)) continue;
+          groups.push({
+            id: g.id,
+            name: sanitizeName(g.name, '') || '组',
+            visible: g.visible !== false,
+            opacity: typeof g.opacity === 'number' ? g.opacity : 1,
+            blend: g.blend,
+            collapsed: !!g.collapsed
+          });
+        }
+      }
+      room.projectLoad = { count: count, layers: [], groups: groups, at: Date.now() };
+      return;
+    }
+
+    case P.C2S.PROJECT_LAYER: {
+      if (!room || !member) return;
+      if (member.userId !== room.ownerId) return;
+      const job = room.projectLoad;
+      if (!job) {
+        return send(ws, P.S2C.ERROR, { code: 'no_project', message: '没有正在装载的工程' });
+      }
+      // 装载是「用户正在做一件事」，超时就当它半路断了；别让一个陈旧的暂存区
+      // 在房间里躺到下一次装载，把两批图层拼在一起。
+      if (Date.now() - job.at > 60000) {
+        room.projectLoad = null;
+        return send(ws, P.S2C.ERROR, { code: 'no_project', message: '工程装载超时，已中止' });
+      }
+      const idx = Math.round(Number(msg.index));
+      if (idx !== job.layers.length) {
+        room.projectLoad = null;
+        return send(ws, P.S2C.ERROR, { code: 'bad_project', message: '工程装载顺序错乱，已中止' });
+      }
+      job.at = Date.now();
+      job.layers.push({
+        id: P.rid('L'),
+        // 24 字：跟 LAYER_UPD 的改名路径对齐（LAYER_ADD 那条只给 16）。
+        // 取更宽松的那条，免得「工程带回来的图层名」比用户手打的还短。
+        name: String(typeof msg.name === 'string' ? msg.name : '')
+          .replace(/[\u0000-\u001f\u007f<>]/g, '').trim().slice(0, 24) || ('图层 ' + (idx + 1)),
+        visible: msg.visible !== false,
+        opacity: msg.opacity,
+        locked: msg.locked,
+        alphaLock: msg.alphaLock,
+        blend: msg.blend,
+        // 组引用照抄工程文件；指向不存在的组会被 loadProject 里的 normalizeGroups 清掉
+        groupId: (typeof msg.groupId === 'string' && msg.groupId) ? msg.groupId : null,
+        png: msg.png
+      });
+      return;
+    }
+
+    case P.C2S.PROJECT_END: {
+      if (!room || !member) return;
+      if (member.userId !== room.ownerId) return;
+      const job = room.projectLoad;
+      if (!job) {
+        return send(ws, P.S2C.ERROR, { code: 'no_project', message: '没有正在装载的工程' });
+      }
+      if (job.layers.length !== job.count) {
+        room.projectLoad = null;
+        return send(ws, P.S2C.ERROR, {
+          code: 'bad_project',
+          message: '工程只收到 ' + job.layers.length + '/' + job.count + ' 层，已中止'
+        });
+      }
+      room.projectLoad = null;
+      // seq 往前走一步：新底图的 baseSeq 必须 > 0，否则 layerIsSolo() 会认为这些
+      // 图层「还没固化过」，任何成员都能把它们整体替换掉。
+      room.loadProject(job.layers, room.seq + 1, job.groups);
+      store.markDirty(room);
+      // 笔迹历史被整批换掉了，让所有端把本地的重放缓存丢掉重建
+      roomBroadcast(room, P.S2C.STROKE_REMOVED, { ids: [], reason: 'clear', scope: 'all' });
+      broadcastLayers(room, room.baseImageMap());
+      return;
+    }
+
     /* ---------------- 固化底图 ---------------- */
     case P.C2S.ROOM_COMPRESS: {
       if (!room || !member) return;
-      if (gameBlocked(ws, room, member)) return;
+      if (writeBlocked(ws, room, member)) return;
       if (member.userId !== room.ownerId) {
         return send(ws, P.S2C.ERROR, { code: 'not_owner', message: '只有房主可以固化底图' });
       }

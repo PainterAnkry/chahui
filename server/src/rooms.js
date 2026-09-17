@@ -94,8 +94,22 @@ function newLayer(meta) {
     locked: !!meta.locked,
     alphaLock: !!meta.alphaLock,
     blend: P.BLEND_MODES.indexOf(meta.blend) >= 0 ? meta.blend : 'normal',
+    // 所属图层组（null = 不在任何组里）
+    groupId: meta.groupId || null,
     baseImage: meta.baseImage || null,
     baseSeq: meta.baseSeq || 0
+  };
+}
+
+function newGroup(meta) {
+  meta = meta || {};
+  return {
+    id: meta.id || P.rid('G'),
+    name: meta.name || '组',
+    visible: meta.visible !== false,
+    opacity: typeof meta.opacity === 'number' ? clamp(meta.opacity, 0, 1) : 1,
+    blend: P.BLEND_MODES.indexOf(meta.blend) >= 0 ? meta.blend : 'normal',
+    collapsed: !!meta.collapsed
   };
 }
 
@@ -125,6 +139,17 @@ class Room {
       baseSeq: 0
     }]).map(l => newLayer(l));
 
+    /**
+     * 图层组。组**没有像素**，它只是一条「子图层怎么合到一起」的规则
+     * （组自己的不透明度 + 混合模式），所以它不占 layers 里的位置。
+     *
+     * **不变式：同一组的图层在 this.layers 里永远连续。**
+     * 「组在哪」= 「它那一块在哪」。所有结构变更收尾都跑一次 normalizeGroups()
+     * 来维持这条 —— 页面和测试都可以拿它当断言用。
+     */
+    this.groups = (meta.groups || []).map(g => newGroup(g));
+    this.normalizeGroups();
+
     this.strokes = meta.strokes || []; // 按 seq 升序
     this.chat = meta.chat || [];
     this.members = new Map(); // connId -> member
@@ -135,6 +160,11 @@ class Room {
      * 服务端一重启就是一局结束，不会出现「半局游戏」这种脏状态。
      */
     this.game = null;
+    /**
+     * 工程文件装载的暂存区（PROJECT_BEGIN / PROJECT_LAYER / PROJECT_END）。
+     * 同样**刻意不落盘**：服务端重启时装载本来就是中断的，留着半份图层表只会更脏。
+     */
+    this.projectLoad = null;
   }
 
   get online() { return this.members.size; }
@@ -146,6 +176,37 @@ class Room {
     // 图层画布由客户端持有的 canvas 维护；服务端只更新尺寸元数据。
     // 客户端收到 ROOM_RESIZED 后会用新尺寸重建 engine，并以历史笔迹与 baseImages 重放。
     return oldW !== this.width || oldH !== this.height;
+  }
+
+  /**
+   * 工程文件装载：把房间文档整体换成传进来的图层表（原子的一步，由 PROJECT_END 调用）。
+   *
+   * 每层的像素直接当作它的底图，笔迹历史清空 —— 工程文件里存的是**固化成像素的成品**，
+   * 不是可重放的笔迹，所以装载完的房间里 history 是空的。这是**有意的**：
+   * 跨房间搬几千条笔迹既慢又没意义（撤销栈本来就不跨会话），搬 N 张 PNG 快得多。
+   *
+   * @param {Array} layers 每个元素 { name, visible, opacity, locked, alphaLock, blend, groupId, png }
+   * @param {number} seq 装载后房间的 seq 水位，同时作为各层 baseSeq（必须 > 0，见 layerIsSolo）
+   * @param {Array} [groups] 图层组表；引用了不存在的组会被这里清掉（组表缺失时不会留下半个悬空引用）
+   */
+  loadProject(layers, seq, groups) {
+    this.seq = seq;
+    this.strokes = [];
+    this.groups = (groups || []).map(g => newGroup(g));
+    this.layers = layers.map(l => newLayer({
+      name: l.name,
+      visible: l.visible,
+      opacity: l.opacity,
+      locked: l.locked,
+      alphaLock: l.alphaLock,
+      blend: l.blend,
+      groupId: l.groupId,
+      baseImage: isPng(l.png) ? l.png : null,
+      baseSeq: seq
+    }));
+    this.normalizeGroups();
+    this.lastActiveAt = Date.now();
+    return this.layers.length;
   }
 
   meta() {
@@ -185,7 +246,15 @@ class Room {
     return this.layers.map(l => ({
       id: l.id, name: l.name, visible: l.visible,
       opacity: l.opacity, locked: l.locked, alphaLock: l.alphaLock,
-      blend: l.blend, baseSeq: l.baseSeq
+      blend: l.blend, groupId: l.groupId, baseSeq: l.baseSeq
+    }));
+  }
+
+  groupList() {
+    return this.groups.map(g => ({
+      id: g.id, name: g.name, visible: g.visible, opacity: g.opacity,
+      blend: g.blend, collapsed: g.collapsed,
+      count: this.layers.reduce((n, l) => n + (l.groupId === g.id ? 1 : 0), 0)
     }));
   }
 
@@ -199,7 +268,9 @@ class Room {
   memberList() {
     return Array.from(this.members.values()).map(m => ({
       userId: m.userId, name: m.name, color: m.color,
-      isOwner: m.userId === this.ownerId, drawing: !!m.drawing
+      isOwner: m.userId === this.ownerId, drawing: !!m.drawing,
+      // 只读观众（房主设置）：能看、能聊，但不能改画布上的任何东西
+      readonly: !!m.readonly
     }));
   }
 
@@ -254,12 +325,26 @@ class Room {
   // ---- 图层 ----
   getLayer(id) { return this.layers.find(l => l.id === id); }
 
-  addLayer(name, at) {
+  /**
+   * 新建图层。
+   * @param {string} [name]
+   * @param {number} [at]   插入位置，默认追加到末尾
+   * @param {string} [id]   客户端指定的图层 id（调用方须先校验格式与冲突）。
+   *   「文字图层」和「粘贴」都要「先建层、再往里写像素 / 笔迹」，
+   *   客户端必须提前知道 id 才能一次到位 —— 见 index.js 的 LAYER_ADD。
+   * @param {string} [groupId] 直接建在某个组里（放在该组最顶上）
+   */
+  addLayer(name, at, id, groupId) {
+    const g = groupId ? this.getGroup(groupId) : null;
     const l = newLayer({
-      name: name || ('图层 ' + (this.layers.length + 1))
+      id,
+      name: name || ('图层 ' + (this.layers.length + 1)),
+      groupId: g ? g.id : null
     });
     const idx = (typeof at === 'number' && at >= 0 && at <= this.layers.length) ? at : this.layers.length;
     this.layers.splice(idx, 0, l);
+    // 建在组里的层要落到那一块里，光靠 splice 的位置不一定连续
+    if (g) this.normalizeGroups();
     this.dirty = true;
     return l;
   }
@@ -270,6 +355,8 @@ class Room {
     if (i < 0) return null;
     const [l] = this.layers.splice(i, 1);
     this.strokes = this.strokes.filter(s => s.layerId !== id);
+    // 删掉组里最后一个图层时，那个组也就没地方待了（normalizeGroups 会收掉它）
+    this.normalizeGroups();
     this.dirty = true;
     return l;
   }
@@ -277,7 +364,16 @@ class Room {
   moveLayer(id, to) {
     const i = this.layers.findIndex(l => l.id === id);
     if (i < 0) return false;
-    to = clamp(to, 0, this.layers.length - 1);
+    let lo = 0, hi = this.layers.length - 1;
+    // 组内图层只能在本组那一块里上下挪，要出组请走 LAYER_GROUP。
+    // 少了这道夹取，「上移」一下就能把一块组打成两段 ——
+    // 合成时同一组会被当成两个单元，组的不透明度就叠了两遍。
+    const l0 = this.layers[i];
+    if (l0.groupId && this.getGroup(l0.groupId)) {
+      const span = this.groupSpan(l0.groupId);
+      if (span) { lo = span[0]; hi = span[1]; }
+    }
+    to = clamp(to, lo, hi);
     const [l] = this.layers.splice(i, 1);
     this.layers.splice(to, 0, l);
     this.dirty = true;
@@ -297,6 +393,147 @@ class Room {
     return l;
   }
 
+  // ---- 图层组 ----
+
+  getGroup(id) { return this.groups.find(g => g.id === id); }
+
+  /** 某组在 this.layers 里的连续区间 [起, 止]；不在表里或没有成员时返回 null */
+  groupSpan(id) {
+    const i = this.layers.findIndex(l => l.groupId === id);
+    if (i < 0) return null;
+    let j = i;
+    while (j + 1 < this.layers.length && this.layers[j + 1].groupId === id) j++;
+    return [i, j];
+  }
+
+  /**
+   * 把 this.layers 重排成「单元序列」：普通图层各自一个单元，同一组的图层合成一个单元。
+   * 单元内部、单元之间的相对顺序都不变 —— 对本来就合法的数据是**恒等变换**，
+   * 对不合法的数据（组被打散、groupId 悬空）则顺手修正。所有结构变更收尾都跑它。
+   */
+  normalizeGroups() {
+    const known = new Set(this.groups.map(g => g.id));
+    const out = [], done = new Set();
+    for (const l of this.layers) {
+      const gid = l.groupId;
+      if (gid && known.has(gid)) {
+        if (done.has(gid)) continue;
+        done.add(gid);
+        for (const m of this.layers) if (m.groupId === gid) out.push(m);
+      } else {
+        l.groupId = null;
+        out.push(l);
+      }
+    }
+    this.layers = out;
+    // 一个成员都没有的组没有容身之处（它没有位置可言），收掉
+    const before = this.groups.length;
+    this.groups = this.groups.filter(g => this.layers.some(l => l.groupId === g.id));
+    if (this.groups.length !== before) this.dirty = true;
+    return this;
+  }
+
+  /**
+   * 新建图层组。
+   * @param {object} meta { id, name } —— id 由客户端指定（同 LAYER_ADD，调用方先校验格式与冲突）
+   * @param {string} [layerId] 顺手放进组的图层；组必须有成员，所以通常都要给
+   */
+  addGroup(meta, layerId) {
+    const g = newGroup(meta);
+    this.groups.push(g);
+    const l = layerId ? this.getLayer(layerId) : null;
+    if (l) l.groupId = g.id;
+    this.normalizeGroups();
+    this.dirty = true;
+    return g;
+  }
+
+  updGroup(id, patch) {
+    const g = this.getGroup(id);
+    if (!g) return null;
+    if (typeof patch.name === 'string') g.name = patch.name.slice(0, 24) || g.name;
+    if (typeof patch.visible === 'boolean') g.visible = patch.visible;
+    if (typeof patch.collapsed === 'boolean') g.collapsed = patch.collapsed;
+    if (typeof patch.opacity === 'number') g.opacity = clamp(patch.opacity, 0, 1);
+    if (P.BLEND_MODES.indexOf(patch.blend) >= 0) g.blend = patch.blend;
+    this.dirty = true;
+    return g;
+  }
+
+  /**
+   * 解散组（图层留在原位）或连组内图层一起删掉。
+   * 解散不只是「拆开分组」：组不透明度 / 混合模式的那层效果会一起消失，
+   * 画面是会变的 —— 所以调用方对它和对删除一视同仁（组里有别人的成果就得房主）。
+   */
+  delGroup(id, withLayers) {
+    const g = this.getGroup(id);
+    if (!g) return null;
+    const members = this.layers.filter(l => l.groupId === id);
+    if (withLayers && this.layers.length - members.length < 1) {
+      return { error: 'last_layer', message: '至少要保留一个图层' };
+    }
+    if (withLayers) {
+      const ids = new Set(members.map(l => l.id));
+      this.layers = this.layers.filter(l => !ids.has(l.id));
+      this.strokes = this.strokes.filter(s => !ids.has(s.layerId));
+    } else {
+      for (const m of members) m.groupId = null;
+    }
+    this.groups = this.groups.filter(x => x.id !== id);
+    this.normalizeGroups();
+    this.dirty = true;
+    return { group: g, removed: withLayers ? members.map(l => l.id) : [] };
+  }
+
+  /** 整组（连同组内所有图层）上移 / 下移一格：和自己相邻的那个「单元」换个位置 */
+  moveGroup(id, dir) {
+    const span = this.groupSpan(id);
+    if (!span) return false;
+    const [i, j] = span;
+    const len = j - i + 1;
+    if (dir > 0) {
+      if (j + 1 >= this.layers.length) return false;
+      const above = this.layers[j + 1];
+      const aboveSpan = (above.groupId && above.groupId !== id)
+        ? this.groupSpan(above.groupId) : [j + 1, j + 1];
+      const block = this.layers.splice(i, len);
+      this.layers.splice(aboveSpan[1] - len + 1, 0, ...block);
+    } else {
+      if (i - 1 < 0) return false;
+      const below = this.layers[i - 1];
+      const belowSpan = (below.groupId && below.groupId !== id)
+        ? this.groupSpan(below.groupId) : [i - 1, i - 1];
+      const block = this.layers.splice(i, len);
+      this.layers.splice(belowSpan[0], 0, ...block);
+    }
+    this.normalizeGroups();
+    this.dirty = true;
+    return true;
+  }
+
+  /**
+   * 把图层挪进某组（落在该组最顶上）；groupId 为 null 或无效则移出组。
+   * 移出后停在原组那一块的上方 —— 「刚才把它拖出来」最符合直觉的落点。
+   */
+  setLayerGroup(layerId, groupId) {
+    const l = this.getLayer(layerId);
+    if (!l) return false;
+    const g = groupId ? this.getGroup(groupId) : null;
+    if (groupId && !g) return false;
+    const i = this.layers.indexOf(l);
+    if (i < 0) return false;
+    // 先摘出来再算落点：留着它自己会把它那一块的位置算歪
+    this.layers.splice(i, 1);
+    const oldGid = l.groupId;
+    l.groupId = g ? g.id : null;
+    const span = g ? this.groupSpan(g.id) : (oldGid ? this.groupSpan(oldGid) : null);
+    const at = span ? span[1] + 1 : Math.min(i, this.layers.length);
+    this.layers.splice(at, 0, l);
+    this.normalizeGroups();
+    this.dirty = true;
+    return true;
+  }
+
   // ---- 图层的「像素级」操作：像素由客户端渲染后回传 PNG ----
 
   /** 复制图层（内容烘焙成底图，不复制笔迹） */
@@ -308,10 +545,14 @@ class Room {
       name: (src.name || '图层').slice(0, 16) + ' 副本',
       opacity: src.opacity,
       blend: src.blend,
+      // 组里复制的副本留在同一个组里 —— 否则副本会掉到组外面，
+      // 一会儿被组的不透明度带着变淡、一会儿又不受影响，看着像随机
+      groupId: src.groupId,
       baseImage: isPng(png) ? png : null,
       baseSeq: upToSeq || this.seq
     });
     this.layers.splice(i + 1, 0, copy);
+    if (src.groupId) this.normalizeGroups();
     this.dirty = true;
     return copy;
   }
@@ -351,6 +592,7 @@ class Room {
     dst.baseSeq = upToSeq || this.seq;
     this.layers.splice(si, 1);
     this.strokes = this.strokes.filter(s => s.layerId !== srcId && s.layerId !== dstId);
+    this.normalizeGroups();
     this.dirty = true;
     return dst;
   }
@@ -365,6 +607,8 @@ class Room {
       baseSeq: upToSeq || this.seq
     });
     this.layers = [keep];
+    // 合并成一层的世界里没有组可言
+    this.groups = [];
     this.strokes = [];
     this.dirty = true;
     return keep;
@@ -376,6 +620,13 @@ class Room {
     if (!l) return true;
     if (l.baseSeq > 0) return false;
     return !this.strokes.some(s => s.layerId === id && s.userId !== userId);
+  }
+
+  /** 该组是否只包含此用户的成果（解散 / 删除组的破坏性判定用） */
+  groupIsSolo(id, userId) {
+    const members = this.layers.filter(l => l.groupId === id);
+    if (!members.length) return true;
+    return members.every(l => this.layerIsSolo(l.id, userId));
   }
 
   // 固化底图：把各图层已渲染结果作为底图存下，裁剪已固化笔迹
@@ -530,7 +781,7 @@ class RoomStore {
       id: room.id, name: room.name, width: room.width, height: room.height,
       background: room.background, ownerId: room.ownerId, ownerName: room.ownerName,
       password: room.password, createdAt: room.createdAt, lastActiveAt: room.lastActiveAt,
-      seq: room.seq, layers, strokes: room.strokes,
+      seq: room.seq, layers, groups: room.groups, strokes: room.strokes,
       // 表情图不落盘（一张最多 300KB，会把 room.json 撑爆）；重启后退化成文字占位
       chat: room.chat.slice(-40).map(m => m.img
         ? { id: m.id, userId: m.userId, name: m.name, color: m.color, ts: m.ts, text: m.text || '［表情］' }
