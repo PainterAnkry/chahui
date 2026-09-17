@@ -50,6 +50,11 @@ function resolve() {
   }
   if (process.env.APPDATA) roots.push(path.join(process.env.APPDATA, 'npm', 'node_modules'));
   if (process.env.HOME) roots.push(path.join(process.env.HOME, '.npm-global', 'lib', 'node_modules'));
+  // WorkBuddy 风格的托管 node 工作区：npm 包常装在这里，而它不在向上查找的链路里。
+  // 用 os.homedir() 推导，不写死用户名。
+  try {
+    roots.push(path.join(require('os').homedir(), '.workbuddy', 'binaries', 'node', 'workspace', 'node_modules'));
+  } catch (e) { /* ignore */ }
   for (const r of roots) {
     const hit = tryPath(path.join(r, 'playwright-core')) || tryPath(path.join(r, 'playwright'));
     if (hit) return hit;
