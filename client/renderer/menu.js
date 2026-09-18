@@ -71,6 +71,12 @@
         def('file', 'file.openProject', '打开工程（.chahu）…', {
           mnemonic: 'P', key: 'Ctrl+Shift+O', run: function () { A().openProject(); }
         }),
+        // 「导入 PSD」也是新建房间来承载它，所以和「打开工程」同一档待遇。
+        // 快捷键避开 Ctrl+Shift+I —— 那个在 Chrome 里是开发者工具，浏览器会把事件吃掉，
+        // 按下去只会弹调试面板，菜单项看着像坏的。
+        def('file', 'file.importPsd', '导入 PSD（.psd / .psb）…', {
+          mnemonic: 'I', key: 'Ctrl+Alt+I', run: function () { A().importPsd(); }
+        }),
         def('file', 'file.saveProject', '保存工程（.chahu）', {
           mnemonic: 'G', key: 'Ctrl+Alt+S', run: function () { A().saveProject(); }
         }),
@@ -399,6 +405,12 @@
         SEP,
         def('other', 'other.info', '房间信息', { mnemonic: 'I', run: function () { A().showRoomInfo(); } }),
         def('other', 'other.share', '复制分享链接', { mnemonic: 'C', run: function () { A().doShare(); } }),
+        // 本机服务器开关（只有桌面端有）。「关闭」= 真停掉服务器、切到离线模式自己画。
+        def('other', 'other.server', '本机服务器', {
+          mnemonic: 'S',
+          check: function () { return !!(A().serverOn && A().serverOn()); },
+          run: function () { A().toggleServer && A().toggleServer(); }
+        }),
         SEP,
         def('other', 'other.about', '关于茶绘 / 用户准则 / 风险须知', { mnemonic: 'B', run: function () { A().openAbout(); } }),
         def('other', 'other.update', '检查更新', { mnemonic: 'U', run: function () { A().openAbout(); A().checkUpdate(); } }),
@@ -591,7 +603,12 @@
       wrap.appendChild(drop);
       bar.appendChild(wrap);
     });
-    document.addEventListener('click', closeAll);
+    // buildMenuBar 可以被重复调用（服务器开关变了要重画勾选状态），
+    // 这个 document 级监听只能挂一次 —— 每次重建都挂一个的话监听器会越堆越多
+    if (!buildMenuBar._clickBound) {
+      document.addEventListener('click', closeAll);
+      buildMenuBar._clickBound = true;
+    }
   }
 
   function closeAll() {

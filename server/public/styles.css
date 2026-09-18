@@ -1551,6 +1551,22 @@ body.panel-dragging * { cursor: grabbing !important; }
 
 .room-list-ops { display: flex; gap: 6px; }.room-list-ops .btn { flex: 1; }
 
+/* 入口里的本机服务器开关。左边那颗按钮是「动作」，右边那行字是「现在什么样」——
+   两件事分开摆，免得按钮文案一会儿是动作一会儿是状态、越看越糊涂。 */
+.srv-line { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+.srv-line .btn { flex: none; min-width: 92px; }
+.srv-state {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.srv-state.on { color: var(--ok); }
+.srv-state.off { color: #b06a2c; }
+.srv-state.err { color: var(--danger); }
+
 /* 侧栏收起后的窄条 + 收起把手 */
 .side-collapse { margin-left: auto; font-size: 14px; line-height: 1; }
 .side-rail {
@@ -2046,6 +2062,9 @@ body.panel-dragging * { cursor: grabbing !important; }
 }
 .toast.ok { background: rgba(38, 140, 82, .95); }
 .toast.err { background: rgba(195, 66, 62, .95); }
+/* 「读到了，但有一部分被跳过了」用黄的一档 —— 它既不是成功也不是失败，
+   最容易被当成成功滑过去的正好是这类消息（导入 PSD 时的位深 / 模式降级） */
+.toast.warn { background: rgba(178, 126, 30, .95); }
 @keyframes toastIn {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }

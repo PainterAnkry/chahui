@@ -358,6 +358,14 @@
           <label class="lock-item" title="保护不透明度：只能在已有像素上作画">
             <input type="checkbox" id="alphaLockChk" /><span>保护不透明度</span>
           </label>
+          <label class="lock-item" title="剪贴蒙版：这一层只显示在它下面那一层的不透明区域里">
+            <input type="checkbox" id="clipChk" /><span>剪贴</span>
+          </label>
+        </div>
+        <div class="lock-row">
+          <button class="mini" id="btnMaskAdd" title="给这一层加图层蒙版（黑遮白露）">＋ 蒙版</button>
+          <button class="mini hidden" id="btnMaskEdit" title="进入 / 退出蒙版编辑模式">编辑蒙版</button>
+          <button class="mini hidden" id="btnMaskDel" title="丢掉这张蒙版（图层像素不动）">删蒙版</button>
         </div>
         <div class="layer-list" id="layerList"></div>
         <div class="layer-ops">
@@ -684,6 +692,16 @@
         <label>服务器</label>
         <input type="text" id="serverInput" spellcheck="false" placeholder="ws://localhost:8437/ws" />
       </div>
+      <!-- 本机服务器开关（只有桌面端有）。「关闭」= 真的把服务器停掉、不再监听端口，
+           客户端切到离线模式接着画；「开启」= 起服务器并连上去，同一 WiFi 的人可以加入。 -->
+      <div class="form-row" id="srvRow">
+        <label>本机服务器</label>
+        <div class="srv-line">
+          <button class="btn tiny" id="btnServerToggle">检测中…</button>
+          <span class="srv-state" id="srvState">—</span>
+        </div>
+        <span class="hint" id="srvHint">开启后同一 WiFi 的朋友能加入；关闭则进入离线模式，自己单机画。</span>
+      </div>
 
       <div class="split">
         <div class="split-col">
@@ -804,6 +822,7 @@
 <!-- ============ 笔刷导入 ============ -->
 <input type="file" id="brushFileInput" accept=".abr,.sut,.brush,.brushset,.prbr,.zip" multiple class="hidden-file" />
 <input type="file" id="projectFileInput" accept=".chahu,application/json" class="hidden-file" />
+<input type="file" id="psdFileInput" accept=".psd,.psb,image/vnd.adobe.photoshop,application/octet-stream" class="hidden-file" />
 <div class="modal-mask hidden" id="importMask">
   <div class="modal import">
     <div class="modal-head">
@@ -1372,7 +1391,7 @@
 <script src="brush-import.js"></script>
 <script src="project.js"></script>
 <script src="filters.js"></script>
-<script src="export-formats.js"></script><script src="psd.js"></script>
+<script src="export-formats.js"></script><script src="psd.js"></script><script src="psd-read.js"></script>
 <script src="rulers.js"></script>
 <script src="menu.js"></script>
 <script src="engine.js"></script>

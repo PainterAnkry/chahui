@@ -247,12 +247,33 @@ function handleThemesApi(req, res, url) {
 
 /* ------------------------------------------------------------------ WebSocket */
 
-const wss = new WebSocketServer({
-  server,
-  path: '/ws',
-  maxPayload: 12 * 1024 * 1024,
-  perMessageDeflate: { threshold: 1024, zlibDeflateOptions: { level: 6 } }
-});
+/**
+ * WebSocket 服务端**每次 listen 都重新建一个**。
+ *
+ * 为什么不复用同一个实例：`wss.close()` 之后它就是终态了（内部 state 置 CLOSED、
+ * 升级监听也摘掉了），再 listen 会连不上 —— 而「关服务器」再「开服务器」正好会走到这条路。
+ * 重建一次成本极低，换来的是开关可以来回点。
+ */
+let wss = null;
+const NO_CLIENTS = new Set();
+
+function createWss() {
+  const s = new WebSocketServer({
+    server,
+    path: '/ws',
+    maxPayload: 12 * 1024 * 1024,
+    perMessageDeflate: { threshold: 1024, zlibDeflateOptions: { level: 6 } }
+  });
+  s.on('connection', (ws) => onClient(ws));
+  return s;
+}
+
+/**
+ * 当前连着的客户端。服务器没监听时是空的。
+ * 离线模式（桌面端关闭服务器后）那个不走 socket 的客户端**刻意不在这个集合里**：
+ * 心跳会 ping 它、而它没有 pong，两轮之后就会被 terminate 掉。
+ */
+function liveClients() { return wss ? wss.clients : NO_CLIENTS; }
 
 let connSeq = 0;
 const colorCursor = { i: 0 };
@@ -296,9 +317,10 @@ function historyChunks(room) {
  * 只发其中一个的话，客户端会拿新图层配旧组表，合成出来的东西和谁都不一样。
  * 组表本身很小（最多十几条、没有像素），不值得为它省这个包。
  */
-function broadcastLayers(room, baseImages) {
+function broadcastLayers(room, baseImages, maskImages) {
   const payload = { layers: room.layerList(), groups: room.groupList() };
   if (baseImages && Object.keys(baseImages).length) payload.baseImages = baseImages;
+  if (maskImages && Object.keys(maskImages).length) payload.maskImages = maskImages;
   roomBroadcast(room, P.S2C.LAYERS, payload);
 }
 
@@ -485,6 +507,9 @@ function buildStroke(msg, member, layer) {
     layerId: layer.id,
     userId: member.userId,
     tool: P.TOOLS.indexOf(msg.tool) >= 0 ? msg.tool : 'brush',
+    // 画在图层上还是图层蒙版上。必须跟着广播走 —— 漏了它，
+    // 别人会把你的蒙版笔迹当成普通笔迹画到图层上，两边的画面就对不上了。
+    target: br.target === 'mask' ? 'mask' : 'layer',
     color: /^#[0-9a-fA-F]{3,8}$/.test(msg.color) ? msg.color : '#000000',
     size: Math.max(1, Math.min(400, Number(msg.size) || 6)),
     opacity: Math.max(0.02, Math.min(1, Number(msg.opacity) || 1)),
@@ -525,7 +550,7 @@ function buildStroke(msg, member, layer) {
 
 /** 广播笔迹头（含全部笔刷参数），不含 points */
 function strokeHeader(stroke) {
-  return {
+  const h = {
     id: stroke.id, layerId: stroke.layerId, userId: stroke.userId,
     tool: stroke.tool, color: stroke.color, size: stroke.size, opacity: stroke.opacity,
     hardness: stroke.hardness, minSize: stroke.minSize,
@@ -534,8 +559,21 @@ function strokeHeader(stroke) {
     grainScale: stroke.grainScale, paper: stroke.paper, fx: stroke.fx,
     strength: stroke.strength, tolerance: stroke.tolerance, expand: stroke.expand,
     blend: stroke.blend, sym: stroke.sym, brush: stroke.brush,
-    filled: stroke.filled, seed: stroke.seed
+    filled: stroke.filled, seed: stroke.seed,
+    target: stroke.target === 'mask' ? 'mask' : 'layer'
   };
+  // 文字笔迹必须把**文字本身**和字体参数一起广播出去。
+  // 漏了这一段，别人收到就是一条没有内容的空白文字笔迹（自己那边看着正常）。
+  if (stroke.tool === 'text') {
+    h.text = stroke.text;
+    h.fontFamily = stroke.fontFamily;
+    h.fontSize = stroke.fontSize;
+    h.bold = stroke.bold;
+    h.italic = stroke.italic;
+    h.align = stroke.align;
+    h.lineHeight = stroke.lineHeight;
+  }
+  return h;
 }
 
 function joinRoom(ws, room, name, avatar) {
@@ -579,7 +617,8 @@ function joinRoom(ws, room, name, avatar) {
     history: {
       count: room.strokes.length,
       lastSeq: room.seq,
-      baseImages: room.baseImageMap()
+      baseImages: room.baseImageMap(),
+      maskImages: room.maskImageMap()
     }
   });
 
@@ -646,7 +685,18 @@ function leaveRoom(ws, silent) {
   if (room.game && room.game.active) room.game.onLeave(member);
 }
 
-wss.on('connection', (ws, req) => {
+/**
+ * 挂一个客户端连接。
+ *
+ * **刻意从 `wss.on('connection')` 里抽出来**：离线模式（桌面端「关掉服务器」之后
+ * 仍然要能画画）就是在这个进程里直接用这个函数挂一个**不走 socket** 的客户端
+ * （见 client/local-host.js 的 LocalWs）。这样「有网 / 没网」两种模式共用同一份
+ * 服务端逻辑 —— 不然离线就得另写一套房间状态机，两套迟早对不上。
+ *
+ * 参数只需要一个「像 ws 的东西」：readyState / OPEN / send(string) /
+ * on('message'|'close'|'error'|'pong')。`req` 整个用不上，所以不收。
+ */
+function onClient(ws) {
   ws._connId = 'c' + (++connSeq);
   ws._roomId = null;
   ws._userId = null;
@@ -673,7 +723,7 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => leaveRoom(ws, false));
   ws.on('error', () => {});
-});
+}
 
 function currentRoom(ws) {
   const room = store.get(ws._roomId);
@@ -702,7 +752,8 @@ function handle(ws, msg) {
         game: room.game && room.game.active ? room.game.snapshotFor(member.userId) : null,
         history: {
           count: room.strokes.length, lastSeq: room.seq,
-          baseImages: room.baseImageMap()
+          baseImages: room.baseImageMap(),
+          maskImages: room.maskImageMap()
         }
       });
       const chunks = historyChunks(room);
@@ -882,7 +933,7 @@ function handle(ws, msg) {
       send(ws, P.S2C.OK, { ok: true, purged: n });
       send(ws, P.S2C.ROOM_LIST, { rooms: store.list() });
       // 其他人列表里也刷新一下
-      for (const c of wss.clients) {
+      for (const c of liveClients()) {
         if (c !== ws && c.readyState === 1 && !c._roomId) {
           try { send(c, P.S2C.ROOM_LIST, { rooms: store.list() }); } catch (e) { /* ignore */ }
         }
@@ -1121,9 +1172,23 @@ function handle(ws, msg) {
     case P.C2S.LAYER_UPD: {
       if (!room || !member) return;
       if (writeBlocked(ws, room, member)) return;
-      room.updateLayer(sanitizeText(msg.layerId, 40), msg.patch || {});
+      const lid = sanitizeText(msg.layerId, 40);
+      const patch = msg.patch || {};
+      const lay = room.getLayer(lid);
+      const hadMask = !!(lay && lay.hasMask);
+      room.updateLayer(lid, patch);
       store.markDirty(room);
       broadcastLayers(room);
+      // 「丢掉蒙版」必须连**涂这张蒙版的那几笔**一起丢掉。
+      // 留着它们不出声，但后果很吵：重新给这层加一张蒙版、或者别人中途进来重放历史时，
+      // 这些陈年笔迹会被重新盖到新蒙版上 —— 表现就是「刚加的白蒙版怎么已经缺了一块」。
+      if (hadMask && patch.hasMask === false) {
+        const gone = room.strokes.filter(s => s.layerId === lid && s.target === 'mask').map(s => s.id);
+        if (gone.length) {
+          room.removeStrokes(gone);
+          roomBroadcast(room, P.S2C.STROKE_REMOVED, { ids: gone, reason: 'mask', layerId: lid }, ws._connId);
+        }
+      }
       return;
     }
 
@@ -1377,6 +1442,13 @@ function handle(ws, msg) {
         blend: msg.blend,
         // 组引用照抄工程文件；指向不存在的组会被 loadProject 里的 normalizeGroups 清掉
         groupId: (typeof msg.groupId === 'string' && msg.groupId) ? msg.groupId : null,
+        // 剪贴蒙版与图层蒙版：工程文件 / PSD 导入都会带过来。
+        // 蒙版的像素是**整张 PNG**（用 alpha 表示显示多少），不是笔迹，
+        // 所以走 maskImage 这条路，由 LAYERS 广播里的 maskImages 发给每个客户端。
+        clip: !!msg.clip,
+        maskEnabled: msg.maskEnabled !== false,
+        maskPng: (typeof msg.maskPng === 'string' && /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(msg.maskPng))
+          ? msg.maskPng : null,
         png: msg.png
       });
       return;
@@ -1403,7 +1475,9 @@ function handle(ws, msg) {
       store.markDirty(room);
       // 笔迹历史被整批换掉了，让所有端把本地的重放缓存丢掉重建
       roomBroadcast(room, P.S2C.STROKE_REMOVED, { ids: [], reason: 'clear', scope: 'all' });
-      broadcastLayers(room, room.baseImageMap());
+      // maskImages 也得跟着走：导入的 PSD / 工程里那些「不是画出来的」蒙版，
+      // 不在 LAYERS 里带上，客户端就只能看到「这层有蒙版」却看不到蒙版长什么样
+      broadcastLayers(room, room.baseImageMap(), room.maskImageMap());
       return;
     }
 
@@ -1561,7 +1635,7 @@ function canDraw(room, member) {
 /* ------------------------------------------------------------------ 心跳 & 清理 */
 
 const heartbeat = setInterval(() => {
-  wss.clients.forEach(ws => {
+  liveClients().forEach(ws => {
     if (ws._alive === false) return ws.terminate();
     ws._alive = false;
     try { ws.ping(); } catch (e) { /* ignore */ }
@@ -1659,6 +1733,16 @@ gcTimer.unref && gcTimer.unref();
 
 // 端口被占用（比如用户同时开了独立服务端，或者开了两个茶绘）不要直接崩：
 // 内置模式下降级成「用已经跑着的那个」，独立运行时给出明确提示。
+// ── 监听端口
+//
+// 抽成函数并**不在这里自动调用**：桌面端的离线模式要 require 这个文件来拿 onClient，
+// 那种场合下一个端口都不该占。直接 `node server/src/index.js` 跑时由文件末尾那行
+// `require.main === module` 自己监听。
+let listening = false;
+
+// 端口被占用时不去抢：内置模式下降级成「用已经跑着的那个」，独立运行时给出明确提示。
+// 注册在 listen() 外面 —— listen 可以被调用多次（关掉服务器再开），
+// 写在里面就会攒下一堆重复的错误处理器。
 server.on('error', (err) => {
   if (err && err.code === 'EADDRINUSE') {
     console.error('[server] 端口 ' + PORT + ' 已被占用' + (EMBEDDED ? '，改用已存在的服务端' : ''));
@@ -1668,23 +1752,68 @@ server.on('error', (err) => {
   if (!EMBEDDED) process.exit(1);
 });
 
-server.listen(PORT, HOST, () => {
-  // 启动时先扫一遍：上次退出后遗留的探路空房不会一直挂在房间列表里
-  try {
-    const n = purgeBlankRooms(0);
-    if (n) console.log('[gc] 启动清理了 ' + n + ' 个空白房间');
-  } catch (e) { /* ignore */ }
-  const nets = os.networkInterfaces();
-  const ips = [];
-  for (const k of Object.keys(nets)) {
-    for (const n of nets[k] || []) {
-      if (n.family === 'IPv4' && !n.internal) ips.push(n.address);
+function listen() {
+  if (listening) return server;
+  listening = true;
+
+  // AI 主题那些广播走的是 wss.clients，离线客户端不在里面 —— 离线时没有「别人」，
+  // 这条不影响任何功能，所以**刻意不把本地客户端塞进 wss.clients**：
+  // 心跳循环会 ping 它们、而它们没有 pong，两轮之后就会被 terminate 掉。
+  // 每次重新 listen 都重建 wss（上次 close 过的实例是终态，再也接不上新连接）。
+  if (!wss) wss = createWss();
+
+  server.listen(PORT, HOST, () => {
+    // 启动时先扫一遍：上次退出后遗留的探路空房不会一直挂在房间列表里
+    try {
+      const n = purgeBlankRooms(0);
+      if (n) console.log('[gc] 启动清理了 ' + n + ' 个空白房间');
+    } catch (e) { /* ignore */ }
+    const nets = os.networkInterfaces();
+    const ips = [];
+    for (const k of Object.keys(nets)) {
+      for (const n of nets[k] || []) {
+        if (n.family === 'IPv4' && !n.internal) ips.push(n.address);
+      }
     }
-  }
-  console.log('════════════════════════════════════════');
-  console.log('  茶绘服务端已启动');
-  console.log('  本机:   http://localhost:' + PORT);
-  ips.forEach(ip => console.log('  局域网: http://' + ip + ':' + PORT));
-  console.log('  房间数: ' + store.rooms.size + '（存档目录 ' + DATA_DIR + '）');
-  console.log('════════════════════════════════════════');
-});
+    console.log('════════════════════════════════════════');
+    console.log('  茶绘服务端已启动');
+    console.log('  本机:   http://localhost:' + PORT);
+    ips.forEach(ip => console.log('  局域网: http://' + ip + ':' + PORT));
+    console.log('  房间数: ' + store.rooms.size + '（存档目录 ' + DATA_DIR + '）');
+    console.log('════════════════════════════════════════');
+  });
+  return server;
+}
+
+/** 停掉监听（桌面端「关闭服务器」按钮用）。房间不销毁 —— 换成离线模式还能接着画 */
+function stopListening() {
+  return new Promise((resolve) => {
+    if (!listening) return resolve(false);
+    listening = false;
+    const dead = wss;
+    wss = null;   // 先摘掉引用：心跳 / 广播立刻看不到任何客户端，也不用等 close 完成
+    // 把还连着的客户端剪掉。`server.close()` 的回调要等**所有**连接自己断开才触发，
+    // 而用户点「关闭服务器」的意思是**现在**就停，不是「等屋里的人走了再说」。
+    // 剪断之后每个 ws 的 close 事件照样走 leaveRoom()，房间存档不受影响。
+    try {
+      for (const sock of Array.from(dead.clients)) { try { sock.terminate(); } catch (e) { /* ignore */ } }
+    } catch (e) { /* ignore */ }
+    try { dead.close(); } catch (e) { /* ignore */ }
+    let done = false;
+    const finish = (ok) => { if (!done) { done = true; resolve(ok); } };
+    try { server.close(() => finish(true)); } catch (e) { finish(false); }
+    // 兜底：端口释放偶尔会拖一会儿，界面不能一直卡在「正在关闭…」
+    setTimeout(() => finish(true), 1500);
+  });
+}
+
+if (require.main === module) listen();
+
+module.exports = {
+  onClient: onClient,
+  listen: listen,
+  stopListening: stopListening,
+  shutdown: shutdown,
+  isListening: () => listening,
+  store: store
+};

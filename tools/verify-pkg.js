@@ -26,22 +26,30 @@ if (!fs.existsSync(ASAR)) {
 // 命中不了说明 asar 里还是旧版本。
 const CHECKS = [
   ['renderer/config.js', [/appVersion:\s*'([0-9.]+)'/]],
-  ['renderer/engine.js', [/renderUnits/, /composeGroup/, /activeGroupIds/]],
-  ['renderer/app.js', [/groupAdd/, /pickUpdateAsset/, /groups/, /tunnelRowHtml/, /setMyAvatar/, /shrinkAvatar/]],
-  ['renderer/project.js', [/groups/]],
+  ['renderer/engine.js', [/renderUnits/, /composeGroup/, /activeGroupIds/, /applyStrokeToMask/, /dropMask/]],
+  ['renderer/app.js', [/groupAdd/, /pickUpdateAsset/, /groups/, /tunnelRowHtml/, /setMyAvatar/, /shrinkAvatar/,
+    // v2.0.1：图层蒙版 / 剪贴蒙版 + PSD 导入 + 入口页服务器开关
+    /importPsdBytes/, /toggleServer/, /renderServerToggle/, /target === 'mask'/]],
+  ['renderer/project.js', [/groups/, /maskPng/]],
   // PSD 导出（v1.10.0）：整块自己写的编码器，特征挑格式里最认得出的几个
-  ['renderer/psd.js', [/8BPS/, /luni/, /lddg/, /packbits/]],
+  ['renderer/psd.js', [/8BPS/, /luni/, /lddg/, /packbits/, /grayChannelRLE/]],
+  // PSD 导入（v2.0.1）：读字节的那一半。少了它，包里的「导入 PSD」会点了没反应
+  ['renderer/psd-read.js', [/ChaPsdRead/, /8BPS/, /toProject/]],
   // 游戏音效（v1.10.0）：回合结算音 + 音量滑块
   ['renderer/sfx.js', [/roundEnd/, /setVolume/]],
   // 头像（v1.10.0）：成员表那个白名单必须带上 avatar，否则别人永远收不到
-  ['server/rooms.js', [/normalizeGroups/, /moveGroup/, /setLayerGroup/, /avatar/]],
-  ['server/index.js', [/GROUP_ADD/, /GROUP_UPD/, /MEMBER_AVATAR/, /GAME_GUESS/]],
+  ['server/rooms.js', [/normalizeGroups/, /moveGroup/, /setLayerGroup/, /avatar/, /hasMask/, /dupLayer/]],
+  ['server/index.js', [/GROUP_ADD/, /GROUP_UPD/, /MEMBER_AVATAR/, /GAME_GUESS/,
+    // v2.0.1：关服务器再开要重建 wss、离线模式要能从外部挂客户端
+    /stopListening/, /createWss/, /function onClient/]],
   // 中途进房的人先观战（v1.10.0）
   ['server/game.js', [/spectators/]],
   // 应用内一键隧道（v1.10.0）：模块本身也要真的进包
   ['tunnel.js', [/createTunnel/, /trycloudflare/]],
-  ['preload.js', [/downloadUpdate/, /startTunnel/]],
-  ['main.js', [/chahu:download-update/, /chahu:tunnel-start/]]
+  // 离线模式（v2.0.1）：不占端口的那个客户端，必须在包里
+  ['local-host.js', [/createSession/, /LocalWs/]],
+  ['preload.js', [/downloadUpdate/, /startTunnel/, /chahu:local-open/, /chahu:server-stop/]],
+  ['main.js', [/chahu:download-update/, /chahu:tunnel-start/, /chahu:local-open/, /chahu:server-start/]]
 ];
 
 const pkgVersion = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;

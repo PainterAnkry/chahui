@@ -36,6 +36,27 @@ contextBridge.exposeInMainWorld('chahuDesktop', {
   setServer: (url) => ipcRenderer.invoke('chahu:set-server', url),
   setEmbeddedServer: (on) => ipcRenderer.invoke('chahu:set-embedded', on),
   getServerInfo: () => ipcRenderer.invoke('chahu:server-info'),
+
+  /* 离线模式：本地画布不走 socket，消息直通主进程里那份服务端。
+     房间状态机是同一份，所以「关掉服务器」之后照旧能建房间、画、撤销。 */
+  localOpen: () => ipcRenderer.invoke('chahu:local-open'),
+  localFeed: (raw) => ipcRenderer.invoke('chahu:local-feed', raw),
+  localClose: () => ipcRenderer.invoke('chahu:local-close'),
+  onLocalMessage: (cb) => {
+    const fn = (_e, raw) => { try { cb(raw); } catch (err) { /* ignore */ } };
+    ipcRenderer.on('chahu:local-msg', fn);
+    return () => ipcRenderer.removeListener('chahu:local-msg', fn);
+  },
+
+  /* 开关服务器：真停（不再监听端口），不是断开连接 */
+  serverStatus: () => ipcRenderer.invoke('chahu:server-status'),
+  serverStart: () => ipcRenderer.invoke('chahu:server-start'),
+  serverStop: () => ipcRenderer.invoke('chahu:server-stop'),
+  onServerState: (cb) => {
+    const fn = (_e, s) => { try { cb(s); } catch (err) { /* ignore */ } };
+    ipcRenderer.on('chahu:server', fn);
+    return () => ipcRenderer.removeListener('chahu:server', fn);
+  },
   // 公网联机（一键 cloudflared 隧道）。状态从主进程推回来，进度就靠它显示。
   startTunnel: () => ipcRenderer.invoke('chahu:tunnel-start'),
   stopTunnel: () => ipcRenderer.invoke('chahu:tunnel-stop'),

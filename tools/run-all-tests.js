@@ -23,6 +23,9 @@ const SUITE = [
   'test-filters.js',
   'test-export.js',
   'test-psd.js',
+  // 蒙版 / 剪贴蒙版，和 PSD 导入回环（导入器唯一的验收标准就是「画面回来了」）
+  'test-mask.js',
+  'test-psd-import.js',
   'test-text.js',
   'test-ruler.js',
   'test-liquify.js',
@@ -41,6 +44,11 @@ const SUITE = [
   'test-mobile.js',
   'test-chain-sim.js',
   'test-theme-ui.js',
+  // 入口页那颗「开启 / 关闭服务器」按钮（桌面端桥用打桩的，所以不用起 Electron）
+  'test-server-button.js',
+  // 纯 Node，不需要服务端也不起浏览器：离线宿主 + 「开启/关闭服务器」的来回切
+  'test-local-host.js',
+  'test-server-toggle.js',
   // 隧道不需要服务端，它自己起假进程；放最后当纯 Node 用例跑
   'test-tunnel.js',
   'verify-issues.js',

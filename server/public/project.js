@@ -18,7 +18,8 @@
  *     doc: {
  *       width, height, background,
  *       groups: [{ id, name, visible, opacity, blend, collapsed }],
- *       layers: [{ name, visible, opacity, locked, alphaLock, blend, groupId, png }]
+ *       layers: [{ name, visible, opacity, locked, alphaLock, blend, groupId,
+ *                  clip, maskEnabled, maskPng, png }]
  *     }
  *   }
  *
@@ -29,6 +30,12 @@
  * 图层组（`groupId` 指向 `groups` 里的某一条）是 1.9 才有的字段，**没有升 version**：
  * 老版本的茶绘打开新文件时读不懂 groups、会把它们当没分组 —— 画面照样对（组只是
  * 「子图层怎么合到一起」的规则），比直接拒收整份工程友好得多。
+ *
+ * `maskPng` / `maskEnabled` / `clip` 是 2.0.1 才加的，同样**没有升 version**：
+ * 蒙版也是一层像素，不进工程文件就会「存一遍再打开，蒙版整张没了」。
+ * `maskPng` 是一张同尺寸 PNG，**用 alpha 表示该处显示多少**（不透明 = 全显示），
+ * 和 PSD 的蒙版语义是同一件事的两种写法；`maskEnabled` 为 false 表示蒙版被临时关掉
+ * （蒙版留着，只是不参与合成）；`clip` = 剪贴蒙版（只显示在紧邻它下面那一层的不透明区域里）。
  *
  * IndexedDB 里的自动保存草稿用的是**同一个结构**，见文件末尾的 `draft`。
  */
@@ -107,6 +114,13 @@
         throw new Error('导出「' + list[i].name + '」这一层时失败：' + e.message);
       }
       if (blank && png === blank) png = null;
+      // 蒙版也要存 —— 蒙版是一层像素，不在工程文件里带上，
+      // 「存一遍再打开，蒙版整张没了」就是必然的。它是张灰度 PNG，
+      // 尺寸和图层一样，但没有 alpha 之外的通道，压完很小。
+      var maskPng = null;
+      if (list[i].hasMask && engine.renderMaskPNG) {
+        try { maskPng = engine.renderMaskPNG(id); } catch (e) { maskPng = null; }
+      }
       layers.push({
         name: list[i].name,
         visible: list[i].visible !== false,
@@ -115,6 +129,9 @@
         alphaLock: !!list[i].alphaLock,
         blend: list[i].blend || 'normal',
         groupId: isGroupId(list[i].groupId) ? list[i].groupId : null,
+        clip: !!list[i].clip,
+        maskEnabled: list[i].maskEnabled !== false,
+        maskPng: maskPng,
         png: png
       });
     }
@@ -208,6 +225,10 @@
       if (isStr(l.png) && l.png.indexOf(PNG_PREFIX) === 0 && l.png.length > PNG_PREFIX.length) {
         png = l.png;
       }
+      var maskPng = null;
+      if (isStr(l.maskPng) && l.maskPng.indexOf(PNG_PREFIX) === 0 && l.maskPng.length > PNG_PREFIX.length) {
+        maskPng = l.maskPng;
+      }
       return {
         name: (isStr(l.name) && l.name.trim()) ? l.name.trim() : ('图层 ' + (i + 1)),
         visible: l.visible !== false,
@@ -216,6 +237,9 @@
         alphaLock: !!l.alphaLock,
         blend: isStr(l.blend) ? l.blend : 'normal',
         groupId: groups.some(function (g) { return g.id === l.groupId; }) ? l.groupId : null,
+        clip: !!l.clip,
+        maskEnabled: l.maskEnabled !== false,
+        maskPng: maskPng,
         png: png
       };
     });
@@ -240,9 +264,11 @@
   function describe(project) {
     var doc = project.doc;
     var painted = doc.layers.filter(function (l) { return !!l.png; }).length;
+    var masked = doc.layers.filter(function (l) { return !!l.maskPng; }).length;
     var gn = (doc.groups || []).length;
     return doc.width + '×' + doc.height + ' · ' + doc.layers.length + ' 层（' +
-      painted + ' 层有内容）' + (gn ? ' · ' + gn + ' 个图层组' : '');
+      painted + ' 层有内容）' + (gn ? ' · ' + gn + ' 个图层组' : '') +
+      (masked ? ' · ' + masked + ' 张蒙版' : '');
   }
 
   function toBlob(project) {

@@ -684,6 +684,24 @@
 
   function layerCommit(layer) { layer.dirty = false; layer.thumbDirty = true; }
 
+  /** 整张画布的副本（蒙版预览要「回到落笔前」再整笔重画，就得先留一份） */
+  function copyCanvas(src) {
+    var c = mkCanvas(src.width, src.height, false);
+    c.ctx.drawImage(src, 0, 0);
+    return c.canvas;
+  }
+
+  /**
+   * 颜色的感知亮度（0 = 黑，1 = 白）。
+   * 蒙版涂的是黑还是白决定了「隐藏」还是「显示」——
+   * 跟 Photoshop 的图层蒙版是同一套直觉：黑遮白露。
+   */
+  function lumOf(hex) {
+    var c = hexToRgb(hex);
+    if (!c) return 0;
+    return (0.299 * c.r + 0.587 * c.g + 0.114 * c.b) / 255;
+  }
+
   function rgbToHex(r, g, b) {
     return '#' + [r, g, b].map(function (v) {
       var s = v.toString(16);
@@ -938,6 +956,22 @@
       baseSeq: meta.baseSeq || 0,
       baseImage: null,
       canvas: null, ctx: null,
+      /**
+       * 图层蒙版。像素是一张与画布同尺寸的画布，**用 alpha 表示「该处显示多少」**
+       * （不透明 = 全显示，透明 = 全隐藏）—— 正好对上 PSD 的蒙版语义，
+       * 渲染时一句 destination-in 就套上去了。
+       *
+       *   hasMask     这一层有没有蒙版
+       *   maskEnabled 眼下参不参与合成（关掉但留着，随时能再开）
+       *   maskBase    导入 / 固化来的蒙版底图（已解码的 Image），蒙版重建时当底
+       *   maskSnapshot 落笔那一刻的副本，供预览「整笔重画」用，松手后置空
+       */
+      hasMask: !!meta.hasMask,
+      maskEnabled: meta.maskEnabled !== false,
+      maskCanvas: null, maskCtx: null,
+      maskBase: null,
+      maskSnapshot: null,
+      clip: !!meta.clip,
       strokes: [],
       dirty: true,
       thumb: null
@@ -1109,12 +1143,13 @@
       return {
         id: l.id, name: l.name, visible: l.visible, opacity: l.opacity,
         locked: l.locked, alphaLock: l.alphaLock, blend: l.blend,
-        groupId: l.groupId || null, baseSeq: l.baseSeq
+        groupId: l.groupId || null, baseSeq: l.baseSeq,
+        hasMask: !!l.hasMask, maskEnabled: l.maskEnabled !== false, clip: !!l.clip
       };
     });
   };
 
-  CanvasEngine.prototype.setLayers = function (list, baseImages, groups) {
+  CanvasEngine.prototype.setLayers = function (list, baseImages, groups, maskImages) {
     var self = this;
     var byId = new Map(this.layers.map(function (l) { return [l.id, l]; }));
     var next = [];
@@ -1129,6 +1164,12 @@
         l.alphaLock = !!meta.alphaLock;
         l.blend = P.BLEND_MODES.indexOf(meta.blend) >= 0 ? meta.blend : 'normal';
         l.groupId = meta.groupId || null;
+        l.clip = !!meta.clip;
+        l.maskEnabled = meta.maskEnabled !== false;
+        // 服务端说有蒙版而本地还没建 → 建一张（全白，等于没套）
+        if (meta.hasMask && !l.hasMask) { l.hasMask = true; self.ensureMask(l); }
+        // 服务端说蒙版没了 → 本地一并丢掉
+        if (!meta.hasMask && l.hasMask) { l.hasMask = false; self.dropMask(l); }
         var oldSeq = l.baseSeq;
         l.baseSeq = meta.baseSeq || 0;
         // 只要服务端给了底图、而本地这份底图对不上（版本变了，或者刚被 clearScope 清空），就要重新加载。
@@ -1154,6 +1195,13 @@
       }
     });
     this.layers = next;
+    // 蒙版像素（只有导入 / 固化之后才会有）：等图层表定稿再统一套
+    if (maskImages) {
+      Object.keys(maskImages).forEach(function (mid) {
+        var ml = self.getLayer(mid);
+        if (ml) self.setMaskImage(ml, maskImages[mid]);
+      });
+    }
     // 组表必须先于「图层数组定稿」生效：后面 baseKey / 合成全都按分组走
     if (Array.isArray(groups)) this.setGroups(groups);
     if (!this.layers.length) this.addLayerMeta({ id: P.rid('L'), name: '图层 1' });
@@ -1180,6 +1228,9 @@
     return {
       id: info.id || P.rid('s'),
       layerId: layer.id,
+      // 画在图层上还是蒙版上。**必须在这里落下来** —— 白名单漏了它，
+      // 蒙版笔迹就会被当成普通笔迹画到图层上（跟笔刷参数漏字段是同一类坑）。
+      target: br.target === 'mask' ? 'mask' : 'layer',
       userId: info.userId || null,
       tool: P.TOOLS.indexOf(info.tool) >= 0 ? info.tool : 'brush',
       color: info.color || '#000000',
@@ -1241,6 +1292,11 @@
       fc.ctx.drawImage(layer.canvas, 0, 0);
       stroke._frozen = fc.canvas;
     }
+    // 蒙版笔迹落笔时留一份蒙版快照 —— 预览要「回到落笔前再整笔重画」，
+    // 直接往蒙版上累加会让同一笔越描越浓。
+    if (stroke.target === 'mask' && layer.maskCanvas && !layer.maskSnapshot) {
+      layer.maskSnapshot = copyCanvas(layer.maskCanvas);
+    }
     var sc = this.takeScratch();
     var entry = { stroke: stroke, layer: layer, scratch: sc.canvas, sctx: sc.ctx, local: !!info.local };
     clearCtx(entry.sctx, this.width, this.height);
@@ -1294,6 +1350,12 @@
     // 整笔重画的代价是可接受的：恒定浓度/粗细时 paintRuns 会把整笔合并成**一次** stroke() 调用；
     // 只有笔压让每段浓度都不同时才会退化成逐段 stroke()，而那种情况段数也被采样点数量限住。
     this.paintToScratch(e.sctx, stroke);
+    // 蒙版笔迹要边拖边看得见：恢复成「落笔前」，再把整笔重画一次。
+    // 累加着画是不行的 —— 同一笔叠上去会一遍比一遍浓。
+    if (stroke.target === 'mask') {
+      this.restoreMaskSnapshot(e.layer);
+      this.applyStrokeToMask(e.layer, stroke);
+    }
     this.invalidate();
   };
 
@@ -1312,6 +1374,25 @@
       this.clearOverlay();
       this.baseDirty = true; this.invalidate();
       return null;
+    }
+    if (stroke.target === 'mask') {
+      // 蒙版笔迹只改蒙版，不碰图层像素。先把预览留下的痕迹清掉，再正式落一次。
+      this.restoreMaskSnapshot(e.layer);
+      this.applyStrokeToMask(e.layer, stroke);
+      this.releaseScratch(e.scratch);
+      layerCommit(e.layer);
+      stroke.seq = seq || (++this.seq);
+      this.seq = Math.max(this.seq, stroke.seq);
+      this.strokes.push(stroke);
+      this.byId.set(stroke.id, stroke);
+      e.layer.strokes.push(stroke);
+      this.baseDirty = true;
+      this.markLayerThumb(e.layer);
+      this.mirrorToView(e.layer, stroke);
+      this.emit('strokeEnd', stroke);
+      this.clearOverlay();
+      this.invalidate();
+      return stroke;
     }
     if (isTwoPoint(stroke) && stroke.points.length > 1) {
       stroke.points = [stroke.points[0], stroke.points[stroke.points.length - 1]];
@@ -1407,6 +1488,9 @@
   };
 
   CanvasEngine.prototype.applyStrokeToLayer = function (layer, stroke) {
+    // 蒙版笔迹走另一条路。放在最前面：历史重放（撤销 / 清除 / 远端同步）
+    // 全都汇到这一个出口，在这里分流就一处都不会漏。
+    if (stroke.target === 'mask') { this.applyStrokeToMask(layer, stroke); return; }
     if (isFill(stroke)) { this.applyFill(layer, stroke); return; }
     // 渐变和涂抹以前漏在这里 —— 撤销重做（重放历史）时它们会消失，
     // 别人画过来的渐变也落不下来。补上之后重放才和「刚画完」一致。
@@ -1557,6 +1641,9 @@
       if (s.seq && layer.baseSeq && s.seq <= layer.baseSeq) continue;
       this.applyStrokeToLayer(layer, s);
     }
+    // 蒙版也按同一份历史重建：蒙版笔迹混在 layer.strokes 里，
+    // 上面循环里的 applyStrokeToLayer 会把它们分流进蒙版。
+    this.rebuildMask(layer);
     layerCommit(layer);
     this.markLayerThumb(layer);
     // 历史被改写（撤销 / 清除 / 换底图）—— 显示用的那份必须整层重建
@@ -2622,9 +2709,7 @@
       }
       var l = unit.layers[0];
       if (!this.layerDrawable(l) || active.has(l.id)) continue;
-      ctx.globalAlpha = l.opacity;
-      ctx.globalCompositeOperation = blendOp(l.blend);
-      ctx.drawImage(this.displayCanvas(l), 0, 0);
+      this.drawLayerPixels(ctx, this.displayCanvas(l), l);
     }
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
@@ -2665,6 +2750,8 @@
     this.pending.forEach(function (e) {
       if (e.layer !== layer) return;
       var s = e.stroke;
+      // 蒙版笔迹不画在图层上 —— 它只该改蒙版，蒙版再由 applyMaskTo 统一套用
+      if (s.target === 'mask') return;
       if (isText(s) || isLiquify(s)) { self.stampStroke(tmpCtx, layer, s, e.scratch); return; }
       if (isShape(s) || isFill(s)) return;   // 形状走 overlay，油漆桶已直接落到图层
       if (isBlur(s)) {
@@ -2676,6 +2763,7 @@
     });
     tmpCtx.setTransform(1, 0, 0, 1, 0, 0);
     tmpCtx.globalAlpha = 1; tmpCtx.globalCompositeOperation = 'source-over'; tmpCtx.filter = 'none';
+    this.applyMaskTo(tmpCtx, layer, opts);
     dstCtx.globalAlpha = layer.opacity;
     dstCtx.globalCompositeOperation = blendOp(layer.blend);
     dstCtx.drawImage(tmpCanvas, 0, 0);
@@ -2792,11 +2880,7 @@
         // 合并/复制用：只要图层自身像素，不套用图层浓度与混合模式
         out.ctx.drawImage(l.canvas, 0, 0);
       } else {
-        out.ctx.globalAlpha = l.opacity;
-        out.ctx.globalCompositeOperation = blendOp(l.blend);
-        out.ctx.drawImage(l.canvas, 0, 0);
-        out.ctx.globalAlpha = 1;
-        out.ctx.globalCompositeOperation = 'source-over';
+        this.drawLayerPixels(out.ctx, l.canvas, l, opts);
       }
     }
     return out;
@@ -2826,10 +2910,7 @@
       if (includeActive && this.hasPendingOn(l)) {
         this.composeLayer(gctx, tmp.ctx, tmp.canvas, l, { raw: true });
       } else {
-        gctx.globalAlpha = l.opacity;
-        gctx.globalCompositeOperation = blendOp(l.blend);
-        gctx.drawImage(l.canvas, 0, 0);
-        gctx.globalAlpha = 1; gctx.globalCompositeOperation = 'source-over';
+        this.drawLayerPixels(gctx, l.canvas, l);
       }
     }
     dstCtx.globalAlpha = group.opacity;
@@ -2859,6 +2940,244 @@
       self.stampStroke(out.ctx, layer, s, e.scratch);
     });
     return out.canvas;
+  };
+
+  /* ================================================================ 图层蒙版 */
+
+  /** 取这一层「眼下生效」的蒙版画布；没有蒙版、或蒙版被关掉、或压根没建出来，都返回 null */
+  CanvasEngine.prototype.layerMask = function (layer) {
+    if (!layer || !layer.hasMask || layer.maskEnabled === false) return null;
+    return layer.maskCanvas || null;
+  };
+
+  /** 拿到蒙版画布（没有就建一张全白的）。蒙版画布是懒建的：绝大多数图层一辈子用不上 */
+  CanvasEngine.prototype.ensureMask = function (layer) {
+    if (!layer) return null;
+    if (!layer.maskCanvas || layer.maskCanvas.width !== this.width ||
+        layer.maskCanvas.height !== this.height) {
+      var c = mkCanvas(this.width, this.height, true);
+      layer.maskCanvas = c.canvas;
+      layer.maskCtx = c.ctx;
+      layer.maskBase = null;
+      layer.maskSnapshot = null;
+      this.fillMaskWhite(layer);
+    }
+    return { canvas: layer.maskCanvas, ctx: layer.maskCtx };
+  };
+
+  CanvasEngine.prototype.fillMaskWhite = function (layer) {
+    if (!layer || !layer.maskCtx) return;
+    var ctx = layer.maskCtx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.filter = 'none';
+    clearCtx(ctx, this.width, this.height);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, this.width, this.height);
+  };
+
+  /** 丢掉蒙版（图层本身不动） */
+  CanvasEngine.prototype.dropMask = function (layer) {
+    if (!layer) return;
+    // 蒙版没了，涂它的那几笔也就没有归宿了 —— 顺手从历史里清掉。
+    // 不清的话它们会一直躺在 layer.strokes 里：等这层重新加一张蒙版、
+    // 或者别人中途进来按历史重建蒙版时，这些旧笔迹会被重新涂上去，
+    // 新蒙版一出生就缺一大块（看着像「蒙版自己坏了」）。
+    // 先落 hasMask=false 再清笔迹：中间那次整层重绘不会去碰蒙版。
+    layer.hasMask = false;
+    var ids = [];
+    for (var i = 0; i < layer.strokes.length; i++) {
+      if (layer.strokes[i].target === 'mask') ids.push(layer.strokes[i].id);
+    }
+    if (ids.length) this.removeStrokes(ids, true);
+    layer.maskCanvas = null;
+    layer.maskCtx = null;
+    layer.maskBase = null;
+    layer.maskSnapshot = null;
+    this.baseDirty = true; this.baseKey = '';
+    this.invalidate();
+  };
+
+  /**
+   * 按历史重建蒙版：底色（导入来的蒙版底图，或者全白）+ 重放本层的蒙版笔迹。
+   * 撤销 / 清除 / 换底图 / 载入工程之后都走这里，保证「蒙版」和「图层」同源。
+   */
+  CanvasEngine.prototype.rebuildMask = function (layer) {
+    if (!layer || !layer.hasMask) return;
+    if (!layer.maskCanvas) this.ensureMask(layer);
+    if (!layer.maskCtx) return;
+    var ctx = layer.maskCtx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.filter = 'none';
+    clearCtx(ctx, this.width, this.height);
+    if (layer.maskBase) {
+      ctx.drawImage(layer.maskBase, 0, 0, this.width, this.height);
+    } else {
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, this.width, this.height);
+    }
+    for (var i = 0; i < layer.strokes.length; i++) {
+      var s = layer.strokes[i];
+      if (s.target !== 'mask') continue;
+      if (s.seq && layer.baseSeq && s.seq <= layer.baseSeq) continue;
+      this.applyStrokeToMask(layer, s, true);
+    }
+    layer.maskSnapshot = null;
+  };
+
+  /** 把落笔前的蒙版副本贴回去（清掉预览留下的痕迹） */
+  CanvasEngine.prototype.restoreMaskSnapshot = function (layer) {
+    if (!layer || !layer.maskSnapshot || !layer.maskCtx) return;
+    var ctx = layer.maskCtx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.filter = 'none';
+    clearCtx(ctx, this.width, this.height);
+    ctx.drawImage(layer.maskSnapshot, 0, 0);
+  };
+
+  /**
+   * 把一笔画到蒙版上。
+   *
+   * 语义跟 Photoshop 的图层蒙版一致：**黑色遮住、白色露出**。
+   * 蒙版用 alpha 表示「显示多少」，所以：
+   *   白笔 → 按笔迹覆盖率把 alpha 补回 1（露出）
+   *   黑笔 → 按笔迹覆盖率把 alpha 抹成 0（遮住）
+   * 笔迹本身的浓度（opacity）与软硬边都体现在覆盖率的 alpha 上，不用额外处理。
+   */
+  CanvasEngine.prototype.applyStrokeToMask = function (layer, stroke, silent) {
+    var m = this.ensureMask(layer);
+    if (!m) return;
+    var sc = this.takeScratch();
+    this.paintToScratch(sc.ctx, stroke);
+    var ctx = m.ctx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.filter = 'none';
+    if (lumOf(stroke.color) >= 0.5) {
+      // 白：先按笔迹的 alpha 把 scratch 染成纯白，再叠上去（管你原来画的是什么颜色）
+      var w = this.takeScratch();
+      clearCtx(w.ctx, this.width, this.height);
+      w.ctx.drawImage(sc.canvas, 0, 0);
+      w.ctx.globalCompositeOperation = 'source-in';
+      w.ctx.fillStyle = '#ffffff';
+      w.ctx.fillRect(0, 0, this.width, this.height);
+      w.ctx.globalCompositeOperation = 'source-over';
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.drawImage(w.canvas, 0, 0);
+      this.releaseScratch(w.canvas);
+    } else {
+      // 黑：按笔迹覆盖率把蒙版的 alpha 抹掉
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.drawImage(sc.canvas, 0, 0);
+      ctx.globalCompositeOperation = 'source-over';
+    }
+    this.releaseScratch(sc.canvas);
+    if (!silent) { this.baseDirty = true; this.baseKey = ''; }
+  };
+
+  /** 蒙版来自像素（导入 / 固化）时的入口：dataUrl 传空串表示摘掉 */
+  CanvasEngine.prototype.setMaskImage = function (layer, dataUrl) {
+    var self = this;
+    if (!layer) return;
+    if (!dataUrl) {
+      layer.maskBase = null;
+      layer.hasMask = true;
+      this.ensureMask(layer);
+      this.rebuildMask(layer);
+      this.baseDirty = true; this.baseKey = ''; this.invalidate();
+      return;
+    }
+    layer.hasMask = true;
+    this.ensureMask(layer);
+    var img = new Image();
+    img.onload = function () {
+      layer.maskBase = img;
+      self.rebuildMask(layer);
+      self.baseDirty = true; self.baseKey = ''; self.invalidate();
+    };
+    img.src = dataUrl;
+  };
+
+  /** 把蒙版当作 alpha 套到已经画好的图层内容上 */
+  CanvasEngine.prototype.applyMaskTo = function (ctx, layer, opts) {
+    if (opts && (opts.rawLayer || opts.onlyLayer && opts.noMask)) return;
+    var m = this.layerMask(layer);
+    if (!m) return;
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'destination-in';
+    ctx.drawImage(m, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+  };
+
+  /**
+   * 「把一层连蒙版一起画到 dstCtx」的唯一出口。
+   * rebuildBase / renderDocument / renderGroupInto 三条路都走它 ——
+   * 免得各写各的，出现「屏幕上套了蒙版、导出却没套」这种两边对不上的事。
+   */
+  CanvasEngine.prototype.drawLayerPixels = function (dstCtx, srcCanvas, layer, opts) {
+    var m = (opts && opts.rawLayer) ? null : this.layerMask(layer);
+    // 剪贴蒙版：只显示在**紧邻它下面那一层**的不透明区域里。
+    // 不走「下方所有图层的累积」那套 —— 那要在四条渲染路径里各维护一份累积画布，
+    // 代价和出错面都大得多；紧邻下层正是 SAI 的直觉，够用。
+    var clipSrc = null;
+    if (!(opts && opts.rawLayer) && layer.clip) {
+      var ci = this.layers.indexOf(layer);
+      var below = ci > 0 ? this.layers[ci - 1] : null;
+      if (below && below.canvas && this.layerDrawable(below)) clipSrc = below.canvas;
+    }
+    if (!m && !clipSrc) {
+      dstCtx.globalAlpha = layer.opacity;
+      dstCtx.globalCompositeOperation = blendOp(layer.blend);
+      dstCtx.drawImage(srcCanvas, 0, 0);
+      dstCtx.globalAlpha = 1;
+      dstCtx.globalCompositeOperation = 'source-over';
+      return;
+    }
+    var t = this.takeScratch();
+    clearCtx(t.ctx, this.width, this.height);
+    t.ctx.globalAlpha = 1;
+    t.ctx.globalCompositeOperation = 'source-over';
+    t.ctx.drawImage(srcCanvas, 0, 0);
+    t.ctx.globalCompositeOperation = 'destination-in';
+    if (m) t.ctx.drawImage(m, 0, 0);
+    if (clipSrc) t.ctx.drawImage(clipSrc, 0, 0);
+    t.ctx.globalCompositeOperation = 'source-over';
+    dstCtx.globalAlpha = layer.opacity;
+    dstCtx.globalCompositeOperation = blendOp(layer.blend);
+    dstCtx.drawImage(t.canvas, 0, 0);
+    dstCtx.globalAlpha = 1;
+    dstCtx.globalCompositeOperation = 'source-over';
+    this.releaseScratch(t.canvas);
+  };
+
+  /** 图层原始像素（不含蒙版）—— PSD 导出要单独取蒙版通道，所以这里不套 */
+  CanvasEngine.prototype.renderMaskPNG = function (layerId) {
+    var layer = this.getLayer(layerId);
+    if (!layer || !layer.maskCanvas) return null;
+    var out = mkCanvas(this.width, this.height, false);
+    out.ctx.drawImage(layer.maskCanvas, 0, 0);
+    return out.canvas.toDataURL('image/png');
+  };
+
+  /**
+   * 蒙版的灰度（PSD 的蒙版通道是 8 位灰度：0 = 全遮、255 = 全露）。
+   * 茶绘的蒙版用 alpha 存同一件事，所以「取灰度」就是「取 alpha」。
+   * 导出 PSD 时要这一份；蒙版不存在或没建出来就返回 null。
+   */
+  CanvasEngine.prototype.maskGray = function (layerId) {
+    var layer = this.getLayer(layerId);
+    if (!layer || !layer.hasMask || !layer.maskCanvas) return null;
+    var w = this.width, h = this.height;
+    var d = layer.maskCanvas.getContext('2d').getImageData(0, 0, w, h).data;
+    var out = new Uint8Array(w * h);
+    for (var i = 0, j = 3; i < out.length; i++, j += 4) out[i] = d[j];
+    return out;
   };
 
   CanvasEngine.prototype.renderInto = function (ctx, opts) {

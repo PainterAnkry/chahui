@@ -154,6 +154,27 @@
     return out;
   }
 
+  /**
+   * 蒙版通道的 RLE 数据。蒙版只有 1 个 8 位通道（没有 alpha），所以不能走
+   * 上面那个按 RGBA 交错取样的函数 —— 传进去的是一张 w*h 的灰度平面。
+   */
+  function grayChannelRLE(g, w, h, row, tmp) {
+    var lens = new Uint32Array(h);
+    var body = new W();
+    for (var y = 0; y < h; y++) {
+      var off = y * w;
+      for (var x = 0; x < w; x++) row[x] = g[off + x];
+      var n = packbits(row, 0, w, tmp);
+      lens[y] = n;
+      body.raw(tmp.subarray(0, n));
+    }
+    var out = new Uint8Array(h * 2 + body.n);
+    var p = 0;
+    for (var i = 0; i < h; i++) { out[p++] = (lens[i] >>> 8) & 255; out[p++] = lens[i] & 255; }
+    out.set(body.bytes(), p);
+    return out;
+  }
+
   /* ---------------- 层名 ---------------- */
 
   /** PSD 的 pascal 段是 MacRoman，塞不进中文 → 非 ASCII 写 '?'（真名在 luni 里） */
@@ -270,6 +291,16 @@
         { id: -1, comp: 1, data: channelRLE(d, w, h, 3, row, tmp) }
       ];
       d = null;
+      /* ---- 图层蒙版：PSD 里就是一个额外的 8 位通道（id = -2）----
+         茶绘的蒙版用 alpha 表示「显示多少」，PSD 用灰度表示同一件事，
+         所以两边是一一对应的，直接把 alpha 当灰度写出去即可，不用取反。
+         蒙版通道排在其他通道之后；矩形走层矩形（通道自己没有矩形），
+         所以这里层矩形 = 蒙版矩形 = 整幅画布，读的人怎么算都不会错位。 */
+      e.maskDisabled = false;
+      var mg = engine.maskGray ? engine.maskGray(l.id) : null;
+      if (mg && l.maskEnabled === false) e.maskDisabled = true;
+      if (mg) e.chans.push({ id: -2, comp: 1, data: grayChannelRLE(mg, w, h, row, tmp) });
+      e.hasMask = !!mg;
     }
 
     var out = new W();
@@ -316,7 +347,9 @@
       out.sig('8BIM');
       out.sig(blendKey(src ? src.blend : 'normal'));
       out.u8(Math.round(clamp01(src ? src.opacity : 1) * 255));
-      out.u8(0);                                            // 剪贴板（clipping）
+      // 剪贴位：0 = 普通层，1 = 剪贴到下面那一层。以前这里恒写 0，
+      // 于是「剪贴蒙版」在 PSD 里会变成一张普通图层，画面看着就多出来一块。
+      out.u8(!isDiv && e.layer && e.layer.clip ? 1 : 0);
       var flags = isDiv ? 0x18 : 0x08;                      // 0x10 = 这层的像素不参与成图
       if (src && src.visible === false) flags |= 0x02;      // bit1：1 = 隐藏
       if (!isDiv && e.layer && e.layer.alphaLock) flags |= 0x01;  // 锁定透明像素
@@ -324,7 +357,19 @@
       out.u8(0);                                            // filler
 
       var extra = new W();
-      extra.u32(0);                                         // 图层蒙版数据：无
+      if (e.hasMask) {
+        /* 图层蒙版数据块：长度(4) + 矩形(16) + 默认色(1) + 标志(1) + 补 2 字节 = 20。
+           矩形为空（全 0）就等于「这层没有蒙版」，所以有蒙版时必须把矩形写满，
+           否则 Photoshop 会认为这张蒙版的区域是空的（表现：蒙版整张消失）。
+           标志 bit1 = 蒙版被停用 —— 茶绘的「关掉蒙版」正好对应它。 */
+        extra.u32(20);
+        extra.i32(0); extra.i32(0); extra.i32(h); extra.i32(w);
+        extra.u8(0);                                        // 默认色 0 = 蒙版默认全遮
+        extra.u8(e.maskDisabled ? 0x02 : 0x00);
+        extra.zeros(2);
+      } else {
+        extra.u32(0);                                       // 图层蒙版数据：无
+      }
       extra.u32(0);                                         // 混合范围：无
       writePascalName(extra, isDiv ? e.name : (e.layer.name || ''));
       writeLuni(extra, isDiv ? e.name : (e.layer.name || ''));

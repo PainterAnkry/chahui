@@ -10,6 +10,23 @@ let win = null;
 // 内置服务器的运行信息（端口 / 局域网地址），渲染进程要拿去显示分享链接
 let serverInfo = null;
 
+/* ---------------- 服务端模块的环境变量（必须在这里、任何 require 之前） ----------------
+ *
+ * server/src/index.js 的 PORT / DATA_DIR / PUBLIC_DIR 都是**模块加载那一次**读 process.env，
+ * 之后不再变。而离线模式和内置服务器（client/server-embed.js）用的是**同一个模块实例**
+ * —— 谁先 require 谁就把这些值定死了。
+ *
+ * 以前这些变量只在 server-embed.start() 里设，于是「先点离线、再开服务器」会让房间存档
+ * 落到 client/server/data/rooms（打包后是只读的 asar，根本写不进去）。
+ * 所以统一提到最前面：离线、内置，两条路都用用户数据目录。
+ */
+process.env.CHAHU_EMBEDDED = '1';
+if (!process.env.DATA_DIR) process.env.DATA_DIR = path.join(app.getPath('userData'), 'rooms');
+if (!process.env.PUBLIC_DIR) process.env.PUBLIC_DIR = path.join(__dirname, 'renderer');
+// 端口同理：用户改过端口的话，第一次 require 就得是最终那个值，
+// 否则「先离线（默认 8437 被锁死）、后开服务器（想用 9000）」会静默起在 8437。
+if (!process.env.PORT) process.env.PORT = String(readConfig().port || 8437);
+
 /* ---------------- 本地配置（服务器地址等） ---------------- */
 
 function configPath() {
@@ -95,6 +112,94 @@ ipcMain.handle('chahu:set-embedded', (e, on) => writeConfig({ embeddedServer: !!
 
 /** 局域网地址 / 端口，分享链接要用 */
 ipcMain.handle('chahu:server-info', () => serverInfo);
+
+/* ---------------- 开关服务器 / 离线模式 ----------------
+ *
+ * 「关闭服务器」不是「断开连接」，是**真的把服务器停掉**（不再监听端口，
+ * 同机别的程序也连不进来）。停掉之后还能接着画画，靠的是离线模式：
+ * 在本进程里挂一个不走 socket 的客户端（client/local-host.js），
+ * 房间状态机照旧跑 —— 有网 / 没网共用同一份服务端逻辑。
+ *
+ * 注意：serverInfo 非空 = 「服务器开着」这档。被复用（端口上本来是别人在跑）
+ * 时停掉我们这边的监听是空操作，但用户的意思本来就是「我这边不用服务器了」，
+ * 所以照样切到离线。
+ */
+let localSession = null;
+
+function ensureLocalSession() {
+  if (localSession) return { ok: true, connId: localSession.connId, reused: true };
+  try {
+    const host = require('./local-host');
+    localSession = host.createSession({
+      toClient: function (raw) {
+        if (win && !win.isDestroyed()) win.webContents.send('chahu:local-msg', raw);
+      }
+    });
+    console.log('[chahu] 离线模式：本机会话 ' + localSession.connId + '（不占端口）');
+    return { ok: true, connId: localSession.connId, reused: false };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+ipcMain.handle('chahu:local-open', () => ensureLocalSession());
+
+ipcMain.handle('chahu:local-feed', (e, raw) => {
+  if (!localSession) return false;
+  try { localSession.feed(String(raw || '')); return true; } catch (err) {
+    console.error('[chahu] 离线消息处理失败：' + err.message);
+    return false;
+  }
+});
+
+ipcMain.handle('chahu:local-close', () => {
+  if (!localSession) return false;
+  try { localSession.close(); } catch (e) { /* ignore */ }
+  localSession = null;
+  return true;
+});
+
+/** 服务器现状：开着吗、谁在跑。界面上的开关靠它显示 */
+ipcMain.handle('chahu:server-status', () => ({
+  on: !!serverInfo,
+  port: (serverInfo && serverInfo.port) || Number(readConfig().port) || 8437,
+  lan: (serverInfo && serverInfo.lan) || [],
+  origin: (serverInfo && serverInfo.origin) || '',
+  local: !!localSession
+}));
+
+/** 开服务器：**现在就用得上**（不是「下次启动生效」） */
+ipcMain.handle('chahu:server-start', async () => {
+  const cfg = readConfig();
+  try {
+    const embed = require('./server-embed');
+    serverInfo = await embed.start({
+      port: (serverInfo && serverInfo.port) || Number(cfg.port) || 8437,
+      // 房间存档放用户数据目录，别塞进安装目录（那里通常没有写权限）
+      dataDir: path.join(app.getPath('userData'), 'rooms'),
+      // 内置服务器同时托管网页版，好让局域网的朋友直接用浏览器加入
+      publicDir: path.join(__dirname, 'renderer')
+    });
+    writeConfig({ embeddedServer: true });
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('chahu:server', { on: true, port: serverInfo.port, lan: serverInfo.lan });
+    }
+    return { ok: true, port: serverInfo.port, lan: serverInfo.lan, origin: serverInfo.origin, reused: serverInfo.reused };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+/** 关服务器。房间不销毁 —— 紧接着切到离线模式，画的还是同一间房 */
+ipcMain.handle('chahu:server-stop', async () => {
+  try {
+    const srv = require('./server/index.js');
+    await srv.stopListening();
+  } catch (e) { /* 没起来过就当它本来就没在跑 */ }
+  serverInfo = null;
+  if (win && !win.isDestroyed()) win.webContents.send('chahu:server', { on: false });
+  return { ok: true };
+});
 
 /* ---------------- 公网联机（一键 cloudflared 隧道） ----------------
  * 用户不用装任何东西：第一次点「开启公网联机」时把 cloudflared 下到用户数据目录，
@@ -182,16 +287,20 @@ ipcMain.handle('chahu:save', async (e, name, payload) => {
 });
 
 /**
- * 打开一份本地文件，返回文本内容。只给工程文件（.chahu）用。
- * 主进程**不解析内容** —— 是不是一份合法工程交给渲染层判断，
- * 报错语句才能是用户看得懂的那句（见 project.js 的 parse）。
+ * 打开一份本地文件。工程文件返回**文本**，PSD 返回 **base64**。
+ * 主进程**不解析内容** —— 是不是一份合法工程、是不是一份读得动的 PSD，
+ * 都交给渲染层判断，报错语句才能是用户看得懂的那句
+ * （见 project.js 的 parse / psd-read.js 的 read）。
  */
 ipcMain.handle('chahu:open', async (e, kind) => {
+  const isPsd = kind === 'psd';
   const filters = kind === 'project'
     ? [{ name: '茶绘工程', extensions: ['chahu'] }, { name: '全部文件', extensions: ['*'] }]
-    : [{ name: '全部文件', extensions: ['*'] }];
+    : isPsd
+      ? [{ name: 'Photoshop 文件', extensions: ['psd', 'psb'] }, { name: '全部文件', extensions: ['*'] }]
+      : [{ name: '全部文件', extensions: ['*'] }];
   const res = await dialog.showOpenDialog(win, {
-    title: kind === 'project' ? '打开茶绘工程' : '打开文件',
+    title: kind === 'project' ? '打开茶绘工程' : (isPsd ? '导入 PSD' : '打开文件'),
     properties: ['openFile'],
     filters
   });
@@ -202,6 +311,8 @@ ipcMain.handle('chahu:open', async (e, kind) => {
     // 上限跟着 ws 的 maxPayload（12MB）来：比这大的工程本来也传不进房间，
     // 与其读完再失败，不如在这里就说清楚。
     if (buf.length > 24 * 1024 * 1024) return { ok: false, error: '这个文件太大了（超过 24MB）' };
+    // PSD 是二进制：按 utf8 读成文本再转回去，字节就已经不是原来那些了
+    if (isPsd) return { ok: true, path: p, name: path.basename(p), b64: buf.toString('base64') };
     return { ok: true, path: p, name: path.basename(p), text: buf.toString('utf8') };
   } catch (err) {
     return { ok: false, error: err.message };

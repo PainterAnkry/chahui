@@ -75,13 +75,17 @@ async function start(opts) {
 
   // server/src/index.js 全部配置都从 process.env 读，所以这里设好环境变量再 require 就行，
   // 不需要为了「可嵌入」去重构那个文件。
+  //
+  // 但**它 require 时不会自己监听**（见文件末尾的 require.main 判断）：
+  // 桌面端的「离线模式」也要 require 它来拿 onClient，那种场合一个端口都不该占。
+  // 所以端口要由这里显式 listen() 开。
   process.env.PORT = String(port);
-  process.env.HOST = '0.0.0.0';
+  process.env.HOST = opts.host || '0.0.0.0';
   process.env.CHAHU_EMBEDDED = '1';
   if (opts.dataDir) process.env.DATA_DIR = opts.dataDir;
   if (opts.publicDir) process.env.PUBLIC_DIR = opts.publicDir;
 
-  require('./server/index.js');
+  require('./server/index.js').listen();
 
   const up = await waitForListen(port);
   return { port: port, reused: !up, lan: lanAddresses(), origin: 'http://localhost:' + port };

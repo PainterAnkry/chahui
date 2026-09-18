@@ -97,7 +97,23 @@ function newLayer(meta) {
     // 所属图层组（null = 不在任何组里）
     groupId: meta.groupId || null,
     baseImage: meta.baseImage || null,
-    baseSeq: meta.baseSeq || 0
+    baseSeq: meta.baseSeq || 0,
+    /**
+     * 图层蒙版。null = 这一层没有蒙版。
+     * 有蒙版时是一张与画布同尺寸的 PNG，**用它的 alpha 表示「该处显示多少」**
+     * （不透明 = 全显示，透明 = 全隐藏）—— 正好对上 PSD 的蒙版语义，
+     * 渲染时一句 destination-in 就能套上去。
+     *
+     * 平时在蒙版上涂抹是**笔迹**（带 target='mask'），跟着笔迹历史一起同步 / 撤销 / 回放；
+     * maskImage 只在「蒙版不是画出来的」场合出现：工程文件装载、PSD 导入、房间固化。
+     */
+    hasMask: !!meta.hasMask || !!meta.maskImage,
+    maskImage: meta.maskImage || null,
+    maskSeq: meta.maskSeq || 0,
+    // 有蒙版但临时关掉时不参与合成（蒙版本身留着，随时可以再打开）
+    maskEnabled: meta.maskEnabled !== false,
+    // 剪贴蒙版：只在「它下面那一层」的不透明区域里显示。最底下那层设了也没有东西可剪，等于普通层。
+    clip: !!meta.clip
   };
 }
 
@@ -202,7 +218,15 @@ class Room {
       blend: l.blend,
       groupId: l.groupId,
       baseImage: isPng(l.png) ? l.png : null,
-      baseSeq: seq
+      baseSeq: seq,
+      // 蒙版与剪贴也会跟着工程文件 / PSD 导入一起过来。
+      // maskImage 是「不是画出来的」那张蒙版的像素，maskSeq 记下它是哪一档水位 ——
+      // 否则客户端重放历史时会把 baseSeq 之前的蒙版笔迹又涂一遍。
+      hasMask: isPng(l.maskPng),
+      maskImage: isPng(l.maskPng) ? l.maskPng : null,
+      maskSeq: seq,
+      maskEnabled: l.maskEnabled !== false,
+      clip: !!l.clip
     }));
     this.normalizeGroups();
     this.lastActiveAt = Date.now();
@@ -246,7 +270,11 @@ class Room {
     return this.layers.map(l => ({
       id: l.id, name: l.name, visible: l.visible,
       opacity: l.opacity, locked: l.locked, alphaLock: l.alphaLock,
-      blend: l.blend, groupId: l.groupId, baseSeq: l.baseSeq
+      blend: l.blend, groupId: l.groupId, baseSeq: l.baseSeq,
+      // 蒙版状态。**必须逐个列出** —— 这份白名单是 LAYERS 广播的唯一出口，
+      // 漏一个字段就是「服务端存下了、客户端永远收不到」。
+      hasMask: !!l.hasMask, maskSeq: l.maskSeq || 0,
+      maskEnabled: l.maskEnabled !== false, clip: !!l.clip
     }));
   }
 
@@ -262,6 +290,13 @@ class Room {
   baseImageMap() {
     const o = {};
     for (const l of this.layers) if (l.baseImage) o[l.id] = l.baseImage;
+    return o;
+  }
+
+  /** 同上，蒙版那一份。大多数房间这里是空的（蒙版平时靠笔迹重建），只有导入/固化后才有 */
+  maskImageMap() {
+    const o = {};
+    for (const l of this.layers) if (l.maskImage) o[l.id] = l.maskImage;
     return o;
   }
 
@@ -392,6 +427,9 @@ class Room {
     if (typeof patch.alphaLock === 'boolean') l.alphaLock = patch.alphaLock;
     if (typeof patch.opacity === 'number') l.opacity = clamp(patch.opacity, 0, 1);
     if (P.BLEND_MODES.indexOf(patch.blend) >= 0) l.blend = patch.blend;
+    if (typeof patch.hasMask === 'boolean') l.hasMask = patch.hasMask;
+    if (typeof patch.maskEnabled === 'boolean') l.maskEnabled = patch.maskEnabled;
+    if (typeof patch.clip === 'boolean') l.clip = patch.clip;
     this.dirty = true;
     return l;
   }
@@ -552,7 +590,16 @@ class Room {
       // 一会儿被组的不透明度带着变淡、一会儿又不受影响，看着像随机
       groupId: src.groupId,
       baseImage: isPng(png) ? png : null,
-      baseSeq: upToSeq || this.seq
+      baseSeq: upToSeq || this.seq,
+      // 蒙版和剪贴跟着副本一起走。复制的像素（png）里本来就已经套过蒙版了，
+      // 但**蒙版本身**是独立的一层数据：不给副本的话，用户拿蒙版一改，
+      // 原图会变、副本不会变 —— 看着像「复制出来的图层不听话」。
+      // visible / locked 不复制：副本默认可见、不锁，这是复制图层的惯例。
+      hasMask: !!src.hasMask,
+      maskImage: src.maskImage || null,
+      maskSeq: upToSeq || this.seq,
+      maskEnabled: src.maskEnabled !== false,
+      clip: !!src.clip
     });
     this.layers.splice(i + 1, 0, copy);
     if (src.groupId) this.normalizeGroups();
@@ -775,6 +822,15 @@ class RoomStore {
         } catch (e) { /* ignore */ }
       }
       delete copy.baseImage;
+      // 蒙版跟底图一样拆出来单独存文件 —— 塞进 room.json 会把那个文件撑到几十 MB
+      if (l.maskImage) {
+        try {
+          const mb64 = l.maskImage.split(',')[1] || '';
+          fs.writeFileSync(path.join(dir, 'mask_' + l.id + '.png'), Buffer.from(mb64, 'base64'));
+          copy.maskImageFile = 'mask_' + l.id + '.png';
+        } catch (e) { /* ignore */ }
+      }
+      delete copy.maskImage;
       return copy;
     });
 
@@ -833,7 +889,14 @@ class RoomStore {
               copy.baseImage = 'data:image/png;base64,' + fs.readFileSync(f).toString('base64');
             }
           }
+          if (l.maskImageFile) {
+            const mf = path.join(dir, l.maskImageFile);
+            if (fs.existsSync(mf)) {
+              copy.maskImage = 'data:image/png;base64,' + fs.readFileSync(mf).toString('base64');
+            }
+          }
           delete copy.baseImageFile;
+          delete copy.maskImageFile;
           return copy;
         });
         const room = new Room(Object.assign({}, data, { id: e.name, layers, members: undefined }));

@@ -96,7 +96,7 @@
     // 三条一起构成一次原子替换：收齐之前房间内容不变，收不齐就整批丢弃。
     // 只允许房主，且只应该在刚建好的空房里用（会把现有图层和笔迹全部换掉）。
     PROJECT_BEGIN: 'project:begin', // { count } 开始装载，服务端开暂存区
-    PROJECT_LAYER: 'project:layer', // { index, name, visible, opacity, locked, alphaLock, blend, png }
+    PROJECT_LAYER: 'project:layer', // { index, name, visible, opacity, locked, alphaLock, blend, clip, maskEnabled, maskPng, groupId, png }
     PROJECT_END: 'project:end',     // {} 收齐后整体替换房间文档
 
     CHAT: 'chat',                   // { text, img? } —— 游戏中时 text 会被当成猜词
@@ -367,6 +367,30 @@
     out.mix = clampNum(src.mix, BRUSH_DEFAULTS.mix, 0, 1);
     out.tip = normalizeTip(src.tip);
     out.seed = Math.floor(clampNum(src.seed, 0, 0, 2147483646));
+    /**
+     * 文字字段只在 tool='text' 时输出。
+     *
+     * ⚠️ 这里曾经漏掉过一个**功能性 bug**：文字笔迹的 text / fontFamily / fontSize
+     * 从来没被输出过，而 server 的 buildStroke 是从 `normalizeBrush(msg)` 里取
+     * `br.text` 的 —— 于是它拿到的永远是 undefined，落库成 ''。
+     * 结果是「自己画得体，别人那边一片空白」：跨端同步整条断掉，
+     * 而 test-text 里那条「跨端一致」的断言因为重建时直接抄了原对象的 text 值，
+     * 自己跟自己比，一直假绿。
+     *
+     * 之所以按 tool 条件输出：普通笔迹没必要背 text（可能上千字符）和一堆字体字段，
+     * 房间历史里几千条笔迹叠起来就是几百 KB 的白白开销。
+     */
+    if (src.tool === 'text') {
+      out.text = normalizeText(src.text);
+      out.fontFamily = normalizeFontFamily(src.fontFamily);
+      out.fontSize = Math.round(clampNum(src.fontSize, 32, 6, 400));
+      out.bold = !!src.bold;
+      out.italic = !!src.italic;
+      out.align = pickOne(['left', 'center', 'right'], src.align, 'left');
+      out.lineHeight = clampNum(src.lineHeight, 1.35, 0.8, 3);
+    }
+    // 这笔画在图层上还是图层蒙版上。只在真是蒙版时才带上，普通笔迹不必背这个字段。
+    if (src.target === 'mask') out.target = 'mask';
     return out;
   }
 

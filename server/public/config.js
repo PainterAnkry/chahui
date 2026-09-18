@@ -11,7 +11,7 @@ window.CHAHU_CONFIG = {
   defaultName: '',
   appName: '茶绘',
   // 版本号：关于页显示 + 和 GitHub 的最新 release 比对
-  appVersion: '1.10.0',
+  appVersion: '2.0.1',
   // 开源仓库（更新检测用）
   repo: 'PainterAnkry/chahui'
 };
@@ -29,6 +29,9 @@ window.CHAHU = window.CHAHU || {};
     if (!url) return '';
     url = String(url).trim();
     if (!url) return '';
+    // 离线模式用一个**假地址**占位。它不是网络地址，绝不能被拼成 ws://local:///ws ——
+    // 网络层看到它就会改走「主进程里那份服务端」，不占端口也不出网。
+    if (/^local:\/\//i.test(url)) return 'local://';
     if (/^wss?:\/\//i.test(url)) return url;
     if (/^https:\/\//i.test(url)) return 'wss://' + url.slice(8).replace(/\/+$/, '') + '/ws';
     if (/^http:\/\//i.test(url)) return 'ws://' + url.slice(7).replace(/\/+$/, '') + '/ws';
@@ -120,6 +123,13 @@ window.CHAHU = window.CHAHU || {};
 
   function lanBase() { return LAN; }
 
+  /**
+   * 运行时改局域网地址。启动时那条 ?lan= 是主进程**开窗口那一刻**定下的，
+   * 而用户可以在界面上把服务器开起来 / 关掉 —— 那时候 query 已经改不了了，
+   * 所以必须能后补。（关掉服务器就传空串，入口页那条提示自然收起来。）
+   */
+  function setLan(base) { LAN = base || ''; }
+
   window.ChaConfig = {
     normalize: normalize,
     resolve: resolve,
@@ -132,6 +142,7 @@ window.CHAHU = window.CHAHU || {};
     setAvatar: setAvatar,
     queryRoom: queryRoom,
     lanBase: lanBase,
+    setLan: setLan,
     cfg: CFG
   };
 })();

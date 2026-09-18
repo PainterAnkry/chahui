@@ -1945,14 +1945,14 @@
   function renderConn(status) {
     var dot = $('#connDot');
     dot.className = 'dot';
-    if (status === 'online') dot.classList.add('on');
+    if (status === 'online') dot.classList.add(net.isLocal() ? 'off' : 'on');
     else if (status === 'connecting') dot.classList.add('off');
     else if (status === 'offline') dot.classList.add('err');
-    var label = { idle: '未连接', connecting: '连接中', online: '已连接', offline: '已断开' }[status] || status;
-    if (status === 'online' && net.latency) label += ' · ' + net.latency + 'ms';
+    var label = { idle: '未连接', connecting: '连接中', online: net.isLocal() ? '离线模式' : '已连接', offline: '已断开' }[status] || status;
+    if (status === 'online' && net.latency && !net.isLocal()) label += ' · ' + net.latency + 'ms';
     if (S.room) $('#roomMeta').textContent = S.room.width + '×' + S.room.height + ' · 在线 ' + (S.room.online || 0) + ' 人 · ' + label;
     if (status === 'offline') setStatus('连接断开，正在重连…');
-    else if (status === 'online') setStatus('已连接 ' + net.url);
+    else if (status === 'online') setStatus(net.isLocal() ? '离线模式 · 本机独自画，不联机' : ('已连接 ' + net.url));
   }
 
   /* ============================================================ 图层 */
@@ -2152,6 +2152,20 @@
     return row;
   }
 
+  /** 图层工具条上那几个蒙版控件的状态 */
+  function syncMaskHead(l) {
+    var has = !!(l && l.hasMask);
+    var clipEl = $('#clipChk');
+    if (clipEl) { clipEl.checked = !!(l && l.clip); clipEl.disabled = !l; }
+    var add = $('#btnMaskAdd'), ed = $('#btnMaskEdit'), del = $('#btnMaskDel');
+    if (add) { add.classList.toggle('hidden', has); add.disabled = !l; }
+    if (ed) {
+      ed.classList.toggle('hidden', !has);
+      ed.textContent = (l && S.maskEdit === l.id) ? '退出蒙版' : '编辑蒙版';
+    }
+    if (del) del.classList.toggle('hidden', !has);
+  }
+
   function syncLayerHead() {
     $('#layerCount').textContent = engine.layers.length;
     var tag = $('#layerSelTag');
@@ -2170,6 +2184,7 @@
       $('#alphaLockChk').checked = false;
       $('#lockChk').disabled = true;
       $('#alphaLockChk').disabled = true;
+      syncMaskHead(null);
       return;
     }
     $('#lockChk').disabled = false;
@@ -2181,6 +2196,7 @@
     $('#layerOpacityVal').textContent = Math.round(l.opacity * 100);
     $('#alphaLockChk').checked = !!l.alphaLock;
     $('#lockChk').checked = !!l.locked;
+    syncMaskHead(l);
   }
 
   /** 头顶栏改了：作用在「当前选中的组」还是「当前图层」 */
@@ -2741,6 +2757,8 @@
       $('#serverInput').value = net.url || Cfg.resolve();
       renderAvaPreview();
       renderLanBar();
+      renderServerToggle();
+      refreshServerState();
       if (net.isOpen()) net.send(P.C2S.ROOM_LIST, {});
       else toast('尚未连接到服务器，房间列表可能为空');
       bindCreateSizeToggle();
@@ -2768,6 +2786,148 @@
       toast(lan);
     }
   }
+
+  /* ============================================== 本机服务器开关（桌面端） */
+
+  /**
+   * 桌面端才有「本机服务器」。网页版必须连别人的服务器，这一整行直接藏掉，
+   * 免得摆一个点了永远没反应的按钮在那儿。
+   */
+  function desktopBridge() {
+    var D = global.chahuDesktop;
+    return (D && D.isDesktop && D.serverStart) ? D : null;
+  }
+
+  /** 服务器现状：开着吗 / 端口 / 局域网地址。known = 还没问到过 */
+  var srvState = { on: false, port: 0, lan: [], known: false };
+
+  function srvLanText() {
+    if (!srvState.on || !srvState.lan.length) return '';
+    return 'http://' + srvState.lan[0] + (srvState.port ? ':' + srvState.port : '');
+  }
+
+  /**
+   * 画那颗按钮。**动作**和**状态**刻意分开：按钮上永远写「你现在能做的事」，
+   * 右边那行小字才写「现在是什么样」—— 两者混在一个按钮上，用户分不清
+   * 「关闭服务器」到底是当前状态还是将要执行的动作。
+   */
+  function renderServerToggle() {
+    var row = $('#srvRow');
+    if (!row) return;
+    if (!desktopBridge()) { row.classList.add('hidden'); return; }
+    row.classList.remove('hidden');
+
+    var btn = $('#btnServerToggle');
+    var st = $('#srvState');
+    var hint = $('#srvHint');
+    if (!srvState.known) {
+      btn.textContent = '检测中…';
+      btn.disabled = true;
+      st.className = 'srv-state';
+      st.textContent = '正在读取服务器状态…';
+      return;
+    }
+    btn.disabled = false;
+    var lan = srvLanText();
+    if (srvState.on) {
+      btn.textContent = '关闭服务器';
+      st.className = 'srv-state on';
+      st.textContent = '已开启' + (lan ? ' · ' + lan : (srvState.port ? ' · 端口 ' + srvState.port : ''));
+      hint.textContent = '同一 WiFi 的朋友用浏览器打开上面的地址就能加入。关掉后进入离线模式，自己单机画。';
+    } else {
+      btn.textContent = '开启服务器';
+      st.className = 'srv-state off';
+      st.textContent = net.isLocal() ? '已关闭 · 离线模式（当前）' : '已关闭';
+      hint.textContent = '离线模式不占端口、不出网，自己单机画。在下面「创建新房间」就能开始。';
+    }
+  }
+
+  /** 主进程报来的服务器状态（开机问一次，之后它一有变化就会推） */
+  function applyServerState(s) {
+    if (!s) return;
+    srvState.on = !!s.on;
+    srvState.port = s.port || 0;
+    srvState.lan = s.lan || [];
+    srvState.known = true;
+    // 局域网地址是「开窗口那一刻」通过 ?lan= 写死的，服务器后来才起来的话 query 已经改不了了，
+    // 所以必须能后补。关掉服务器就清空 —— 入口页那条提示自然收起来。
+    if (Cfg.setLan) Cfg.setLan(srvLanText());
+    renderLanBar();
+    renderServerToggle();
+    refreshMenuChecks();
+  }
+
+  /** 菜单里「其他 → 本机服务器」前面有个 ✓，得跟着状态重画（菜单是启动时一次性渲染的） */
+  function refreshMenuChecks() {
+    if (global.ChaMenu && global.ChaMenu.buildMenuBar) global.ChaMenu.buildMenuBar();
+  }
+
+  function refreshServerState() {
+    var D = desktopBridge();
+    if (!D || !D.serverStatus) return;
+    D.serverStatus().then(applyServerState, function () {
+      srvState.known = true; renderServerToggle();
+    });
+  }
+
+  /** 切服务器会退出当前房间 —— 画过东西就先问一句，别让人白画 */
+  function confirmSrvSwitch() {
+    if (!S.joined) return true;
+    if (!engine.strokes.length) return true;
+    var name = S.room ? S.room.name : '当前房间';
+    return confirm('切换服务器会退出「' + name + '」。\n房间里的内容还留在原来那台服务器上，不会丢。\n\n确定继续吗？');
+  }
+
+  /**
+   * 开 / 关本机服务器，并让客户端跟着换通道。
+   *
+   * 「关」不是断开连接，是**真的把服务器停掉**（不再监听端口，同机别的程序也连不进来）。
+   * 停掉之后还能接着画，靠的是离线模式（local://）：主进程里挂一个不走 socket 的客户端，
+   * 房间状态机是同一份 —— 所以在线怎么画、离线就怎么画。
+   */
+  function setServerOn(on) {
+    var D = desktopBridge();
+    if (!D) { toast('网页版没有本机服务器，填服务器地址连过去就行', 'err'); return; }
+    if (!confirmSrvSwitch()) return;
+    var btn = $('#btnServerToggle');
+    if (btn) { btn.disabled = true; btn.textContent = on ? '正在开启…' : '正在关闭…'; }
+
+    // 先断开、退出房间，再动手。顺序很重要：
+    //  · 关服务器时如果我们自己的 ws 还连着，server.close() 的回调会一直等它 —— 界面就卡住了
+    //  · 不断开的话，换通道后 net 的 open 回调会拿着旧房间号去新后端重连
+    var before = function () {
+      if (S.joined) resetRoomUi('');
+      net.close();
+    };
+
+    var step = on ? D.serverStart() : D.serverStop();
+    var p = (step && step.then) ? step : Promise.resolve(step);
+
+    before();
+
+    p.then(function (r) {
+      if (on && (!r || !r.ok)) {
+        toast('服务器没起来：' + ((r && r.error) || '未知原因'), 'err', 4200);
+        return;
+      }
+      if (on) {
+        var port = (r && r.port) || 8437;
+        applyServer('ws://localhost:' + port + '/ws');
+        var lan = (r && r.lan && r.lan.length) ? (' · 同一 WiFi 打开 http://' + r.lan[0] + ':' + port + ' 就能加入') : '';
+        toast('服务器已开启' + lan, 'ok', 4200);
+      } else {
+        applyServer(global.Net.LOCAL_URL);
+        toast('服务器已关闭，已切到离线模式（本机独自画，不联机）', 'ok', 3600);
+      }
+    }).catch(function (e) {
+      toast('切换失败：' + ((e && e.message) || e), 'err', 4200);
+    }).then(function () {
+      refreshServerState();
+      renderServerToggle();
+    });
+  }
+
+  function toggleServer() { setServerOn(!srvState.on); }
 
   /** 空房 = 没人在线 + 一笔没画 + 没有底图。服务端在 summary() 里给的就是这个口径。 */
   var lastRoomList = [];
@@ -3121,6 +3281,9 @@
     var base = {
       id: id,
       layerId: layer.id,
+      // 正在编辑这一层的蒙版时，落下的每一笔都改蒙版（黑遮白露），不改图层像素。
+      // 服务端与别人按 target 分流，所以两边看到的是同一件事。
+      target: (S.maskEdit && S.maskEdit === layer.id) ? 'mask' : 'layer',
       userId: S.me.userId,
       tool: S.tool,
       color: (S.tool === 'eraser' || S.tool === 'blur') ? '#000000' : S.color,
@@ -3765,6 +3928,9 @@
         engine.seq = Math.max(engine.seq, lastSeq);
         var bases = (msg.history && msg.history.baseImages) || {};
         Object.keys(bases).forEach(function (lid) { engine.setBaseImage(lid, bases[lid]); });
+        // 蒙版像素（只有导入 / 固化过的房间才有）。平时蒙版靠笔迹重放重建，这里是补漏。
+        var masks = (msg.history && msg.history.maskImages) || {};
+        Object.keys(masks).forEach(function (lid) { engine.setMaskImage(engine.getLayer(lid), masks[lid]); });
 
         S.members = msg.members || [];
         renderMembers();
@@ -3826,8 +3992,10 @@
         if (msg.patch) {
           if (msg.patch.id === (S.room && S.room.id)) {
             var bases = msg.patch.baseImages;
+            var mmasks = msg.patch.maskImages;
             Object.assign(S.room, msg.patch);
             if (bases) Object.keys(bases).forEach(function (lid) { engine.setBaseImage(lid, bases[lid]); });
+            if (mmasks) Object.keys(mmasks).forEach(function (lid) { engine.setMaskImage(engine.getLayer(lid), mmasks[lid]); });
             engine.background = S.room.background;
           }
           renderRoomChip();
@@ -3847,7 +4015,7 @@
       case P.S2C.LAYERS: {
         // 第三份是组表：**必须传**。少了它，engine 里永远没有组对象，
         // layerRowEl 就不缩进、合成也不按组走 —— 看起来像「组创建成功但一点效果都没有」。
-        engine.setLayers(msg.layers || [], msg.baseImages || null, msg.groups || null);
+        engine.setLayers(msg.layers || [], msg.baseImages || null, msg.groups || null, msg.maskImages || null);
         // 不变式：engine.seq 必须 ≥ 每一层的 baseSeq。
         // 新笔迹拿到的 seq 是 ++engine.seq，一旦它 ≤ 某个图层的 baseSeq，
         // renderLayerFromHistory 就会把这笔当「已固化的旧笔迹」跳过 ——
@@ -5858,6 +6026,55 @@
 
     $('#lockChk').addEventListener('change', function () { patchActiveLayer({ locked: this.checked }); });
 
+    /* ---- 图层蒙版 ----
+     * 蒙版用 alpha 表示「该处显示多少」，画的时候**黑遮白露**（跟 Photoshop 一样）。
+     * 在蒙版上涂抹走的是普通笔迹通道（笔迹带 target='mask'），所以
+     * 同步 / 撤销 / 回放全是现成的，不用另造一套。
+     */
+    S.maskEdit = null;
+
+    function setMaskEdit(id) {
+      var l = id ? engine.getLayer(id) : null;
+      if (!l || !l.hasMask) id = null;
+      S.maskEdit = id;
+      if (id) toast('正在编辑「' + l.name + '」的蒙版 —— 黑笔遮住、白笔露出');
+      syncMaskHead(engine.activeLayer());
+    }
+
+    $('#clipChk').addEventListener('change', function () { patchActiveLayer({ clip: this.checked }); });
+
+    $('#btnMaskAdd').addEventListener('click', function () {
+      var l = engine.activeLayer();
+      if (!l || l.hasMask) return;
+      net.send(P.C2S.LAYER_UPD, { layerId: l.id, patch: { hasMask: true } });
+      // 本地立刻建出来：服务端只记「有 / 没有」这个标记，像素是本地建的，
+      // 不等回包才建否则点完要过一会儿才能画
+      l.hasMask = true;
+      engine.ensureMask(l);
+      engine.baseDirty = true; engine.baseKey = ''; engine.invalidate();
+      syncLayerHead();
+      setMaskEdit(l.id);
+    });
+
+    $('#btnMaskEdit').addEventListener('click', function () {
+      var l = engine.activeLayer();
+      if (!l || !l.hasMask) return;
+      setMaskEdit(S.maskEdit === l.id ? null : l.id);
+    });
+
+    $('#btnMaskDel').addEventListener('click', function () {
+      var l = engine.activeLayer();
+      if (!l || !l.hasMask) return;
+      net.send(P.C2S.LAYER_UPD, { layerId: l.id, patch: { hasMask: false } });
+      engine.dropMask(l);
+      if (S.maskEdit === l.id) S.maskEdit = null;
+      // 涂这张蒙版的那几笔已随蒙版一起清掉，撤销栈里指向它们的条目也要清
+      pruneUndo();
+      syncLayerHead();
+      renderHistory();
+      toast('已丢掉这张蒙版（图层像素没动）');
+    });
+
     /* ---- 表情包 ---- */
 
     bindStickers();
@@ -6048,6 +6265,8 @@
       setTimeout(function () { net.send(P.C2S.ROOM_LIST, {}); }, 350);
     });
     $('#btnCopyLan').addEventListener('click', copyLan);
+    var btnSrv = $('#btnServerToggle');
+    if (btnSrv) btnSrv.addEventListener('click', toggleServer);
     var btnAva = $('#btnPickAvatar');
     if (btnAva) btnAva.addEventListener('click', pickAvatar);
     var btnAvaClr = $('#btnClearAvatar');
@@ -6073,6 +6292,19 @@
         fr.onload = function () { loadProjectText(String(fr.result || ''), f.name); };
         fr.onerror = function () { toast('这个文件读不出来', 'err'); };
         fr.readAsText(f);
+      });
+    }
+    // PSD 要按**字节**读（二进制），不能 readAsText —— 一旦当了文本，解回来的字节就已经不是原来那些了
+    var psdInput = $('#psdFileInput');
+    if (psdInput) {
+      psdInput.addEventListener('change', function () {
+        var f = psdInput.files && psdInput.files[0];
+        psdInput.value = '';
+        if (!f) return;
+        var fr = new FileReader();
+        fr.onload = function () { importPsdBytes(new Uint8Array(fr.result || []), f.name); };
+        fr.onerror = function () { toast('这个文件读不出来', 'err'); };
+        fr.readAsArrayBuffer(f);
       });
     }
     // 关页面 / 刷新：同步记一笔「干净退出」，下次启动才知道要不要提示恢复草稿
@@ -7895,7 +8127,12 @@
     syncViewBar();
     refreshNav();
 
-    net.on('status', function (e) { renderConn(e.status); });
+    net.on('status', function (e) {
+      renderConn(e.status);
+      // 网络层带话过来时以它为准：比如「离线模式只有桌面端有」这种，比一句
+      // 笼统的「连接断开」有用得多
+      if (e && e.message) setStatus(e.message);
+    });
     net.on('open', function () {
       if (S.room && S.room.id && S.me.name) {
         setStatus('已重连，正在回到「' + S.room.name + '」…');
@@ -7910,6 +8147,13 @@
 
     // 头像和昵称一样是「我是谁」的一部分：本地存着，启动就带回来
     S.me.avatar = Cfg.getAvatar ? (Cfg.getAvatar() || '') : '';
+    // 本机服务器开关：先问一次现状，之后主进程一有变化就会推过来（托盘 / 别处关了也能同步）
+    if (desktopBridge()) {
+      if (global.chahuDesktop.onServerState) global.chahuDesktop.onServerState(applyServerState);
+      refreshServerState();
+    } else {
+      renderServerToggle();
+    }
     var server = Cfg.resolve();
     $('#serverInput').value = server;
     net.connect(server);
@@ -9723,6 +9967,58 @@
     openProjectDoc(pj);
   }
 
+  /* ------------------------------------------------ 导入 PSD */
+
+  function b64ToBytes(b64) {
+    var s = global.atob(b64);
+    var out = new Uint8Array(s.length);
+    for (var i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+    return out;
+  }
+
+  /**
+   * 把一份 PSD 的字节读成「伪工程」再装载。
+   * 伪工程和 project.js 的 doc 同形，于是 openProjectDoc 那条「新建房间 + 分片上传」
+   * 的路一个字都不用改就能复用 —— 导入不需要第二套装载机制。
+   */
+  function importPsdBytes(bytes, name) {
+    var RD = global.ChaPsdRead;
+    if (!RD) { toast('PSD 读取器没加载上来（psd-read.js 没进来）', 'err', 8000); return false; }
+    if (!bytes || !bytes.length) { toast('这个文件是空的', 'err'); return false; }
+    var pj;
+    try {
+      pj = RD.toProject(bytes, { name: String(name || '').replace(/\.ps[bd]$/i, '') });
+    } catch (e) {
+      // 读不动的理由要说人话：是位深不对、颜色模式不对、还是压缩方式不支持，
+      // 用户得知道下一步该在 Photoshop 里改什么
+      toast('读不了这份 PSD：' + e.message, 'err', 12000);
+      return false;
+    }
+    // 「跳过了什么」必须讲出来 —— 默默少东西是最难查的那类毛病
+    (pj.notes || []).slice(0, 4).forEach(function (n, i) {
+      setTimeout(function () { toast(n, 'warn', 7000); }, 350 + i * 260);
+    });
+    toast('PSD 已读入：' + RD.describe(pj), 'ok', 5000);
+    openProjectDoc(pj);
+    return true;
+  }
+
+  function pickPsdFile() {
+    if (global.chahuDesktop && global.chahuDesktop.openFile) {
+      global.chahuDesktop.openFile('psd').then(function (r) {
+        if (!r || r.canceled) return;
+        if (!r.ok) { toast('打开失败：' + (r.error || '未知错误'), 'err', 7000); return; }
+        if (!r.b64) { toast('这个文件读出来是空的', 'err'); return; }
+        importPsdBytes(b64ToBytes(r.b64), r.name);
+      });
+      return;
+    }
+    var input = $('#psdFileInput');
+    if (!input) return;
+    input.value = '';
+    input.click();
+  }
+
   function openProjectDoc(pj, opts) {
     opts = opts || {};
     if (!net.isOpen()) { toast('还没连上服务器', 'err'); return; }
@@ -9755,8 +10051,8 @@
 
     var layers = job.doc.layers;
     if (layers.length > PJ.MAX_LAYERS) {
-      toast('这份工程有 ' + layers.length + ' 层，超过上限 ' + PJ.MAX_LAYERS + '，只装载前 ' +
-        PJ.MAX_LAYERS + ' 层', 'err', 9000);
+      toast('这份工程有 ' + layers.length + ' 层，超过上限 ' + PJ.MAX_LAYERS + '，只装载最下面 ' +
+        PJ.MAX_LAYERS + ' 层（上面的没进来）', 'err', 9000);
       layers = layers.slice(0, PJ.MAX_LAYERS);
     }
     // 组表跟着 BEGIN 走：它很小（没有像素），而且必须比第一个图层先到，
@@ -9776,6 +10072,11 @@
         index: i,
         name: l.name, visible: l.visible, opacity: l.opacity,
         locked: l.locked, alphaLock: l.alphaLock, blend: l.blend,
+        // 剪贴蒙版与图层蒙版都得跟着上车，否则「导入 PSD 之后剪贴没了、蒙版没了」——
+        // 它们在 PSD 里是最常见的两种结构，丢了就是导入得不对
+        clip: !!l.clip,
+        maskEnabled: l.maskEnabled !== false,
+        maskPng: (typeof l.maskPng === 'string' && l.maskPng) ? l.maskPng : null,
         groupId: l.groupId || null,
         png: l.png
       });
@@ -9886,6 +10187,9 @@
     openProject: pickProjectFile,
     loadProjectText: loadProjectText,
     openProjectDoc: openProjectDoc,
+    // PSD 导入。测试里可以直接灌字节进来（importPsdBytes），不用真去选文件
+    importPsd: pickPsdFile,
+    importPsdBytes: importPsdBytes,
     dropDraft: dropDraft,
     // 自动保存本来是 25 秒一次的定时器；测试里等不起，直接给个「现在就存一遍」的入口
     autosaveNow: autosaveTick,
@@ -9893,6 +10197,12 @@
 
     /* ---- 菜单栏 / 快捷键要用到的动作（菜单结构见 menu.js） ---- */
     openEntry: openEntry, doExport: doExport, doShare: doShare, showInfo: showInfo,
+    // 本机服务器开关（桌面端）：入口页那颗按钮 + 菜单里的「其他 → 本机服务器」
+    toggleServer: toggleServer,
+    setServerOn: setServerOn,
+    serverOn: function () { return !!srvState.on; },
+    serverState: function () { return srvState; },
+    refreshServerState: refreshServerState,
     toggleRecord: toggleRecord,
     toggleReplay: function () { if (engine.replayMode) stopReplay(); else startReplay(); },
     exportReplayVideo: exportReplayVideo,

@@ -83,7 +83,21 @@ function parse(buf) {
     const extraStart = q;
 
     let x = q;
-    const maskLen = buf.readUInt32BE(x); x += 4 + maskLen;
+    const maskLen = buf.readUInt32BE(x); x += 4;
+    // 图层蒙版数据块：矩形(16) + 默认色(1) + 标志(1) 起。矩形全 0 = 这层没有蒙版。
+    // 只跳过是不够的 —— 「蒙版到底写没写出去」正是测试要断言的东西。
+    L.maskRect = null; L.maskFlags = 0;
+    if (maskLen >= 18) {
+      const mr = {
+        top: buf.readInt32BE(x), left: buf.readInt32BE(x + 4),
+        bottom: buf.readInt32BE(x + 8), right: buf.readInt32BE(x + 12)
+      };
+      if (mr.bottom > mr.top && mr.right > mr.left) {
+        L.maskRect = mr;
+        L.maskFlags = buf[x + 17];
+      }
+    }
+    x += maskLen;
     const brLen = buf.readUInt32BE(x); x += 4 + brLen;
     const nlen = buf[x]; x += 1;
     L.pascalName = buf.toString('latin1', x, x + nlen);
