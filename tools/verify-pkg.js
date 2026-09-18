@@ -27,12 +27,21 @@ if (!fs.existsSync(ASAR)) {
 const CHECKS = [
   ['renderer/config.js', [/appVersion:\s*'([0-9.]+)'/]],
   ['renderer/engine.js', [/renderUnits/, /composeGroup/, /activeGroupIds/]],
-  ['renderer/app.js', [/groupAdd/, /pickUpdateAsset/, /groups/]],
+  ['renderer/app.js', [/groupAdd/, /pickUpdateAsset/, /groups/, /tunnelRowHtml/, /setMyAvatar/, /shrinkAvatar/]],
   ['renderer/project.js', [/groups/]],
-  ['server/rooms.js', [/normalizeGroups/, /moveGroup/, /setLayerGroup/]],
-  ['server/index.js', [/GROUP_ADD/, /GROUP_UPD/]],
-  ['preload.js', [/downloadUpdate/]],
-  ['main.js', [/chahu:download-update/]]
+  // PSD 导出（v1.10.0）：整块自己写的编码器，特征挑格式里最认得出的几个
+  ['renderer/psd.js', [/8BPS/, /luni/, /lddg/, /packbits/]],
+  // 游戏音效（v1.10.0）：回合结算音 + 音量滑块
+  ['renderer/sfx.js', [/roundEnd/, /setVolume/]],
+  // 头像（v1.10.0）：成员表那个白名单必须带上 avatar，否则别人永远收不到
+  ['server/rooms.js', [/normalizeGroups/, /moveGroup/, /setLayerGroup/, /avatar/]],
+  ['server/index.js', [/GROUP_ADD/, /GROUP_UPD/, /MEMBER_AVATAR/, /GAME_GUESS/]],
+  // 中途进房的人先观战（v1.10.0）
+  ['server/game.js', [/spectators/]],
+  // 应用内一键隧道（v1.10.0）：模块本身也要真的进包
+  ['tunnel.js', [/createTunnel/, /trycloudflare/]],
+  ['preload.js', [/downloadUpdate/, /startTunnel/]],
+  ['main.js', [/chahu:download-update/, /chahu:tunnel-start/]]
 ];
 
 const pkgVersion = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;

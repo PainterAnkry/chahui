@@ -48,7 +48,7 @@
   /* ============================================================ 状态 */
 
   var S = {
-    me: { userId: null, name: '', color: '#888', isOwner: false, readonly: false },
+    me: { userId: null, name: '', color: '#888', avatar: '', isOwner: false, readonly: false },
     // 图层面板里当前选中的「组」（null = 选中的是某个图层）。
     // 组和图层**共用**头顶栏（混合模式 / 不透明度）与那几个操作按钮，
     // 靠这个字段决定它们作用在谁身上 —— 见 selKind() / syncLayerHead()。
@@ -67,6 +67,8 @@
     gameSkew: 0,
     gameRoundKey: '',     // 「第几回合 + 阶段」去重，用来判断要不要弹结算卡片
     gameWordShown: '',    // 已经提示过的词，避免每次状态同步都再弹一次
+    hintKey: '',          // 已经响过提示音的「露字」去重键
+    tickAt: -1,           // 倒计时音效已经响到第几秒（250ms 的定时器不能每次都响）
     // 接龙：这一步轮到我做什么（服务端 GAME_TASK 单发，只有我能收到）
     // 我拿到的是「答案」而不是「题面」时（作画/猜词那两步），聊天要闭嘴，免得剧透
     chainTask: null,
@@ -109,6 +111,8 @@
     recent: [],
     hue: 0, sv: { s: 1, v: 1 },
     publicUrl: '',            // 服务端开了公网隧道时由 /api/share 带回
+    // 桌面端「公网联机」的状态（主进程推过来）：off / downloading / starting / on
+    tunnel: { phase: 'off', url: '', error: '', percent: 0 },
     lanUrls: [],
     session: null,
     pan: null,
@@ -2620,7 +2624,7 @@
       var el = document.createElement('div');
       el.className = 'member';
       el.innerHTML =
-        '<div class="ava" style="background:' + esc(m.color) + '">' + esc((m.name || '?').slice(0, 1)) + '</div>' +
+        avaHtml(m.userId, m.name, m.color) +
         '<div class="info"><b>' + esc(m.name) +
         (m.isOwner ? '<span class="badge">房主</span>' : '') +
         (m.readonly ? '<span class="badge guest">观众</span>' : '') +
@@ -2685,7 +2689,7 @@
       el.className = 'msg' + (m.userId === S.me.userId ? ' mine' : '');
       var pic = m.img ? P.normalizeSticker(m.img) : '';
       el.innerHTML =
-        '<div class="ava" style="background:' + esc(m.color || '#999') + '">' + esc((m.name || '?').slice(0, 1)) + '</div>' +
+        avaHtml(m.userId, m.name, m.color || '#999') +
         '<div class="body"><div class="head"><b>' + esc(m.name) + '</b><span>' + fmtTime(m.ts) + '</span></div>' +
         (pic ? '<img class="stick" src="' + pic + '" alt="表情" loading="lazy">' : '') +
         (m.text ? '<div class="text">' + esc(m.text) + '</div>' : '') +
@@ -2735,6 +2739,7 @@
     if (show) {
       $('#nameInput').value = S.me.name || Cfg.getName() || '';
       $('#serverInput').value = net.url || Cfg.resolve();
+      renderAvaPreview();
       renderLanBar();
       if (net.isOpen()) net.send(P.C2S.ROOM_LIST, {});
       else toast('尚未连接到服务器，房间列表可能为空');
@@ -2843,7 +2848,11 @@
   /* ---- 房间密码：所有 ROOM_JOIN 都走这里，保证 pendingJoin / 记住密码一致 ---- */
   function joinRoom(roomId, name, password) {
     S.pendingJoin = { roomId: roomId, name: name };
-    net.send(P.C2S.ROOM_JOIN, { roomId: roomId, user: name, password: password || '' });
+    net.send(P.C2S.ROOM_JOIN, {
+      roomId: roomId, user: name, password: password || '',
+      // 头像跟昵称一起走：进房那一刻别人就该看到，而不是等我再改一次
+      avatar: S.me.avatar || Cfg.getAvatar() || ''
+    });
   }
 
   function passStore() {
@@ -2909,6 +2918,7 @@
     net.send(P.C2S.ROOM_CREATE, {
       name: ($('#newRoomName').value || '').trim() || (name + '的茶绘室'),
       user: name,
+      avatar: S.me.avatar || Cfg.getAvatar() || '',
       width: width,
       height: height,
       background: currentPaper(),
@@ -2928,6 +2938,101 @@
         if (!$('#newRoomH').value) $('#newRoomH').value = preset[1];
       }
     });
+  }
+
+  /* ------------------------------------------------------------ 个人头像 */
+
+  /** 界面上的小圆头像：有图用图，没图退回「颜色 + 名字首字」（一直是兜底，不会空着） */
+  function avaOf(userId) {
+    if (!userId) return '';
+    if (userId === S.me.userId) return S.me.avatar || '';
+    var m = (S.members || []).filter(function (x) { return x.userId === userId; })[0];
+    return (m && m.avatar) || '';
+  }
+
+  function avaHtml(userId, name, color) {
+    var src = avaOf(userId);
+    if (src) return '<div class="ava has-img"><img src="' + esc(src) + '" alt=""></div>';
+    return '<div class="ava" style="background:' + esc(color) + '">' + esc((name || '?').slice(0, 1)) + '</div>';
+  }
+
+  /**
+   * 把选中的图压成头像。
+   *
+   * 96px 见方是**协议层的硬上限**（48KB）倒推出来的：头像会跟着每一次成员广播
+   * 发给全房，40 人的房间要是每人一张 100KB 的图，一次广播就是 4MB。
+   * 先试 PNG（带透明更好看），太大再退到 JPEG；JPEG 没有 alpha，所以先垫白底
+   * —— 否则透明区域会变成黑块。
+   */
+  function shrinkAvatar(img) {
+    var max = 96;
+    var w = img.width || img.naturalWidth || 0, h = img.height || img.naturalHeight || 0;
+    if (!w || !h) return '';
+    var k = Math.min(1, max / Math.max(w, h));
+    var cw = Math.max(1, Math.round(w * k)), ch = Math.max(1, Math.round(h * k));
+    var c = document.createElement('canvas');
+    c.width = cw; c.height = ch;
+    var cx = c.getContext('2d');
+    cx.drawImage(img, 0, 0, cw, ch);
+    var png = c.toDataURL('image/png');
+    if (png.length <= P.AVATAR_MAX) return png;
+    // JPEG 没有 alpha：不垫白底的话，透明区域出来会是黑块
+    var flat = document.createElement('canvas');
+    flat.width = cw; flat.height = ch;
+    var fx = flat.getContext('2d');
+    fx.fillStyle = '#ffffff';
+    fx.fillRect(0, 0, cw, ch);
+    fx.drawImage(c, 0, 0);
+    var qs = [0.9, 0.8, 0.7, 0.6, 0.5];
+    for (var i = 0; i < qs.length; i++) {
+      var j = flat.toDataURL('image/jpeg', qs[i]);
+      if (j.length <= P.AVATAR_MAX) return j;
+    }
+    return '';
+  }
+
+  function pickAvatar() {
+    var inp = document.createElement('input');
+    inp.type = 'file';
+    inp.accept = 'image/*';
+    inp.onchange = function () {
+      var f = inp.files && inp.files[0];
+      if (!f) return;
+      if (!/^image\//.test(f.type || '')) { toast('请选一张图片文件', 'err'); return; }
+      if (f.size > 12 * 1024 * 1024) { toast('这张图太大了（超过 12MB）', 'err'); return; }
+      var url = URL.createObjectURL(f);
+      var img = new Image();
+      img.onload = function () {
+        URL.revokeObjectURL(url);
+        var data = '';
+        try { data = shrinkAvatar(img); } catch (e) { data = ''; }
+        if (!data) { toast('这张图压不成头像，换一张试试', 'err'); return; }
+        setMyAvatar(data);
+      };
+      img.onerror = function () { URL.revokeObjectURL(url); toast('这张图读不出来', 'err'); };
+      img.src = url;
+    };
+    inp.click();
+  }
+
+  /** 设 / 清自己的头像；已经进房的话顺手广播出去（不用重进房） */
+  function setMyAvatar(data) {
+    var next = P.normalizeAvatar(data || '');
+    Cfg.setAvatar(next);
+    S.me.avatar = next;
+    renderAvaPreview();
+    renderMembers();
+    if (S.joined) net.send(P.C2S.MEMBER_AVATAR, { avatar: next });
+    toast(next ? '头像已更新' : '已恢复默认头像（颜色 + 名字首字）', 'ok');
+  }
+
+  function renderAvaPreview() {
+    var el = $('#avaPreview');
+    if (!el) return;
+    var a = S.me.avatar || '';
+    el.innerHTML = a ? '<img src="' + esc(a) + '" alt="">' : '默认';
+    var c = $('#btnClearAvatar');
+    if (c) c.classList.toggle('hidden', !a);
   }
 
   function applyServer(url) {
@@ -3584,8 +3689,10 @@
     if (!entry) {
       var el = document.createElement('div');
       el.className = 'remote-cursor';
+      var cAva = avaOf(m.userId);
       el.innerHTML = '<div class="pin" style="background:' + esc(m.color || '#888') + '"></div>' +
-        '<div class="tag" style="background:' + esc(m.color || '#888') + '">' + esc(m.name || '') + '</div>';
+        '<div class="tag" style="background:' + esc(m.color || '#888') + '">' +
+        (cAva ? '<img class="tag-ava" src="' + esc(cAva) + '" alt="">' : '') + esc(m.name || '') + '</div>';
       $('#cursors').appendChild(el);
       entry = { el: el, name: m.name, color: m.color, timer: null, x: 0, y: 0 };
       S.cursors.set(m.userId, entry);
@@ -3632,6 +3739,11 @@
         S.me.userId = msg.you.userId;
         S.me.name = msg.you.name;
         S.me.color = msg.you.color;
+        // 头像以服务端回执为准（它可能因为太大 / 格式不对被丢掉，那就说一声，别让人以为设上了）
+        var wantAva = S.me.avatar || '';
+        S.me.avatar = msg.you.avatar || '';
+        if (wantAva && !S.me.avatar) toast('头像没被接受（图太大或格式不支持），已退回默认', 'warn', 3600);
+        renderAvaPreview();
         S.me.isOwner = !!msg.you.isOwner;
         S.me.readonly = !!msg.you.readonly;
         S.joined = true;
@@ -3679,6 +3791,13 @@
       case P.S2C.HISTORY_CHUNK: {
         (msg.strokes || []).forEach(function (s) { if (s) S.historyQueue.push(s); });
         drainHistory();
+        break;
+      }
+
+      case P.S2C.GAME_GUESS: {
+        // 只说给我自己听的猜词回执：猜错 / 很接近。裁定在服务端，这里只管响。
+        if (msg.kind === 'near') SFX.play('close');
+        else if (msg.kind === 'wrong') SFX.play('wrong');
         break;
       }
 
@@ -4511,8 +4630,8 @@
   }
 
   /* ================================================================
-   * 导出：png / jpg / jpeg / webp / bmp / tga
-   * 编码见 export-formats.js；这里只管选格式、问画质、把结果落盘。
+   * 导出：png / jpg / jpeg / webp / psd / bmp / tga
+   * 编码见 export-formats.js（PSD 在 psd.js）；这里只管选格式、问画质、把结果落盘。
    * ================================================================ */
 
   function buildExportFormats() {
@@ -4539,6 +4658,11 @@
       $('#exportNote').textContent = (f.alpha ? '带透明通道。' : '不支持透明，会垫白底。') +
         ' BMP / TGA 是茶绘自己写的编码器（浏览器不提供）。';
     }
+    if (f.id === 'psd') {
+      $('#exportNote').textContent =
+        '保留图层、图层组、图层名、浓度、混合模式与可见性；藏起来的层也会存进去（在 Photoshop 里是关着的）。' +
+        ' 茶绘自己写的 PSD 编码器。';
+    }
   }
 
   function openExportDialog() {
@@ -4553,16 +4677,18 @@
     if (!S.room) { toast('还没有进入房间'); return; }
     var f = global.ChaExport.byId(formatId || $('#exportFormat').value);
     var q = Number($('#exportQuality').value) / 100;
-    var canvas = engine.renderDocument({}).canvas;
     var data;
     try {
-      data = global.ChaExport.encode(canvas, f.id, q);
+      // PSD 走分层那条路：要的是文档结构，一张拍平的画布给不出图层
+      data = f.id === 'psd'
+        ? global.ChaExport.encode(null, f.id, q, engine)
+        : global.ChaExport.encode(engine.renderDocument({}).canvas, f.id, q);
     } catch (e) {
       toast('导出失败：' + e.message, 'err');
       return;
     }
     download(stampName() + '.' + f.ext, data);
-    toast('已导出 ' + f.ext.toUpperCase() + '（' + canvas.width + ' × ' + canvas.height + '）', 'ok', 3200);
+    toast('已导出 ' + f.ext.toUpperCase() + '（' + engine.width + ' × ' + engine.height + '）', 'ok', 3200);
   }
 
   /**
@@ -4609,6 +4735,118 @@
       .catch(function () { /* 没有就是没开隧道，忽略 */ });
   }
 
+  /* ---------------- 桌面端「公网联机」 ----------------
+   * 隧道跑在主进程（client/tunnel.js），这里只管三件事：
+   *   1. 接线：订阅状态、开/关
+   *   2. 把地址写进 S.publicUrl（这样分享链接、房间信息全都自动切到公网）
+   *   3. 房间信息面板正开着的时候，把那一行刷成当前进度
+   * 网页版没有这套 IPC，所以所有入口都先判 desktopTunnel()。
+   */
+
+  function desktopTunnel() {
+    return (global.chahuDesktop && global.chahuDesktop.isDesktop &&
+      global.chahuDesktop.startTunnel) ? global.chahuDesktop : null;
+  }
+
+  var tunnelWired = false;
+  function setupTunnelBridge() {
+    var d = desktopTunnel();
+    if (!d || tunnelWired) return d;
+    tunnelWired = true;
+    d.onTunnelState(function (s) {
+      if (!s) return;
+      S.tunnel = s;
+      // 只有「开着」的时候才认这个地址；隧道一断就必须把它清掉，
+      // 否则分享出去的是一个已经失效的链接
+      S.publicUrl = (s.phase === 'on' && s.url) ? s.url : '';
+      refreshTunnelUi();
+      if (s.phase === 'on' && s.url) toast('公网入口已就绪：' + s.url, 'ok', 5200);
+      else if (s.phase === 'off' && s.error) toast('公网联机失败：' + s.error, 'err', 5200);
+    });
+    // 打开界面时先把已有状态捞一遍（比如隧道是上一次操作留下的、还活着）
+    d.getTunnelStatus().then(function (s) {
+      if (!s) return;
+      S.tunnel = s;
+      if (s.phase === 'on' && s.url) S.publicUrl = s.url;
+      refreshTunnelUi();
+    }, function () { /* 主进程还没这个能力就当没有 */ });
+    return d;
+  }
+
+  /** 房间信息面板开着就整块重画一次 —— 面板本身很小，比精确改一行更不容易漏 */
+  function refreshTunnelUi() {
+    var mask = $('#infoMask');
+    if (mask && !mask.classList.contains('hidden') && S.room) showInfo();
+  }
+
+  function tunnelStatusText() {
+    var t = S.tunnel || {};
+    if (t.phase === 'downloading') {
+      return '正在下载公网组件 ' + Math.round((t.percent || 0) * 100) + '%（只下一次，之后就不用等了）';
+    }
+    if (t.phase === 'starting') return '正在建立隧道…';
+    if (t.phase === 'on') return '已开启';
+    return '';
+  }
+
+  function startTunnel() {
+    var d = setupTunnelBridge();
+    if (!d) { toast('公网联机只在桌面端有', 'err'); return; }
+    if (S.tunnel && S.tunnel.phase !== 'off') return;      // 正在下 / 正在起，别重复点
+    S.tunnel = { phase: 'starting', url: '', error: '', percent: 0 };
+    refreshTunnelUi();
+    toast('正在准备公网入口……第一次会先下载一个几十兆的组件', 'ok', 3600);
+    d.startTunnel().then(function (r) {
+      if (r && r.ok) return;
+      if (r && r.error) {
+        S.tunnel = { phase: 'off', url: '', error: r.error, percent: 0 };
+        toast('公网联机失败：' + r.error, 'err', 5200);
+        refreshTunnelUi();
+      }
+    }, function (e) {
+      S.tunnel = { phase: 'off', url: '', error: (e && e.message) || '未知错误', percent: 0 };
+      toast('公网联机失败：' + S.tunnel.error, 'err', 5200);
+      refreshTunnelUi();
+    });
+  }
+
+  function stopTunnel() {
+    var d = desktopTunnel();
+    if (!d) return;
+    if (!S.tunnel) S.tunnel = {};
+    S.tunnel.phase = 'starting';
+    refreshTunnelUi();
+    Promise.resolve(d.stopTunnel()).then(function () {
+      toast('已关闭公网联机', 'ok', 2600);
+    }, function () { /* ignore */ });
+  }
+
+  /**
+   * 房间信息里的「公网入口」那一行。
+   * 网页版只给一句提示（它没有起隧道的权限），桌面端给一键开关。
+   */
+  function tunnelRowHtml() {
+    setupTunnelBridge();                       // 幂等：保证订阅已经接上
+    var t = S.tunnel || { phase: 'off' };
+    var d = desktopTunnel();
+    var inner;
+    if (S.publicUrl) {
+      inner = '<code>' + esc(S.publicUrl) + '</code>' +
+        '<span class="hint">（外网的朋友打开这个地址就能加入）</span>' +
+        (d ? ' <button class="btn tiny ghost" id="btnTunnelOff">关闭公网联机</button>' : '');
+    } else if (t.phase === 'downloading' || t.phase === 'starting') {
+      inner = '<span class="hint">' + esc(tunnelStatusText()) + '</span>';
+    } else if (d) {
+      inner = '<button class="btn tiny primary" id="btnTunnelOn">开启公网联机</button>' +
+        '<span class="hint">（一键穿透，不用装任何东西；外网的朋友点链接就能进来）</span>' +
+        (t.error ? '<span class="hint">' + esc(t.error) + '</span>' : '');
+    } else {
+      inner = '<span class="hint">未开启 —— 在服务端机器上运行 npm run expose ' +
+        '就能生成一个外网可访问的链接</span>';
+    }
+    return '<div class="kv"><label>公网入口</label><div>' + inner + '</div></div>';
+  }
+
   function doShare() {
     if (!S.room) { toast('还没有进入房间'); return; }
     var base = shareBase();
@@ -4640,11 +4878,7 @@
       '<div class="kv"><label>笔迹</label><div>' + engine.strokes.length + ' 笔（我可撤销 ' + S.myUndo.length + ' 笔）</div></div>' +
       '<div class="kv"><label>图层</label><div>' + engine.layers.length + ' 层</div></div>' +
       '<div class="kv"><label>服务器</label><div><code>' + esc(net.url) + '</code></div></div>' +
-      (S.publicUrl
-        ? '<div class="kv"><label>公网入口</label><div><code>' + esc(S.publicUrl) + '</code>' +
-          '<span class="hint">（外网的朋友打开这个地址就能加入）</span></div></div>'
-        : '<div class="kv"><label>公网入口</label><div><span class="hint">未开启 —— 在服务端机器上运行 ' +
-          'npm run expose 就能生成一个外网可访问的链接</span></div></div>') +
+      tunnelRowHtml() +
       (Cfg.lanBase && Cfg.lanBase()
         ? '<div class="kv"><label>局域网</label><div><code>' + esc(Cfg.lanBase()) + '</code>' +
           '<span class="hint">（同一 WiFi 下的朋友用浏览器打开这个地址就能加入）</span></div></div>'
@@ -4659,6 +4893,10 @@
     $('#infoMask').classList.remove('hidden');
     var copyBtn = $('#btnInfoCopy');
     if (copyBtn) copyBtn.onclick = function () { doShare(); };
+    var tOn = $('#btnTunnelOn');
+    if (tOn) tOn.onclick = function () { startTunnel(); };
+    var tOff = $('#btnTunnelOff');
+    if (tOff) tOff.onclick = function () { stopTunnel(); };
     var lv = $('#btnInfoLeave');
     if (lv) lv.onclick = function () {
       net.send(P.C2S.ROOM_LEAVE, {});
@@ -5810,6 +6048,10 @@
       setTimeout(function () { net.send(P.C2S.ROOM_LIST, {}); }, 350);
     });
     $('#btnCopyLan').addEventListener('click', copyLan);
+    var btnAva = $('#btnPickAvatar');
+    if (btnAva) btnAva.addEventListener('click', pickAvatar);
+    var btnAvaClr = $('#btnClearAvatar');
+    if (btnAvaClr) btnAvaClr.addEventListener('click', function () { setMyAvatar(''); });
     $('#btnPurgeRooms').addEventListener('click', purgeRooms);
     $('#serverInput').addEventListener('change', function () { applyServer(this.value); this.value = net.url; });
     $('#btnCreateRoom').addEventListener('click', doCreate);
@@ -5867,6 +6109,16 @@
       renderSoundBtn();
       if (on) SFX.play('toggle');
     });
+    // 音量：拖动即生效，松手时响一声让你知道现在多大声
+    var volEl = $('#ghVol');
+    if (volEl) {
+      volEl.value = String(Math.round((SFX.getVolume ? SFX.getVolume() : 0.22) * 100));
+      volEl.addEventListener('input', function () {
+        SFX.setVolume(Number(this.value) / 100);
+        renderSoundBtn();
+      });
+      volEl.addEventListener('change', function () { SFX.play('toggle'); });
+    }
     renderSoundBtn();
     $('#btnRepick').addEventListener('click', function () {
       if (this.disabled) return;
@@ -6181,6 +6433,13 @@
     updateGameDialog();
     updateRepickUi();
 
+    // 局中进来的旁听者：明确说一句，别让人以为画布坏了
+    if (S.game && S.game.spectating && !(prev && prev.spectating)) {
+      toast(S.game.mode === 'chain'
+        ? '本局接龙进行中 —— 你先观战，房主开下一局就能一起玩'
+        : '本回合你在旁听 —— 下一回合一起玩', 'warn', 4200);
+    }
+
     /* 接龙走另一套 UI（题面面板 / 回放投票 / 奖杯）。
      * 两套互斥：服务端一次只挂一种玩法，所以这里按 mode 分派，不会同时出现。 */
     if (S.game && S.game.mode === 'chain') {
@@ -6231,6 +6490,13 @@
         // 「轮到你」是全游戏最该被听见的一声
         SFX.play(gameImDrawer() ? 'yourTurn' : 'stepStart');
       } else if (S.game && S.game.round !== prevRound) SFX.play('roundStart');
+    }
+
+    // 露字提示：只在提示「刚出现 / 换了位」时响一声。
+    // 状态快照 500ms 来一次，每次响的话会变成机关枪。
+    if (phase === 'draw' && S.game.hint) {
+      var hk = S.game.round + ':' + S.game.hint.index + ':' + S.game.hint.char;
+      if (S.hintKey !== hk) { S.hintKey = hk; SFX.play('hint'); }
     }
 
     // 画手的词：只在「本回合第一次拿到」时提示，避免每次状态同步都弹一次
@@ -6337,6 +6603,20 @@
     var left = Math.max(0, Math.ceil((S.game.deadline - (Date.now() + S.gameSkew)) / 1000));
     el.textContent = left + '秒';
     el.classList.toggle('warn', left <= 10 && left > 0);
+
+    // 倒计时音效：按「秒数跨过阈值」响，不是按定时器次数 ——
+    // 这个函数 250ms 跑一次，直接响会变成机关枪。
+    // 10 秒一声提醒，最后 5 秒每秒一声、音高递增（tickUrgent 的 n 越大越高）。
+    var counting = ['draw', 'pick', 'chain_write', 'chain_guess', 'chain_draw'].indexOf(S.game.phase) >= 0;
+    if (counting && left > 0) {
+      if (left !== S.tickAt) {
+        S.tickAt = left;
+        if (left <= 5) SFX.play('tickUrgent', { n: 5 - left });
+        else if (left === 10) SFX.play('tickWarn');
+      }
+    } else {
+      S.tickAt = -1;
+    }
     if (S.game.phase === 'pick') {
       var pt = $('#pickTimer');
       if (pt) pt.textContent = left;
@@ -6494,6 +6774,8 @@
   function showRoundCard(rr) {
     var card = $('#roundCard');
     if (!card || !rr) return;
+    // 结算音：超时用下坠的 timeout，正常收尾用中性的 roundEnd
+    SFX.play(rr.reason === 'timeout' ? 'timeout' : 'roundEnd');
     var why = rr.reason === 'timeout' ? '（时间到）' : rr.reason === 'drawer_left' ? '（画手掉线）' : '';
     $('#rcTitle').textContent = '第 ' + rr.round + ' 回合结束' + why;
     $('#rcWord').textContent = rr.word ? '答案是「' + rr.word + '」' : '本回合作废';
@@ -6549,7 +6831,12 @@
   }
 
   function onGameCorrect(msg) {
-    if (!msg || msg.userId === S.me.userId) return;   // 自己的由服务端单独回执
+    if (!msg) return;
+    if (msg.userId === S.me.userId) {
+      // 自己猜对：最该被听见的那一声（服务端另外给我一条私聊回执说第几名）
+      SFX.play('correct');
+      return;
+    }
     toast(msg.name + ' 猜对了（第 ' + msg.rank + ' 名）', 'ok', 2400);
     // 别人猜对：发一个「闷一点」的版本 —— 抢自己猜对的那一声会让人以为是自己猜的
     SFX.play('correctOther');
@@ -7352,9 +7639,12 @@
     var b = $('#ghSound');
     if (!b) return;
     var on = SFX.isEnabled();
-    b.textContent = on ? '🔊' : '🔇';
-    b.classList.toggle('off', !on);
-    b.title = on ? '游戏音效：开（点击静音）' : '游戏音效：关（点击开启）';
+    var vol = SFX.getVolume ? SFX.getVolume() : 0.22;
+    b.textContent = !on ? '🔇' : (vol <= 0 ? '🔈' : (vol < 0.5 ? '🔉' : '🔊'));
+    b.classList.toggle('off', !on || vol <= 0);
+    b.title = !on ? '游戏音效：关（点击开启）'
+      : (vol <= 0 ? '游戏音效：开，但音量是 0（拖右边滑块调大）'
+        : '游戏音效：开（音量 ' + Math.round(vol * 100) + '%）· 点一下静音');
   }
 
   /** 拼 HTTP 基址：优先公网，其次局域网，最后拿 ws 地址推 */
@@ -7618,6 +7908,8 @@
     net.on('message', handleMessage);
     net.on('retry', function (e) { setStatus('连接中断，' + Math.round(e.delay / 1000) + 's 后重试…'); });
 
+    // 头像和昵称一样是「我是谁」的一部分：本地存着，启动就带回来
+    S.me.avatar = Cfg.getAvatar ? (Cfg.getAvatar() || '') : '';
     var server = Cfg.resolve();
     $('#serverInput').value = server;
     net.connect(server);

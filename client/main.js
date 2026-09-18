@@ -96,10 +96,60 @@ ipcMain.handle('chahu:set-embedded', (e, on) => writeConfig({ embeddedServer: !!
 /** 局域网地址 / 端口，分享链接要用 */
 ipcMain.handle('chahu:server-info', () => serverInfo);
 
+/* ---------------- 公网联机（一键 cloudflared 隧道） ----------------
+ * 用户不用装任何东西：第一次点「开启公网联机」时把 cloudflared 下到用户数据目录，
+ * 之后复用。隧道跑在主进程里，地址通过 IPC 推给界面。
+ */
+
+let tunnel = null;
+
+function tunnelOptions() {
+  const cfg = readConfig();
+  return {
+    port: (serverInfo && serverInfo.port) || Number(cfg.port) || 8437,
+    cacheDir: path.join(app.getPath('userData'), 'bin'),
+    resourcesDir: process.resourcesPath,
+    repoDir: path.join(__dirname, '..'),
+    // 服务端的 /api/share 读的就是这个文件，路径是 <DATA_DIR 的上一级>/public-url.txt。
+    // 内置服务器把 DATA_DIR 设在 userData/rooms，所以这里正好落在 userData 下 ——
+    // 写进去之后 App 里的分享链接会自动切到公网地址。
+    urlFile: path.join(app.getPath('userData'), 'public-url.txt'),
+    logFile: path.join(app.getPath('userData'), 'tunnel.log'),
+    // 国内直连 GitHub 的下载经常不通，自动换镜像再试
+    mirrors: ['https://ghfast.top/']
+  };
+}
+
+function ensureTunnel() {
+  if (tunnel) return tunnel;
+  const mod = require('./tunnel');
+  tunnel = mod.createTunnel(tunnelOptions());
+  tunnel.bus.on('state', (s) => {
+    try { if (win && !win.isDestroyed()) win.webContents.send('chahu:tunnel', s); } catch (e) { /* ignore */ }
+  });
+  return tunnel;
+}
+
+ipcMain.handle('chahu:tunnel-start', async () => {
+  if (!serverInfo) {
+    return { ok: false, error: '本机没有在跑服务端（内置服务器被关掉了，或者指向了别人的服务器），没有可以穿透的本机端口' };
+  }
+  return await ensureTunnel().start(tunnelOptions().port, '127.0.0.1');
+});
+
+ipcMain.handle('chahu:tunnel-stop', () => ensureTunnel().stop());
+
+ipcMain.handle('chahu:tunnel-status', () => ensureTunnel().state);
+
 ipcMain.handle('chahu:save', async (e, name, payload) => {
   const filters = [];
   const n = String(name || 'chahu');
   if (/\.png$/i.test(n)) filters.push({ name: 'PNG 图片', extensions: ['png'] });
+  else if (/\.jpe?g$/i.test(n)) filters.push({ name: 'JPEG 图片', extensions: ['jpg', 'jpeg'] });
+  else if (/\.webp$/i.test(n)) filters.push({ name: 'WebP 图片', extensions: ['webp'] });
+  else if (/\.psd$/i.test(n)) filters.push({ name: 'Photoshop 文档', extensions: ['psd'] });
+  else if (/\.bmp$/i.test(n)) filters.push({ name: 'BMP 图片', extensions: ['bmp'] });
+  else if (/\.tga$/i.test(n)) filters.push({ name: 'TGA 图片', extensions: ['tga'] });
   else if (/\.webm$/i.test(n)) filters.push({ name: 'WebM 视频', extensions: ['webm'] });
   else if (/\.json$/i.test(n)) filters.push({ name: 'JSON', extensions: ['json'] });
   else if (/\.chahu$/i.test(n)) filters.push({ name: '茶绘工程', extensions: ['chahu'] });
@@ -280,6 +330,13 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+// 退出时务必把隧道进程带走，否则 cloudflared 会变成孤儿进程一直挂在后台。
+// stop() 顺手会把 public-url.txt 删掉 —— 那个域名是临时的，留着只会让下次启动时
+// 分享链接指向一个早就没了的地址。
+app.on('before-quit', () => {
+  try { if (tunnel) tunnel.stop(); } catch (e) { /* ignore */ }
 });
 
 // 只允许一个实例

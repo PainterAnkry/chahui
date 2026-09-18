@@ -35,5 +35,14 @@ contextBridge.exposeInMainWorld('chahuDesktop', {
   },
   setServer: (url) => ipcRenderer.invoke('chahu:set-server', url),
   setEmbeddedServer: (on) => ipcRenderer.invoke('chahu:set-embedded', on),
-  getServerInfo: () => ipcRenderer.invoke('chahu:server-info')
+  getServerInfo: () => ipcRenderer.invoke('chahu:server-info'),
+  // 公网联机（一键 cloudflared 隧道）。状态从主进程推回来，进度就靠它显示。
+  startTunnel: () => ipcRenderer.invoke('chahu:tunnel-start'),
+  stopTunnel: () => ipcRenderer.invoke('chahu:tunnel-stop'),
+  getTunnelStatus: () => ipcRenderer.invoke('chahu:tunnel-status'),
+  onTunnelState: (cb) => {
+    const fn = (_e, s) => { try { cb(s); } catch (err) { /* ignore */ } };
+    ipcRenderer.on('chahu:tunnel', fn);
+    return () => ipcRenderer.removeListener('chahu:tunnel', fn);
+  }
 });

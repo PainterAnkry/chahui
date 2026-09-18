@@ -18,13 +18,16 @@
  */
 
 const STORAGE_KEY = 'chahu.sfx';
+const VOL_KEY = 'chahu.sfx.vol';
 
-/** 主音量。合成音很容易做过头，整体压低一档 */
-const MASTER = 0.22;
+/** 主音量的默认值。合成音很容易做过头，整体压低一档 */
+const MASTER_DEFAULT = 0.22;
 
 let ctx = null;
 let enabled = true;
 let unlocked = false;
+/** 当前主音量（用户可在游戏 HUD 上调，0 = 静音但不关开关） */
+let master = MASTER_DEFAULT;
 
 /* ------------------------------------------------------------ 开关 */
 
@@ -32,8 +35,26 @@ let unlocked = false;
   try {
     const v = localStorage.getItem(STORAGE_KEY);
     if (v === '0') enabled = false;
+    // ★ 必须先判空再解析：`Number(null)` 和 `Number('')` 都是 0，而 0 是一个
+    // **合法的音量值**（用户真的可以把滑块拉到 0）。不判空的话，「从没存过音量」
+    // 会被读成「用户已经把音量调到 0」—— 表现是图标显示 🔈、而且一点声音都没有，
+    // 偏偏开关还是「开」的，排查起来极难。
+    const raw = localStorage.getItem(VOL_KEY);
+    if (raw !== null && raw !== '') {
+      const vol = Number(raw);
+      if (isFinite(vol) && vol >= 0 && vol <= 1) master = vol;
+    }
   } catch (e) { /* 隐私模式下 localStorage 会抛，忽略即可 */ }
 })();
+
+/** 主音量 0~1。0 不是「关掉音效」——开关是开关，音量是音量。 */
+function setVolume(v) {
+  const n = Number(v);
+  master = isFinite(n) ? Math.max(0, Math.min(1, n)) : MASTER_DEFAULT;
+  try { localStorage.setItem(VOL_KEY, String(master)); } catch (e) { /* 同上 */ }
+  return master;
+}
+function getVolume() { return master; }
 
 function setEnabled(on) {
   enabled = !!on;
@@ -105,7 +126,7 @@ function tone(opt) {
 
   const t0 = c.currentTime + (opt.delay || 0);
   const dur = opt.dur || 0.1;
-  const peak = (opt.gain == null ? 1 : opt.gain) * MASTER;
+  const peak = (opt.gain == null ? 1 : opt.gain) * master;
   const atk = opt.attack == null ? Math.min(0.012, dur * 0.3) : opt.attack;
   const rel = opt.release == null ? Math.min(0.12, dur * 0.6) : opt.release;
 
@@ -139,7 +160,7 @@ function noise(opt) {
 
   const t0 = c.currentTime + (opt.delay || 0);
   const dur = opt.dur || 0.12;
-  const peak = (opt.gain == null ? 0.6 : opt.gain) * MASTER;
+  const peak = (opt.gain == null ? 0.6 : opt.gain) * master;
 
   const len = Math.max(1, Math.floor(c.sampleRate * dur));
   const buf = c.createBuffer(1, len, c.sampleRate);
@@ -366,6 +387,14 @@ const BANK = {
   // 有人发言（仅房间聊天用，很轻）
   chat() {
     tone({ freq: 1150, dur: 0.045, type: 'sine', gain: 0.18 });
+  },
+
+  /* ---- 回合结算 ---- */
+
+  // 一回合正常收尾（所有人都猜出来了）：中性的一声，别跟「拿奖杯」抢戏
+  roundEnd() {
+    tone({ freq: 659, dur: 0.12, type: 'sine', gain: 0.42 });
+    tone({ freq: 523, dur: 0.18, type: 'sine', gain: 0.36, delay: 0.1 });
   }
 };
 
@@ -404,6 +433,8 @@ const SFX = {
   setEnabled,
   isEnabled,
   toggle,
+  setVolume,
+  getVolume,
   unlock,
   BANK,
   // 测试用：音效名字清单（UI 上的「试听」按钮也靠它遍历）

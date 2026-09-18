@@ -68,6 +68,9 @@
     STROKE_CLEAR: 'stroke:clear',   // { scope: 'layer'|'all', layerId? }
 
     MEMBER_ROLE: 'member:role',     // { userId, readonly } —— 仅房主；只读观众只能看不能改
+    // 换头像：只动自己那一行，其它人收到 MEMBERS 广播后重画成员列表 / 聊天 / 光标。
+    // 头像走的是「压到 96px 的 dataURL」，体积由 normalizeAvatar 卡死（见下）。
+    MEMBER_AVATAR: 'member:avatar', // { avatar } 改自己的头像（传 '' 表示清掉，回到「颜色 + 首字」）
     LAYER_ADD: 'layer:add',         // { name, at?, id?, groupId? } id 由客户端指定（服务端校验格式与冲突）
     LAYER_DEL: 'layer:del',         // { layerId }
     LAYER_UPD: 'layer:upd',         // { layerId, patch }
@@ -150,6 +153,9 @@
     GAME_STATE: 'game:state',           // { game }  含 phase / wordLen / deadline / roundResult / scores
     GAME_WORD: 'game:word',             // { word, choices? } 只发给画手
     GAME_CORRECT: 'game:correct',       // { userId, name, rank, points } 有人猜对了
+    // 猜词结果只回给猜的人自己（广播出去等于把「谁在猜」也变成信息）。
+    // 用途是让本机响对应的音效 / 提示，不承载裁定逻辑。
+    GAME_GUESS: 'game:guess',           // { kind: 'wrong'|'near' } 这条猜测没中
 
     // ---- 接龙 ----
     // 接龙的快照同样按收件人裁剪：你在猜的时候只能看到「上家那幅画」，
@@ -402,6 +408,21 @@
   }
 
   /**
+   * 个人头像：一张压到 96×96 见方的内联位图。
+   *
+   * 为什么卡得这么小：成员表每次变动都整体广播一次，头像跟着走 ——
+   * 一个 40 人的房间若是每人一张 100KB 的大图，一次广播就是 4MB。
+   * 96px 的 JPEG/PNG 通常 3~8KB，够当头像用，也不至于让成员广播变成大包。
+   */
+  var AVATAR_MAX = 48 * 1024;
+  var AVATAR_RE = /^data:image\/(png|jpeg|jpg|webp);base64,[A-Za-z0-9+/=]+$/;
+  function normalizeAvatar(v) {
+    if (typeof v !== 'string' || !v) return '';
+    if (v.length > AVATAR_MAX) return '';
+    return AVATAR_RE.test(v) ? v : '';
+  }
+
+  /**
    * 猜词归一化：比较答案之前先把「看起来不一样、其实是同一个词」的差异抹平。
    *
    * 处理：全角转半角、去空白、去常见标点、统一小写。
@@ -477,6 +498,8 @@
     qp: qp,
     normalizeBrush: normalizeBrush,
     normalizeSticker: normalizeSticker,
+    AVATAR_MAX: AVATAR_MAX,
+    normalizeAvatar: normalizeAvatar,
     normGuess: normGuess,
     editDistance: editDistance,
     isNearGuess: isNearGuess,

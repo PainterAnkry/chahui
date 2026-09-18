@@ -455,6 +455,7 @@
       <span class="gh-round" id="ghRound"></span>
       <button class="mini" id="ghScore" title="查看计分板">计分</button>
       <button class="mini" id="ghSound" title="游戏音效开关">🔊</button>
+      <input type="range" class="gh-vol" id="ghVol" min="0" max="100" step="1" title="音效音量" />
       <!-- 接龙专用：房主的「推进 / 立刻结算」 -->
       <button class="mini hidden" id="ghNext" title="跳过没交的人，直接进入下一步">立刻推进</button>
     </div>
@@ -668,6 +669,16 @@
       <div class="form-row">
         <label>昵称</label>
         <input type="text" id="nameInput" maxlength="16" placeholder="输入你的名字" />
+      </div>
+      <!-- 头像：跟着昵称一起进房，房里的成员列表 / 聊天 / 光标都会显示它 -->
+      <div class="form-row">
+        <label>头像</label>
+        <div class="ava-pick">
+          <span class="ava-preview" id="avaPreview">默认</span>
+          <button class="btn tiny" id="btnPickAvatar" title="选一张图片当头像（本机会自动压到 96px）">选择图片…</button>
+          <button class="btn tiny ghost hidden" id="btnClearAvatar">清除</button>
+        </div>
+        <span class="hint">压到 96px 后随成员列表同步，同房间的人都能看到</span>
       </div>
       <div class="form-row">
         <label>服务器</label>
@@ -1361,7 +1372,7 @@
 <script src="brush-import.js"></script>
 <script src="project.js"></script>
 <script src="filters.js"></script>
-<script src="export-formats.js"></script>
+<script src="export-formats.js"></script><script src="psd.js"></script>
 <script src="rulers.js"></script>
 <script src="menu.js"></script>
 <script src="engine.js"></script>

@@ -4,6 +4,7 @@
  *   png   —— canvas 原生编码，保留 alpha
  *   jpg/jpeg —— canvas 原生，**没有 alpha**，所以先垫一层白底
  *   webp  —— canvas 原生（Chrome / Electron 都支持）
+ *   psd   —— 见 psd.js：自己写，8BPS + 图层 + 图层组（唯一一个不能拍平的格式）
  *   bmp   —— 自己写：24 位、自下而上、每行按 4 字节补齐（浏览器不提供 BMP 编码）
  *   tga   —— 自己写：未压缩 32 位 BGRA、左上角原点（浏览器也不提供）
  *
@@ -17,6 +18,7 @@
     { id: 'png', name: 'PNG（.png）', ext: 'png', mime: 'image/png', alpha: true, quality: false },
     { id: 'jpeg', name: 'JPEG（.jpg / .jpeg）', ext: 'jpg', mime: 'image/jpeg', alpha: false, quality: true },
     { id: 'webp', name: 'WebP（.webp）', ext: 'webp', mime: 'image/webp', alpha: true, quality: true },
+    { id: 'psd', name: 'Photoshop（.psd，含图层和组）', ext: 'psd', mime: 'image/vnd.adobe.photoshop', alpha: true, quality: false, layered: true },
     { id: 'bmp', name: 'BMP（.bmp，24 位）', ext: 'bmp', mime: 'image/bmp', alpha: false, quality: false },
     { id: 'tga', name: 'TGA（.tga，32 位）', ext: 'tga', mime: 'image/x-tga', alpha: true, quality: false }
   ];
@@ -102,10 +104,16 @@
    * @param canvas 要导出的画面
    * @param fmtId  FORMATS 里的 id
    * @param quality 0..1（只对 jpeg / webp 有效）
+   * @param engine 只有 psd 用得上：它要的是**图层**，一张拍平的画布给不了
    * @returns dataURL
    */
-  function encode(canvas, fmtId, quality) {
+  function encode(canvas, fmtId, quality, engine) {
     var f = byId(fmtId);
+    // PSD 不能拍平之后再编 —— 图层、组、混合模式都在文档结构里，得让编码器直接读 engine
+    if (f.id === 'psd') {
+      if (!engine || !global.ChaPsd) throw new Error('PSD 需要文档的图层信息');
+      return global.ChaPsd.encode(engine);
+    }
     if (f.id === 'bmp') return encodeBMP(canvas);
     if (f.id === 'tga') return encodeTGA(canvas);
     var q = typeof quality === 'number' ? Math.max(0.1, Math.min(1, quality)) : 0.92;

@@ -22,6 +22,7 @@ const SUITE = [
   'test-mesh.js',
   'test-filters.js',
   'test-export.js',
+  'test-psd.js',
   'test-text.js',
   'test-ruler.js',
   'test-liquify.js',
@@ -32,6 +33,7 @@ const SUITE = [
   'test-cansize.js',
   'test-collab-view.js',
   'test-readonly.js',
+  'test-avatar.js',
   'test-groups.js',
   'test-update.js',
   'test-chain-ui.js',
@@ -39,6 +41,8 @@ const SUITE = [
   'test-mobile.js',
   'test-chain-sim.js',
   'test-theme-ui.js',
+  // 隧道不需要服务端，它自己起假进程；放最后当纯 Node 用例跑
+  'test-tunnel.js',
   'verify-issues.js',
   'verify-round2.js',
   'verify-round3.js'

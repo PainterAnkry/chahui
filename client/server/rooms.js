@@ -268,6 +268,9 @@ class Room {
   memberList() {
     return Array.from(this.members.values()).map(m => ({
       userId: m.userId, name: m.name, color: m.color,
+      // 头像（内联小图，可能是空串）。**必须在这里列出** —— 这份白名单是
+      // MEMBERS 广播的唯一出口，漏一个字段就是「客户端发得出去、别人永远收不到」。
+      avatar: m.avatar || '',
       isOwner: m.userId === this.ownerId, drawing: !!m.drawing,
       // 只读观众（房主设置）：能看、能聊，但不能改画布上的任何东西
       readonly: !!m.readonly

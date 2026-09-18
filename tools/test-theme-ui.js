@@ -1,5 +1,5 @@
 /**
- * 自定义词库 + 音效开关 的 UI 冒烟测试（真浏览器，无头）。
+ * 自定义词库 + 音效开关 / 音量滑块 的 UI 冒烟测试（真浏览器，无头）。
  *
  * 为什么单独一条：
  *   - 自定义词库是「服务端存一份 JSON、前端增删改查」的链路。服务端那半
@@ -428,7 +428,8 @@ async function openChainDialog(page) {
     ls: localStorage.getItem('chahu.sfx'),
     on: window.ChaApp.sfx.isEnabled()
   }));
-  ok('默认是开着的（🔊）', s0.txt === '🔊' && s0.on === true, JSON.stringify(s0));
+  ok('默认是开着的（图标跟着音量走：默认 22% → 🔉，不是静音 🔇）',
+    s0.txt === '🔉' && s0.on === true, JSON.stringify(s0));
 
   await host.click('#ghSound');
   await sleep(250);
@@ -460,7 +461,8 @@ async function openChainDialog(page) {
     ls: localStorage.getItem('chahu.sfx'),
     on: window.ChaApp.sfx.isEnabled()
   }));
-  ok('再点一下恢复（🔊）', s2.txt === '🔊' && s2.on === true, JSON.stringify(s2));
+  ok('再点一下恢复（回到那档音量对应的图标 🔉）',
+    s2.txt === '🔉' && s2.on === true, JSON.stringify(s2));
   ok('恢复状态也落到 localStorage', s2.ls === '1', '实际 ' + JSON.stringify(s2.ls));
 
   const unmuted = await host.evaluate(() => {
@@ -510,7 +512,7 @@ async function openChainDialog(page) {
     txt: document.querySelector('#ghSound').textContent.trim(),
     on: window.ChaApp.sfx.isEnabled()
   }));
-  ok('刷新后仍是开着的（偏好持久）', s3.txt === '🔊' && s3.on === true, JSON.stringify(s3));
+  ok('刷新后仍是开着的（偏好持久）', s3.txt === '🔉' && s3.on === true, JSON.stringify(s3));
 
   await host.evaluate(() => localStorage.setItem('chahu.sfx', '0'));
   await host.reload();
@@ -534,6 +536,84 @@ async function openChainDialog(page) {
 
   // 把偏好还原成默认（开着），别影响下一次跑
   await host.evaluate(() => localStorage.setItem('chahu.sfx', '1'));
+
+  // ---- [8.5] 音量滑块（v1.10.0） ----
+  console.log('\n[8.5] 音量滑块');
+  // ★ 这一组最关键的一条：**「从没存过音量」必须落回默认音量，不能落成 0**。
+  // 原因是 `Number(localStorage.getItem(x))` 在没存过时是 `Number(null) === 0`，
+  // 而 0 是个合法音量 —— 初版就这么错了：图标显示 🔈、一点声音都没有，
+  // 开关却是「开」的。（本组第一条断言就是钉死这个的。）
+  await host.evaluate(() => {
+    localStorage.removeItem('chahu.sfx');
+    localStorage.removeItem('chahu.sfx.vol');
+  });
+  await host.reload();
+  await host.waitForFunction(() => window.ChaApp && window.ChaApp.state, { timeout: 15000 });
+  await sleep(400);
+  await host.evaluate(() => document.querySelector('#gameHud').classList.remove('hidden'));
+  await sleep(200);
+  const v0 = await host.evaluate(() => ({
+    txt: document.querySelector('#ghSound').textContent.trim(),
+    vol: window.ChaSFX.getVolume(),
+    slider: Number(document.querySelector('#ghVol').value),
+    on: window.ChaApp.sfx.isEnabled()
+  }));
+  ok('★ 没存过音量时落回默认值（>0，不是 Number(null) 那个 0）',
+    v0.on === true && v0.vol > 0.1 && v0.vol < 0.5, JSON.stringify(v0));
+  ok('滑块初始位置 = 当前音量（步长必须是 1：默认音量 22% 用 step=5 会被吸附成 20%）',
+    v0.slider === Math.round(v0.vol * 100), JSON.stringify(v0));
+
+  // 拖到 0：图标 🔈，但开关本身不动
+  await host.evaluate(() => {
+    const el = document.querySelector('#ghVol');
+    el.value = '0';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await sleep(300);
+  const v1 = await host.evaluate(() => ({
+    txt: document.querySelector('#ghSound').textContent.trim(),
+    vol: window.ChaSFX.getVolume(),
+    on: window.ChaApp.sfx.isEnabled(),
+    ls: localStorage.getItem('chahu.sfx.vol'),
+    title: document.querySelector('#ghSound').title,
+    off: document.querySelector('#ghSound').classList.contains('off')
+  }));
+  ok('音量拖到 0 → 🔈，但开关仍是「开」（音量 ≠ 开关）',
+    v1.txt === '🔈' && v1.on === true && v1.vol === 0, JSON.stringify(v1));
+  ok('音量 0 时按钮带 off 样式', v1.off === true);
+  ok('标题里说明了「音量是 0」', /音量是 ?0/.test(v1.title), v1.title);
+  ok('音量写进了 localStorage', v1.ls === '0', v1.ls);
+
+  // 拖到 100：图标 🔊
+  await host.evaluate(() => {
+    const el = document.querySelector('#ghVol');
+    el.value = '100';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await sleep(300);
+  ok('拖到 100% → 🔊',
+    (await host.evaluate(() => document.querySelector('#ghSound').textContent.trim())) === '🔊');
+  ok('音量确实是 1', (await host.evaluate(() => window.ChaSFX.getVolume())) === 1);
+
+  // 刷新后音量记得住
+  await host.reload();
+  await host.waitForFunction(() => window.ChaApp && window.ChaApp.state, { timeout: 15000 });
+  await sleep(400);
+  await host.evaluate(() => document.querySelector('#gameHud').classList.remove('hidden'));
+  await sleep(200);
+  const v2 = await host.evaluate(() => ({
+    vol: window.ChaSFX.getVolume(),
+    slider: Number(document.querySelector('#ghVol').value),
+    txt: document.querySelector('#ghSound').textContent.trim()
+  }));
+  ok('刷新后音量还是 100%', v2.vol === 1 && v2.slider === 100 && v2.txt === '🔊', JSON.stringify(v2));
+
+  // 还原成默认，别影响后面的用例
+  await host.evaluate(() => {
+    localStorage.removeItem('chahu.sfx.vol');
+    localStorage.setItem('chahu.sfx', '1');
+    window.ChaSFX.setVolume(0.22);
+  });
 
   // ---- [9] 控制台干净 ----
   console.log('\n[9] 控制台干净');

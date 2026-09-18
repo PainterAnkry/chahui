@@ -11,7 +11,7 @@ window.CHAHU_CONFIG = {
   defaultName: '',
   appName: '茶绘',
   // 版本号：关于页显示 + 和 GitHub 的最新 release 比对
-  appVersion: '1.9.1',
+  appVersion: '1.10.0',
   // 开源仓库（更新检测用）
   repo: 'PainterAnkry/chahui'
 };
@@ -23,6 +23,7 @@ window.CHAHU = window.CHAHU || {};
   var CFG = window.CHAHU_CONFIG;
   var LS_SERVER = 'chahu.server';
   var LS_NAME = 'chahu.name';
+  var LS_AVATAR = 'chahu.avatar';
 
   function normalize(url) {
     if (!url) return '';
@@ -81,6 +82,21 @@ window.CHAHU = window.CHAHU || {};
     try { localStorage.setItem(LS_NAME, n); } catch (e) { /* ignore */ }
   }
 
+  /**
+   * 头像：一张已压到 96px 的 dataURL。跟昵称一样是「我是谁」的一部分，
+   * 所以存在同一层（localStorage），进房时随 ROOM_JOIN / ROOM_CREATE 带上去。
+   * 存不下（配额满）就当作没有 —— 头像丢了不影响进房。
+   */
+  function getAvatar() {
+    try { return localStorage.getItem(LS_AVATAR) || ''; } catch (e) { return ''; }
+  }
+  function setAvatar(a) {
+    try {
+      if (a) localStorage.setItem(LS_AVATAR, a);
+      else localStorage.removeItem(LS_AVATAR);
+    } catch (e) { /* ignore */ }
+  }
+
   function queryRoom() {
     try {
       var q = new URLSearchParams(location.search || '');
@@ -112,6 +128,8 @@ window.CHAHU = window.CHAHU || {};
     shareUrl: shareUrl,
     getName: getName,
     setName: setName,
+    getAvatar: getAvatar,
+    setAvatar: setAvatar,
     queryRoom: queryRoom,
     lanBase: lanBase,
     cfg: CFG

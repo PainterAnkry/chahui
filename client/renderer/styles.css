@@ -1049,6 +1049,29 @@ body.tool-dragging { cursor: grabbing; user-select: none; }
   font-weight: 600;
 }
 .msg .body { flex: 1; min-width: 0; }
+/* 头像：有图时把图铺满那个小圆（overflow 裁成圆的，不然方图会破形） */
+.ava.has-img { overflow: hidden; background: #e7eaee; }
+.ava.has-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* 进房面板里的头像预览：比列表里那个大一圈，方形圆角（方图/长图都看得清） */
+.ava-pick { display: flex; align-items: center; gap: 8px; }
+.ava-preview {
+  width: 40px; height: 40px; flex: none;
+  border-radius: 50%;
+  overflow: hidden;
+  background: #e7eaee;
+  color: #9aa2ae;
+  font-size: 11px;
+  display: grid; place-items: center;
+}
+.ava-preview img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* 远端光标标签里的小头像：跟着名字走，认人比认字快 */
+.remote-cursor .tag-ava {
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  object-fit: cover;
+  vertical-align: -3px;
+  margin-right: 4px;
+}
 .msg .head { display: flex; align-items: baseline; gap: 6px; margin-bottom: 1px; }
 .msg .head b { font-size: 12px; }
 .msg .head span { font-size: 10px; color: #9aa2ae; }
@@ -2205,6 +2228,14 @@ body.panel-dragging * { cursor: grabbing !important; }
   color: var(--text-dim);
   font-size: 11.5px;
   white-space: nowrap;
+}
+/* 音量滑块：宽度收窄，免得把 HUD 撑长（窄屏时下面那条规则会把它藏掉） */
+.game-hud .gh-vol {
+  width: 62px;
+  height: 14px;
+  margin: 0 2px;
+  accent-color: var(--accent);
+  cursor: pointer;
 }
 
 .game-score {

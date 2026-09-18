@@ -118,6 +118,10 @@ class ChainGame {
     this.order = [];         // 传递顺序（开局时打乱一次，整局固定）
     this.names = new Map();  // userId -> name（人走了榜单也要显示）
     this.scores = new Map(); // userId -> 奖杯数
+    // 中途进房的人：**本局只能旁边看**。链和传递顺序在开局那一刻就冻结了，
+    // 中途插人会改变「谁接谁的」，把已经走完的格子和还没走的全部弄拧，
+    // 所以这里不做「下一圈转正」，只承诺「房主开下一局时入局」（start 里清空）。
+    this.spectators = new Set();
     this.usedWords = [];
 
     this.deadline = 0;
@@ -209,6 +213,8 @@ class ChainGame {
       myVoted: revealed ? this.votedChainsFor(me) : [],
       voteResult: this.phase === CHAIN_PHASE.OVER ? this.voteResult : null,
 
+      // 中途进房、本局只能看：前端据此显示提示条
+      spectating: this.spectators.has(me),
       minPlayers: P.GAME.CHAIN_MIN_PLAYERS,
       maxPlayers: P.GAME.CHAIN_MAX_PLAYERS,
       maxRounds: P.GAME.CHAIN_MAX_ROUNDS,
@@ -325,10 +331,18 @@ class ChainGame {
    * 只读观众不进池子 —— 跟 game.js 的 playerList 一个道理：
    * 他画不了，轮到他那一步整条链就卡住了。
    */
+  /** 这一局已经开了、还没完吗（大厅 / 整局结束之外都算） */
+  midGame() {
+    return this.phase !== CHAIN_PHASE.LOBBY && this.phase !== CHAIN_PHASE.OVER &&
+      this.phase !== CHAIN_PHASE.OFF;
+  }
+
   playerList() {
     const out = [];
     for (const m of this.room.members.values()) {
       if (m.readonly) continue;
+      // 本局的看客也不算玩家（投票法定人数、最少人数都由这个池子决定）
+      if (this.spectators.has(m.userId)) continue;
       out.push({ userId: m.userId, name: m.name, color: m.color });
       this.names.set(m.userId, m.name);
     }
@@ -395,6 +409,7 @@ class ChainGame {
       return { ok: false, code: 'too_many', message: '接龙最多 ' + max + ' 个人' };
     }
 
+    this.spectators.clear();          // 开新局：房间里的人都算玩家
     this.rounds = clampInt(opts && opts.rounds, P.GAME.CHAIN_ROUNDS, 1, P.GAME.CHAIN_MAX_ROUNDS);
     this.theme = (opts && THEMES.hasTheme(opts.theme)) ? opts.theme : 'default';
     const dsec = Math.floor(Number(opts && opts.drawSeconds));
@@ -814,6 +829,7 @@ class ChainGame {
   }
 
   stop() {
+    this.spectators.clear();
     this.phase = CHAIN_PHASE.OFF;
     this.deadline = 0;
     this.chains = [];
@@ -832,16 +848,25 @@ class ChainGame {
   onJoin(member) {
     if (!this.active) return;
     if (!this.names.has(member.userId)) this.names.set(member.userId, member.name);
-    if (!this.scores.has(member.userId)) this.scores.set(member.userId, 0);
-    // 已经开局了才需要说明「你这一步只是观众」；LOBBY / OVER 阶段不用唠叨
-    if (this.isPlaying() && !this.assign.has(member.userId)) {
-      this.api.systemChat(member.name + ' 加入了，这一步先观战，下一圈一起玩');
+    // 局中进房：本局只能旁边看（链已经冻结），也不进奖杯榜、不算投票人数
+    if (this.midGame()) {
+      this.spectators.add(member.userId);
+      this.api.systemChat(member.name + ' 加入了，本局接龙进行中，先观战 —— 房主开下一局就能一起玩');
+      this.api.sync();
+      return;
     }
+    if (!this.scores.has(member.userId)) this.scores.set(member.userId, 0);
     this.api.sync();
   }
 
   onLeave(member) {
     if (!this.active) return;
+    // 看客走了：摘掉即可，不影响链条与人数判断
+    if (this.spectators.has(member.userId)) {
+      this.spectators.delete(member.userId);
+      this.api.sync();
+      return;
+    }
     const min = P.GAME.CHAIN_MIN_PLAYERS;
     if (this.playerList().length < min) {
       if (this.phase === CHAIN_PHASE.LOBBY || this.phase === CHAIN_PHASE.OVER) return;

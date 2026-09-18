@@ -544,7 +544,10 @@ function joinRoom(ws, room, name, avatar) {
     connId: ws._connId,
     userId: P.rid('u'),
     name,
-    avatar: avatar || null,
+    // 头像是客户端传上来的内联图 —— 必须过一遍 normalizeAvatar
+    // （只放行 png/jpeg/webp 的 dataURL，且卡在 48KB 以内），否则一个 10MB 的
+    // 字符串就能让每次成员广播变成巨型包。
+    avatar: P.normalizeAvatar(avatar),
     color: P.userColor(colorCursor.i),
     ws,
     joinedAt: Date.now(),
@@ -567,7 +570,10 @@ function joinRoom(ws, room, name, avatar) {
     groups: room.groupList(),
     members: room.memberList(),
     chat: room.chat,
-    you: { userId: member.userId, name: member.name, color: member.color, isOwner: member.userId === room.ownerId, readonly: !!member.readonly },
+    you: {
+      userId: member.userId, name: member.name, color: member.color, avatar: member.avatar || '',
+      isOwner: member.userId === room.ownerId, readonly: !!member.readonly
+    },
     // 游戏状态随入房一起给：新进来的人立刻就能看到 HUD，不用等下一次状态同步
     game: room.game && room.game.active ? room.game.snapshotFor(member.userId) : null,
     history: {
@@ -689,7 +695,10 @@ function handle(ws, msg) {
         room: room.meta(), layers: room.layerList(), groups: room.groupList(),
         members: room.memberList(),
         chat: room.chat,
-        you: { userId: member.userId, name: member.name, color: member.color, isOwner: member.userId === room.ownerId, readonly: !!member.readonly },
+        you: {
+          userId: member.userId, name: member.name, color: member.color, avatar: member.avatar || '',
+          isOwner: member.userId === room.ownerId, readonly: !!member.readonly
+        },
         game: room.game && room.game.active ? room.game.snapshotFor(member.userId) : null,
         history: {
           count: room.strokes.length, lastSeq: room.seq,
@@ -805,6 +814,20 @@ function handle(ws, msg) {
         text: target.name + (want ? ' 现在是观众，只能看' : ' 可以作画了'),
         ts: Date.now(), system: true
       });
+      return;
+    }
+
+    /**
+     * 换头像。**故意不过 writeBlocked**：它改的是「我是谁」，不是画布内容 ——
+     * 只读观众在成员列表里也有头像，没理由把他拦在外面。
+     * 成员是运行时状态、不落盘，所以这里只广播 MEMBERS，不 markDirty。
+     */
+    case P.C2S.MEMBER_AVATAR: {
+      if (!room || !member) return;
+      const next = P.normalizeAvatar(msg.avatar);
+      if ((member.avatar || '') === next) return;      // 没变就别刷屏
+      member.avatar = next;
+      roomBroadcast(room, P.S2C.MEMBERS, { members: room.memberList() });
       return;
     }
 
@@ -1463,11 +1486,15 @@ function handle(ws, msg) {
         }
         if (res && res.kind === 'near') {
           // 很接近：私下提醒，同时这条猜测照常公开（猜歪的过程本来就该让大家看见）
+          send(ws, P.S2C.GAME_GUESS, { kind: 'near' });
           send(ws, P.S2C.CHAT, {
             id: P.rid('m'), userId: 'system', name: '系统', color: '#8b8b8b', system: true,
             ts: now, text: '很接近了，再想想！'
           });
         }
+        // 纯粹猜错：**只说给猜的人自己听**。广播「谁猜错了」等于把
+        // 「谁在猜、猜了几次」也变成公开信息，对猜的人不公平，也没必要。
+        if (res && res.kind === 'wrong') send(ws, P.S2C.GAME_GUESS, { kind: 'wrong' });
       }
 
       // 防剧透：画手 / 已经猜对的人都可以发言（给提示 / 照常聊天），

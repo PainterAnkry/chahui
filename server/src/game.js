@@ -100,6 +100,10 @@ class Game {
     this.theme = '';             // 本局用的主题词库（'' = 通用词库），开局时定下
     this.themeName = '';
     this.drawMs = 0;             // 本局的作画时长覆盖值（0 = 用全局默认 CFG.ROUND_MS）
+    // 中途进房的人：本回合先在旁边看，下一回合转正（见 onJoin / promoteSpectators）。
+    // 他们**不在** playerList 里 —— 那一个池子决定「谁当画手」和「还差几个人没猜出来」，
+    // 把看客算进去的话每回合都要干等到超时。
+    this.spectators = new Set();
   }
 
   /** 本局的作画时限。开局设置里自定义的优先，否则用环境变量 / 协议默认 */
@@ -123,16 +127,38 @@ class Game {
     return false;
   }
 
+  /** 这一局已经开了、还没完（大厅 / 整局结束之外都算「局中」） */
+  midGame() {
+    return this.phase === PHASE.PICK || this.phase === PHASE.DRAW || this.phase === PHASE.ROUND_END;
+  }
+
+  /**
+   * 把旁听的看客转成正式玩家（新回合开始时调用）。
+   * 还在房间里的人补进出场顺序 + 计分表；已经走掉的就直接丢掉。
+   */
+  promoteSpectators() {
+    if (!this.spectators.size) return;
+    for (const id of Array.from(this.spectators)) {
+      this.spectators.delete(id);
+      const m = this.memberOf(id);
+      if (!m || m.readonly) continue;          // 人走了 / 变成了观众：不进来
+      if (this.order.indexOf(id) < 0) this.order.push(id);
+      if (!this.scores.has(id)) this.scores.set(id, 0);
+    }
+  }
+
   /**
    * 在线玩家（画手从这个池子里选，猜词也只认池子里的人）。
    *
    * **只读观众不在池子里** —— 他画不了，抽到他这回合就废了；
    * 也顺带意味着「只剩观众」时开局会因为人不够而被拒。
+   * **本回合的看客也不在池子里**（同一个道理：他还没拿到题面，猜不出来）。
    */
   playerList() {
     const out = [];
     for (const m of this.room.members.values()) {
       if (m.readonly) continue;
+      if (this.spectators.has(m.userId)) continue;
       out.push({ userId: m.userId, name: m.name, color: m.color });
       this.names.set(m.userId, m.name);
     }
@@ -208,6 +234,8 @@ class Game {
       hint: this.hint,
       locked: this.lockedFor(userId),
       isDrawer,
+      // 中途进房、这一回合只能看：前端据此显示提示条，不然会以为画布坏了
+      spectating: this.spectators.has(userId),
       canStart: this.phase === PHASE.LOBBY || this.phase === PHASE.OVER,
       scores: this.scoreList(),
       guessed: this.guessOrder.map((id, i) => ({
@@ -231,6 +259,7 @@ class Game {
   start(opts) {
     if (typeof opts === 'number') opts = { rounds: opts };
     opts = opts || {};
+    this.spectators.clear();          // 开局了：房间里的人都算玩家，不再有看客
     const players = this.playerList();
     if (players.length < P.GAME.MIN_PLAYERS) {
       return { ok: false, code: 'too_few', message: '至少要有 ' + P.GAME.MIN_PLAYERS + ' 个人才能开局' };
@@ -257,6 +286,8 @@ class Game {
 
   /** 开始一回合：选画手 → 发候选词 → 清空画布 */
   beginRound() {
+    // 上一回合旁听的看客：新回合开始时转正（他们等的就是这个时刻）
+    this.promoteSpectators();
     const online = this.playerList();
     if (online.length < P.GAME.MIN_PLAYERS) return this.toLobby('人数不足，已回到等待状态');
 
@@ -486,6 +517,7 @@ class Game {
   }
 
   finish() {
+    this.spectators.clear();
     this.phase = PHASE.OVER;
     this.deadline = 0;
     this.word = '';
@@ -496,6 +528,8 @@ class Game {
 
   /** 退回大厅（人不够 / 出错时的安全落点） */
   toLobby(reason) {
+    // 已经不在局中了：旁听身份作废（重开一局时会按当时在场的人重新算）
+    this.spectators.clear();
     this.phase = PHASE.LOBBY;
     this.deadline = 0;
     this.word = '';
@@ -511,6 +545,7 @@ class Game {
 
   /** 房主结束游戏，回到自由绘画 */
   stop() {
+    this.spectators.clear();
     this.phase = PHASE.OFF;
     this.deadline = 0;
     this.word = '';
@@ -546,22 +581,29 @@ class Game {
   onJoin(member) {
     if (!this.active) return;
     this.names.set(member.userId, member.name);
-    if (!this.scores.has(member.userId)) this.scores.set(member.userId, 0);
-    // 中途进来的人：本回合先当观众，下一回合自动参加（order 里没有他，
-    // 所以 beginRound 会把他当作「在线的兜底候选」——这是刻意的，不然他永远轮不到）
-    if (this.phase === PHASE.PICK || this.phase === PHASE.DRAW) {
+
+    // 局中进房：**先当看客**。不进计分表、不算猜手（否则「大家都猜出来了」
+    // 这个条件永远不成立，每回合都得等到超时），下一回合 beginRound 时转正。
+    if (this.midGame()) {
+      this.spectators.add(member.userId);
       this.api.systemChat(member.name + ' 加入了，本回合先观战，下一回合一起玩');
-    }
-    if (this.phase === PHASE.DRAW) {
-      // 多了一个猜手，原本已经全猜完的条件要重算（不必提前结束）
       this.api.sync();
       return;
     }
+
+    // 大厅 / 整局结束：直接就是玩家（下次开局 order 会重建，自然带上他）
+    if (!this.scores.has(member.userId)) this.scores.set(member.userId, 0);
     this.api.sync();
   }
 
   onLeave(member) {
     if (!this.active) return;
+    // 走的是个看客：摘掉就完事，别去碰「还差几个猜手」那套判断
+    if (this.spectators.has(member.userId)) {
+      this.spectators.delete(member.userId);
+      this.api.sync();
+      return;
+    }
     if (this.phase === PHASE.PICK && member.userId === this.drawerId) {
       // 还没开始画就走了：这一回合作废，停顿一下直接换人重开
       this.api.systemChat('画手 ' + member.name + ' 离开了，本回合作废，换人重来');

@@ -6,7 +6,10 @@
  *   · jpg 不支持透明 → 必须垫白底，不能出来一片黑
  *   · bmp / tga 是茶绘自己写的编码器：**写出去的要能被读回来**，
  *     而且像素和原图一致（BMP 我们自带解码器；TGA 检查头部与字节序）
- *   · 六种扩展名都在（.sai2 / .psd 不在此列 —— 那需要写图层记录，见 README）
+ *   · 扩展名都在；**psd 是唯一一个带图层的格式（layered）**，它不吃「一张画布」——
+ *     所以这里只验两件事：不给文档时它必须明确报错（而不是编出一个打不开的文件）、
+ *     走 exportAs 时给出的是 .psd 文件名。真正的字节级验收在 tools/test-psd.js。
+ *   · .sai2 不做（那要写 SAI 自己的图层记录）
  *
  * 用法: node tools/test-export.js [http://localhost:8437]
  */
@@ -41,8 +44,13 @@ function ok(name, cond, extra) {
     const hit = ext === 'jpeg' ? list.indexOf('jpg') >= 0 : list.indexOf(ext) >= 0;
     ok('有 .' + ext, hit, list.join(','));
   });
-  ok('没有 .sai2 / .psd（那需要写图层记录，本轮不做）',
-    list.indexOf('sai2') < 0 && list.indexOf('psd') < 0);
+  ok('没有 .sai2（SAI 那个格式要写图层记录，本轮不做）', list.indexOf('sai2') < 0);
+  ok('★ 有 .psd，而且是唯一一个「带图层」的格式（layered=true）',
+    list.indexOf('psd') >= 0 && (await page.evaluate(() => {
+      const all = window.ChaExport.FORMATS;
+      const psd = all.filter(f => f.id === 'psd')[0];
+      return !!psd && psd.layered === true && all.filter(f => f.id !== 'psd').every(f => !f.layered);
+    })));
 
   console.log('\n=== 编码结果能不能读回来 ===');
   const enc = await page.evaluate(async () => {
@@ -56,6 +64,14 @@ function ok(name, cond, extra) {
     cx.fillRect(32, 24, 32, 24);
     const out = {};
     for (const f of window.ChaExport.FORMATS) {
+      // psd **不能**「拍平之后再编」—— 它要的是文档的图层树，一张 canvas 给不了，
+      // 所以这一轮只过「一张画布就够」的格式；psd 走下面的对照断言（自己那条在
+      // test-psd.js 里逐字节验过）。
+      if (f.layered) {
+        try { window.ChaExport.encode(c, f.id, 0.9); out.__psdNoEngine = 'no-error'; }
+        catch (e) { out.__psdNoEngine = String(e && e.message || e); }
+        continue;
+      }
       const url = window.ChaExport.encode(c, f.id, 0.9);
       out[f.id] = { head: url.slice(0, 32), len: url.length, ext: f.ext };
     }
@@ -112,6 +128,8 @@ function ok(name, cond, extra) {
   });
 
   console.log('  png  ' + enc.png.len + ' 字符  ' + JSON.stringify(enc.__png));
+  ok('★ psd 不给文档时会明确报错（而不是编出一个打不开的文件）',
+    enc.__psdNoEngine !== 'no-error' && /PSD/.test(enc.__psdNoEngine || ''), enc.__psdNoEngine);
   ok('PNG 能被浏览器解回来', enc.__png.ok === true && enc.__png.w === 64, JSON.stringify(enc.__png));
   ok('PNG 左上角是红的', enc.__png.tl[0] > 200 && enc.__png.tl[1] < 60, JSON.stringify(enc.__png.tl));
   ok('PNG 右下角是蓝的', enc.__png.br[2] > 200 && enc.__png.br[0] < 60, JSON.stringify(enc.__png.br));
@@ -151,7 +169,7 @@ function ok(name, cond, extra) {
   }));
   console.log('  ' + JSON.stringify(dlg));
   ok('导出对话框能打开', dlg.open === true);
-  ok('下拉里六种格式都在', dlg.opts.join(',') === 'png,jpeg,webp,bmp,tga', dlg.opts.join(','));
+  ok('下拉里六种格式都在（png / jpeg / webp / psd / bmp / tga）', dlg.opts.join(',') === 'png,jpeg,webp,psd,bmp,tga', dlg.opts.join(','));
   ok('默认 PNG 时不显示画质滑块', dlg.qualityShown === false);
   await page.evaluate(() => {
     const s = document.querySelector('#exportFormat');
@@ -184,7 +202,8 @@ function ok(name, cond, extra) {
     return seen;
   });
   void names;
-  for (const f of ['png', 'jpeg', 'bmp', 'tga']) {
+  // psd 也走一遍：它对 exportAs 来说是一条特例路径（要用 engine 而不是画布）
+  for (const f of ['png', 'jpeg', 'bmp', 'tga', 'psd']) {
     const r = await page.evaluate((fmt) => {
       const before = window.__dl.length;
       window.ChaApp.exportAs(fmt);
@@ -192,6 +211,7 @@ function ok(name, cond, extra) {
     }, f);
     console.log('  导出 ' + f + ': ' + JSON.stringify(r));
     ok('导出 ' + f + ' 时给出了文件名', r.length === 1 && /\.[a-z]+$/.test(r[0].split('|')[0]), JSON.stringify(r));
+    if (f === 'psd') ok('psd 的文件名后缀是 .psd', /\.psd\|/.test(r[0] || ''), r[0]);
   }
 
   ok('全程无 JS 报错', errs.length === 0, errs.slice(0, 3).join(' | '));

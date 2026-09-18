@@ -1,7 +1,7 @@
 {
   "name": "chahui-desktop",
   "productName": "茶绘",
-  "version": "1.9.1",
+  "version": "1.10.0",
   "private": true,
   "description": "茶绘 · 多人实时协作绘画聊天室（桌面端）",
   "author": "Ankry",
@@ -31,6 +31,7 @@
       "main.js",
       "preload.js",
       "server-embed.js",
+      "tunnel.js",
       "server/**/*",
       "renderer/**/*",
       "build/icon.png",
