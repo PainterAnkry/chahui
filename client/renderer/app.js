@@ -1952,7 +1952,9 @@
     if (status === 'online' && net.latency && !net.isLocal()) label += ' · ' + net.latency + 'ms';
     if (S.room) $('#roomMeta').textContent = S.room.width + '×' + S.room.height + ' · 在线 ' + (S.room.online || 0) + ' 人 · ' + label;
     if (status === 'offline') setStatus('连接断开，正在重连…');
-    else if (status === 'online') setStatus(net.isLocal() ? '离线模式 · 本机独自画，不联机' : ('已连接 ' + net.url));
+    else if (status === 'online') setStatus(net.isLocal()
+      ? ('离线模式 · 自己单机画' + (srvState.on ? '（服务器仍在后台跑）' : ''))
+      : ('已连接 ' + net.url));
   }
 
   /* ============================================================ 图层 */
@@ -2809,7 +2811,12 @@
   /**
    * 画那颗按钮。**动作**和**状态**刻意分开：按钮上永远写「你现在能做的事」，
    * 右边那行小字才写「现在是什么样」—— 两者混在一个按钮上，用户分不清
-   * 「关闭服务器」到底是当前状态还是将要执行的动作。
+   * 「切到离线」到底是当前状态还是将要执行的动作。
+   *
+   * 三种情形，因为「服务器在不在跑」和「你在不在线」是两件事：
+   *   · 服务器没跑          → 按钮「开启服务器」（起一个并连上）
+   *   · 服务器在跑 + 你在离线 → 按钮「连回服务器」
+   *   · 服务器在跑 + 你在在线 → 按钮「切到离线」（只断开你自己，服务器留着力气）
    */
   function renderServerToggle() {
     var row = $('#srvRow');
@@ -2828,18 +2835,33 @@
       return;
     }
     btn.disabled = false;
+    var offline = net.isLocal();
     var lan = srvLanText();
-    if (srvState.on) {
-      btn.textContent = '关闭服务器';
-      st.className = 'srv-state on';
-      st.textContent = '已开启' + (lan ? ' · ' + lan : (srvState.port ? ' · 端口 ' + srvState.port : ''));
-      hint.textContent = '同一 WiFi 的朋友用浏览器打开上面的地址就能加入。关掉后进入离线模式，自己单机画。';
-    } else {
+
+    if (!srvState.on) {
       btn.textContent = '开启服务器';
       st.className = 'srv-state off';
-      st.textContent = net.isLocal() ? '已关闭 · 离线模式（当前）' : '已关闭';
-      hint.textContent = '离线模式不占端口、不出网，自己单机画。在下面「创建新房间」就能开始。';
+      st.textContent = offline ? '已关闭 · 离线模式（当前）' : '已关闭';
+      hint.textContent = '这台机器还没开服务器 —— 开启后同一 WiFi 的朋友就能加入。';
+      return;
     }
+
+    if (offline) {
+      btn.textContent = '连回服务器';
+      st.className = 'srv-state off';
+      st.textContent = '已开启（后台运行）· 当前离线' + (lan ? ' · ' + lan : '');
+      hint.textContent = '服务器仍在后台跑，随时可以连回去；离线时自己单机画、不出网。';
+      return;
+    }
+
+    btn.textContent = '切到离线';
+    st.className = 'srv-state on';
+    st.textContent = '已开启' + (lan ? ' · ' + lan : (srvState.port ? ' · 端口 ' + srvState.port : ''));
+    // 在线，但连的不一定是本机这台（比如手动填了公网地址）—— 那就说清楚，别让人以为
+    // 上面那个局域网地址是他现在用的地址。
+    var ownWs = /^wss?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/)/i.test(net.url || '');
+    hint.textContent = '点这里只是自己断开、单机画；服务器照旧在后台跑，同一 WiFi 的朋友仍能加入。'
+      + (ownWs ? '' : ' 你当前连的是 ' + (net.url || '—') + '。');
   }
 
   /** 主进程报来的服务器状态（开机问一次，之后它一有变化就会推） */
@@ -2879,55 +2901,93 @@
   }
 
   /**
-   * 开 / 关本机服务器，并让客户端跟着换通道。
+   * 在线 ↔ 离线。**这颗按钮不动服务器**，只换客户端走哪条通道：
    *
-   * 「关」不是断开连接，是**真的把服务器停掉**（不再监听端口，同机别的程序也连不进来）。
-   * 停掉之后还能接着画，靠的是离线模式（local://）：主进程里挂一个不走 socket 的客户端，
-   * 房间状态机是同一份 —— 所以在线怎么画、离线就怎么画。
+   *   · 在线 = 连本机服务器（ws://localhost:<端口>/ws）—— 同一 WiFi 的朋友能加入
+   *   · 离线 = 本机通道（local://）—— 消息照样进同一个房间状态机，不占端口、不出网
+   *
+   * **为什么「离线」不停服务器**：桌面端的服务器同时是这台机器的「房间存档 + 网页版入口」，
+   * 停掉端口对单机画画没有任何好处，却会把正画着的朋友一脚踢出去，还要处理
+   * 「端口刚释放没凉透」的重开时序（close 过的 WebSocketServer 是终态，得整个重建）。
+   * 所以「离线」= **我这个人离线**，服务器继续在后台跑。
+   *
+   * 代价是有意接受的：此时你自己在离线档，但同一局域网的人仍能从那个地址进来。
+   * 想要端口也一起停，那是独立运行服务端的场景（`node server/src/index.js`，
+   * 真停见 tools/test-server-toggle.js 覆盖的 stopListening）。
    */
-  function setServerOn(on) {
+  function goOffline() {
+    var D = desktopBridge();
+    if (!D) { toast('网页版没有离线模式，填服务器地址连过去就行', 'err'); return; }
+    if (net.isLocal()) { toast('现在就已经是离线模式了'); return; }
+    if (!confirmSrvSwitch()) return;
+    var btn = $('#btnServerToggle');
+    if (btn) { btn.disabled = true; btn.textContent = '正在切换…'; }
+
+    // 先退出当前房间，再换通道。注意这里**不用 applyServer()**：
+    // 离线档是个会话级的选择，不该把「记住的服务器地址」覆盖成 local://，
+    // 否则下次开应用会直接落在离线档，用户会以为连不上服务器。
+    if (S.joined) resetRoomUi('');
+    net.close();                          // 旧 socket 必须真的关掉（见下），离线通道不替你关
+    net.connect(global.Net.LOCAL_URL);
+
+    toast('已切到离线模式 —— 自己单机画；服务器还在后台跑，同一 WiFi 的人照样能进', 'ok', 4200);
+    renderServerToggle();
+    refreshMenuChecks();
+  }
+
+  /** 回到在线：服务器没在跑就顺手起一个，然后连上去 */
+  function goOnline() {
     var D = desktopBridge();
     if (!D) { toast('网页版没有本机服务器，填服务器地址连过去就行', 'err'); return; }
     if (!confirmSrvSwitch()) return;
     var btn = $('#btnServerToggle');
-    if (btn) { btn.disabled = true; btn.textContent = on ? '正在开启…' : '正在关闭…'; }
+    var needStart = !srvState.on;
+    if (btn) { btn.disabled = true; btn.textContent = needStart ? '正在开启…' : '正在连接…'; }
 
-    // 先断开、退出房间，再动手。顺序很重要：
-    //  · 关服务器时如果我们自己的 ws 还连着，server.close() 的回调会一直等它 —— 界面就卡住了
-    //  · 不断开的话，换通道后 net 的 open 回调会拿着旧房间号去新后端重连
-    var before = function () {
-      if (S.joined) resetRoomUi('');
-      net.close();
-    };
-
-    var step = on ? D.serverStart() : D.serverStop();
+    var step = needStart ? D.serverStart() : null;
     var p = (step && step.then) ? step : Promise.resolve(step);
 
-    before();
-
     p.then(function (r) {
-      if (on && (!r || !r.ok)) {
+      if (needStart && (!r || !r.ok)) {
         toast('服务器没起来：' + ((r && r.error) || '未知原因'), 'err', 4200);
         return;
       }
-      if (on) {
-        var port = (r && r.port) || 8437;
-        applyServer('ws://localhost:' + port + '/ws');
-        var lan = (r && r.lan && r.lan.length) ? (' · 同一 WiFi 打开 http://' + r.lan[0] + ':' + port + ' 就能加入') : '';
-        toast('服务器已开启' + lan, 'ok', 4200);
-      } else {
-        applyServer(global.Net.LOCAL_URL);
-        toast('服务器已关闭，已切到离线模式（本机独自画，不联机）', 'ok', 3600);
-      }
+      var port = (r && r.port) || srvState.port || 8437;
+      var url = 'ws://localhost:' + port + '/ws';
+      // 先退房、先断，再连：这里的 url 有可能和当前那条一模一样，
+      // 而「地址没变」的路径是不重连的 —— 不显式断一次就会卡在一个已关掉的 socket 上。
+      if (S.joined) resetRoomUi('');
+      net.close();
+      Cfg.remember(url);
+      net.connect(url);
+      var lan = (r && r.lan && r.lan.length) ? (' · 同一 WiFi 打开 http://' + r.lan[0] + ':' + port + ' 就能加入') : '';
+      toast('已回到在线模式' + lan, 'ok', 4200);
     }).catch(function (e) {
       toast('切换失败：' + ((e && e.message) || e), 'err', 4200);
     }).then(function () {
       refreshServerState();
       renderServerToggle();
+      refreshMenuChecks();
     });
   }
 
-  function toggleServer() { setServerOn(!srvState.on); }
+  function setServerOn(on) { if (on) goOnline(); else goOffline(); }
+
+  /**
+   * 入口页那颗按钮的点击：**按钮上写什么就做什么**。
+   * 三种状态各自对应一个动作（见 renderServerToggle），所以这里不能简单写成
+   * 「离线就上线、在线就离线」—— 「服务器没起来但我正连着别的服务器」那一档，
+   * 按钮写的是「开启服务器」，照着「在线就离线」的规则点下去会切到离线，
+   * 跟按钮上那句话正好相反（这个坑是 test-server-button 第 5 组抓出来的）。
+   */
+  function serverButtonAction() {
+    // 「开启服务器」和「连回服务器」都是往在线走，只有「切到离线」是往离线走
+    var toOnline = !srvState.on || net.isLocal();
+    setServerOn(toOnline);
+  }
+
+  /** 菜单里的「离线模式」：它是个勾选项，勾上/取消只跟「在不在离线档」有关 */
+  function toggleOffline() { setServerOn(net.isLocal()); }
 
   /** 空房 = 没人在线 + 一笔没画 + 没有底图。服务端在 summary() 里给的就是这个口径。 */
   var lastRoomList = [];
@@ -6266,7 +6326,7 @@
     });
     $('#btnCopyLan').addEventListener('click', copyLan);
     var btnSrv = $('#btnServerToggle');
-    if (btnSrv) btnSrv.addEventListener('click', toggleServer);
+    if (btnSrv) btnSrv.addEventListener('click', serverButtonAction);
     var btnAva = $('#btnPickAvatar');
     if (btnAva) btnAva.addEventListener('click', pickAvatar);
     var btnAvaClr = $('#btnClearAvatar');
@@ -8132,6 +8192,10 @@
       // 网络层带话过来时以它为准：比如「离线模式只有桌面端有」这种，比一句
       // 笼统的「连接断开」有用得多
       if (e && e.message) setStatus(e.message);
+      // 在线 / 离线是「那一行按钮 + 菜单里那个勾」的输入，两处都得跟着重画。
+      // status 事件只在**真的换档**时才会发（setStatus 里同值会提前 return），所以不贵。
+      renderServerToggle();
+      refreshMenuChecks();
     });
     net.on('open', function () {
       if (S.room && S.room.id && S.me.name) {
@@ -10197,10 +10261,13 @@
 
     /* ---- 菜单栏 / 快捷键要用到的动作（菜单结构见 menu.js） ---- */
     openEntry: openEntry, doExport: doExport, doShare: doShare, showInfo: showInfo,
-    // 本机服务器开关（桌面端）：入口页那颗按钮 + 菜单里的「其他 → 本机服务器」
-    toggleServer: toggleServer,
+    // 离线模式（桌面端）：入口页那颗按钮（serverButtonAction，按按钮文案行事）
+    // + 菜单里的「其他 → 离线模式」（toggleOffline，只管离线档的开关）。
+    // 它**不停服务器**，只换客户端通道，所以「在不在线」看 isOffline，不看 serverOn
+    toggleServer: toggleOffline,
     setServerOn: setServerOn,
     serverOn: function () { return !!srvState.on; },
+    isOffline: function () { return net.isLocal(); },
     serverState: function () { return srvState; },
     refreshServerState: refreshServerState,
     toggleRecord: toggleRecord,

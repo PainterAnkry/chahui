@@ -405,10 +405,11 @@
         SEP,
         def('other', 'other.info', '房间信息', { mnemonic: 'I', run: function () { A().showRoomInfo(); } }),
         def('other', 'other.share', '复制分享链接', { mnemonic: 'C', run: function () { A().doShare(); } }),
-        // 本机服务器开关（只有桌面端有）。「关闭」= 真停掉服务器、切到离线模式自己画。
-        def('other', 'other.server', '本机服务器', {
+        // 离线模式开关（只有桌面端有）。注意它**不停服务器**，只是自己断开走本机通道；
+        // 所以勾选状态看「现在在不在离线档」，不看服务器开着没有。
+        def('other', 'other.server', '离线模式（自己单机画）', {
           mnemonic: 'S',
-          check: function () { return !!(A().serverOn && A().serverOn()); },
+          check: function () { return !!(A().isOffline && A().isOffline()); },
           run: function () { A().toggleServer && A().toggleServer(); }
         }),
         SEP,

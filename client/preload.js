@@ -38,7 +38,8 @@ contextBridge.exposeInMainWorld('chahuDesktop', {
   getServerInfo: () => ipcRenderer.invoke('chahu:server-info'),
 
   /* 离线模式：本地画布不走 socket，消息直通主进程里那份服务端。
-     房间状态机是同一份，所以「关掉服务器」之后照旧能建房间、画、撤销。 */
+     房间状态机是同一份，所以切到离线之后照旧能建房间、画、撤销。
+     **注意这里没有 serverStop** —— 离线只是换通道，不停服务器（见 main.js 那段注释）。 */
   localOpen: () => ipcRenderer.invoke('chahu:local-open'),
   localFeed: (raw) => ipcRenderer.invoke('chahu:local-feed', raw),
   localClose: () => ipcRenderer.invoke('chahu:local-close'),
@@ -48,10 +49,9 @@ contextBridge.exposeInMainWorld('chahuDesktop', {
     return () => ipcRenderer.removeListener('chahu:local-msg', fn);
   },
 
-  /* 开关服务器：真停（不再监听端口），不是断开连接 */
+  /* 服务器状态 / 开启。没有「关闭」—— 桌面端不支持把端口停掉 */
   serverStatus: () => ipcRenderer.invoke('chahu:server-status'),
   serverStart: () => ipcRenderer.invoke('chahu:server-start'),
-  serverStop: () => ipcRenderer.invoke('chahu:server-stop'),
   onServerState: (cb) => {
     const fn = (_e, s) => { try { cb(s); } catch (err) { /* ignore */ } };
     ipcRenderer.on('chahu:server', fn);

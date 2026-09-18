@@ -113,16 +113,17 @@ ipcMain.handle('chahu:set-embedded', (e, on) => writeConfig({ embeddedServer: !!
 /** 局域网地址 / 端口，分享链接要用 */
 ipcMain.handle('chahu:server-info', () => serverInfo);
 
-/* ---------------- 开关服务器 / 离线模式 ----------------
+/* ---------------- 离线模式 ----------------
  *
- * 「关闭服务器」不是「断开连接」，是**真的把服务器停掉**（不再监听端口，
- * 同机别的程序也连不进来）。停掉之后还能接着画画，靠的是离线模式：
- * 在本进程里挂一个不走 socket 的客户端（client/local-host.js），
- * 房间状态机照旧跑 —— 有网 / 没网共用同一份服务端逻辑。
+ * 界面上的那颗按钮叫「离线模式」，它**不动服务器** —— 桌面端的服务器同时是
+ * 这台机器的「房间存档 + 网页版入口」，停掉端口对单机画画没好处，还会把正画着的
+ * 朋友一脚踢出去，并留下「端口刚释放没凉透」的重开时序（close 过的
+ * WebSocketServer 是终态，得整个重建）。所以它只做一件事：在本进程里挂一个
+ * 不走 socket 的客户端（client/local-host.js），消息照旧进同一个房间状态机 ——
+ * 有网 / 没网共用同一份服务端逻辑，也就不存在「离线能画、在线的某些按钮没反应」。
  *
- * 注意：serverInfo 非空 = 「服务器开着」这档。被复用（端口上本来是别人在跑）
- * 时停掉我们这边的监听是空操作，但用户的意思本来就是「我这边不用服务器了」，
- * 所以照样切到离线。
+ * 真要把端口也停掉（独立部署 / 测试用），服务端那边有 stopListening()，
+ * 见 tools/test-server-toggle.js 覆盖的那条路；桌面端刻意不暴露它。
  */
 let localSession = null;
 
@@ -168,7 +169,11 @@ ipcMain.handle('chahu:server-status', () => ({
   local: !!localSession
 }));
 
-/** 开服务器：**现在就用得上**（不是「下次启动生效」） */
+/**
+ * 开服务器：**现在就用得上**（不是「下次启动生效」）。
+ * 只有「配置文件里关了内置服务器 / 上次起来失败」这两种情形才需要点它 ——
+ * 「离线模式」那颗按钮用的是它，不是它的反面。
+ */
 ipcMain.handle('chahu:server-start', async () => {
   const cfg = readConfig();
   try {
@@ -188,17 +193,6 @@ ipcMain.handle('chahu:server-start', async () => {
   } catch (e) {
     return { ok: false, error: e.message };
   }
-});
-
-/** 关服务器。房间不销毁 —— 紧接着切到离线模式，画的还是同一间房 */
-ipcMain.handle('chahu:server-stop', async () => {
-  try {
-    const srv = require('./server/index.js');
-    await srv.stopListening();
-  } catch (e) { /* 没起来过就当它本来就没在跑 */ }
-  serverInfo = null;
-  if (win && !win.isDestroyed()) win.webContents.send('chahu:server', { on: false });
-  return { ok: true };
 });
 
 /* ---------------- 公网联机（一键 cloudflared 隧道） ----------------

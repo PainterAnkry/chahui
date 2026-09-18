@@ -1551,8 +1551,14 @@ body.panel-dragging * { cursor: grabbing !important; }
 
 .room-list-ops { display: flex; gap: 6px; }.room-list-ops .btn { flex: 1; }
 
-/* 入口里的本机服务器开关。左边那颗按钮是「动作」，右边那行字是「现在什么样」——
-   两件事分开摆，免得按钮文案一会儿是动作一会儿是状态、越看越糊涂。 */
+/* 入口里的离线模式开关。左边那颗按钮是「动作」，右边那行字是「现在什么样」——
+   两件事分开摆，免得按钮文案一会儿是动作一会儿是状态、越看越糊涂。
+   **提示必须另起一行**：跟按钮挤在同一条 flex 行里的话，提示一长就会把按钮那一列
+   压成 0 宽，按钮被画到提示文字底下、点不到了（.srv-row 用 block 就是为了这个）。 */
+.srv-row { display: block; }
+.srv-top { display: flex; align-items: center; gap: 8px; }
+.srv-top > label { width: 62px; flex: none; font-size: 12px; color: var(--text-dim); }
+.srv-row .hint { margin: 4px 0 0; padding-left: 70px; }
 .srv-line { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
 .srv-line .btn { flex: none; min-width: 92px; }
 .srv-state {

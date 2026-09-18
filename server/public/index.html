@@ -692,15 +692,23 @@
         <label>服务器</label>
         <input type="text" id="serverInput" spellcheck="false" placeholder="ws://localhost:8437/ws" />
       </div>
-      <!-- 本机服务器开关（只有桌面端有）。「关闭」= 真的把服务器停掉、不再监听端口，
-           客户端切到离线模式接着画；「开启」= 起服务器并连上去，同一 WiFi 的人可以加入。 -->
-      <div class="form-row" id="srvRow">
-        <label>本机服务器</label>
-        <div class="srv-line">
-          <button class="btn tiny" id="btnServerToggle">检测中…</button>
-          <span class="srv-state" id="srvState">—</span>
+      <!-- 离线模式开关（只有桌面端有）。它**不会停掉本机服务器**：
+           「切到离线」只是你自己断开、走本机通道（不占端口、不出网），
+           服务器继续在后台跑，同一 WiFi 的人照样能加入；
+           「连回服务器」= 服务器没在跑时顺手起一个，然后连上去。
+
+           注意这一行的结构：提示文字**另起一行**（.srv-top + .hint），不能和按钮挤在
+           同一个 flex 行里 —— 提示一长，按钮那一列的宽度会被压成 0，按钮就画到提示
+           文字底下去了：看着还在，点下去全被提示接走（Playwright 的命中测试抓到的）。 -->
+      <div class="form-row srv-row" id="srvRow">
+        <div class="srv-top">
+          <label>离线模式</label>
+          <div class="srv-line">
+            <button class="btn tiny" id="btnServerToggle">检测中…</button>
+            <span class="srv-state" id="srvState">—</span>
+          </div>
         </div>
-        <span class="hint" id="srvHint">开启后同一 WiFi 的朋友能加入；关闭则进入离线模式，自己单机画。</span>
+        <span class="hint" id="srvHint">离线 = 自己单机画（服务器仍在后台跑）；在线 = 连上本机服务器，同一 WiFi 的朋友能加入。</span>
       </div>
 
       <div class="split">

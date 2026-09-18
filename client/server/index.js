@@ -1785,7 +1785,11 @@ function listen() {
   return server;
 }
 
-/** 停掉监听（桌面端「关闭服务器」按钮用）。房间不销毁 —— 换成离线模式还能接着画 */
+/**
+ * 停掉监听、释放端口。**桌面端不调它** —— 界面上的「离线模式」只换通道不停服务器
+ * （理由见 client/main.js 那段注释）；这条是给独立部署 / 测试用的：
+ * 端口被优雅地还回去，房间不销毁，重新 listen() 之后照样在。
+ */
 function stopListening() {
   return new Promise((resolve) => {
     if (!listening) return resolve(false);

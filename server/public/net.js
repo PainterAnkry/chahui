@@ -99,6 +99,10 @@
       this.setStatus('offline', { message: '离线模式只有桌面端有；网页版必须连服务器' });
       return;
     }
+    // 从 ws 切过来时，旧 socket **必须在这里关掉**：connect() 走本机通道这条岔路时
+    // 不会碰 ws，留着它那条连接就还挂在服务端的房间里 —— 你这边已经在走本机通道了，
+    // 两边各算一个人，等于自己占两个座位（成员列表多一个、房间退不掉）。
+    if (this.ws) { try { this.ws.close(); } catch (e) { /* ignore */ } this.ws = null; }
     this.manualClose = false;
     this.local = true;
     this.localReady = false;

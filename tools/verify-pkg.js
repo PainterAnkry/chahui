@@ -28,8 +28,9 @@ const CHECKS = [
   ['renderer/config.js', [/appVersion:\s*'([0-9.]+)'/]],
   ['renderer/engine.js', [/renderUnits/, /composeGroup/, /activeGroupIds/, /applyStrokeToMask/, /dropMask/]],
   ['renderer/app.js', [/groupAdd/, /pickUpdateAsset/, /groups/, /tunnelRowHtml/, /setMyAvatar/, /shrinkAvatar/,
-    // v2.0.1：图层蒙版 / 剪贴蒙版 + PSD 导入 + 入口页服务器开关
-    /importPsdBytes/, /toggleServer/, /renderServerToggle/, /maskEdit/]],
+    // v2.0.1：图层蒙版 / 剪贴蒙版 + PSD 导入 + 入口页那颗「离线模式」开关
+    // serverButtonAction 是「按按钮文案行事」那一下 —— 有它才说明不是旧的「关闭服务器」语义
+    /importPsdBytes/, /toggleOffline/, /serverButtonAction/, /renderServerToggle/, /maskEdit/]],
   ['renderer/project.js', [/groups/, /maskPng/]],
   // PSD 导出（v1.10.0）：整块自己写的编码器，特征挑格式里最认得出的几个
   ['renderer/psd.js', [/8BPS/, /luni/, /lddg/, /packbits/, /grayChannelRLE/]],
@@ -48,7 +49,7 @@ const CHECKS = [
   ['tunnel.js', [/createTunnel/, /trycloudflare/]],
   // 离线模式（v2.0.1）：不占端口的那个客户端，必须在包里
   ['local-host.js', [/createSession/, /LocalWs/]],
-  ['preload.js', [/downloadUpdate/, /startTunnel/, /chahu:local-open/, /chahu:server-stop/]],
+  ['preload.js', [/downloadUpdate/, /startTunnel/, /chahu:local-open/, /chahu:server-start/]],
   ['main.js', [/chahu:download-update/, /chahu:tunnel-start/, /chahu:local-open/, /chahu:server-start/]]
 ];
 
