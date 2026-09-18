@@ -29,7 +29,7 @@ const CHECKS = [
   ['renderer/engine.js', [/renderUnits/, /composeGroup/, /activeGroupIds/, /applyStrokeToMask/, /dropMask/]],
   ['renderer/app.js', [/groupAdd/, /pickUpdateAsset/, /groups/, /tunnelRowHtml/, /setMyAvatar/, /shrinkAvatar/,
     // v2.0.1：图层蒙版 / 剪贴蒙版 + PSD 导入 + 入口页服务器开关
-    /importPsdBytes/, /toggleServer/, /renderServerToggle/, /target === 'mask'/]],
+    /importPsdBytes/, /toggleServer/, /renderServerToggle/, /maskEdit/]],
   ['renderer/project.js', [/groups/, /maskPng/]],
   // PSD 导出（v1.10.0）：整块自己写的编码器，特征挑格式里最认得出的几个
   ['renderer/psd.js', [/8BPS/, /luni/, /lddg/, /packbits/, /grayChannelRLE/]],
