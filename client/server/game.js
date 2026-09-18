@@ -373,7 +373,9 @@ class Game {
     if (this.repickLeft <= 0) return { ok: false, message: '这一回合已经换过了' };
     this.repickLeft -= 1;
     this.choices.forEach(w => { if (this.usedWords.indexOf(w) < 0) this.usedWords.push(w); });
-    this.choices = WORDS.pickChoices(P.GAME.CHOICES, this.usedWords);
+    // ⚠️ 第三个参数（主题词池）**必须带** —— 漏掉的话换出来的候选会掉回通用词库，
+    // 表现就是「选了明日方舟，换一组之后冒出「长颈鹿」」。见 test-game 的「换一组不出题外词」。
+    this.choices = WORDS.pickChoices(P.GAME.CHOICES, this.usedWords, WORDS.poolForTheme(this.theme));
     // 换完只剩一个候选就直接开画（和 beginRound 同一套兜底）
     this.word = this.choices.length === 1 ? this.choices[0] : '';
     if (this.word) { this.beginDraw(); return { ok: true }; }

@@ -15,7 +15,7 @@
  *
  * 覆盖：
  *   1. 入口弹窗的头像控件（预览 / 选择 / 清除）
- *   2. 选一张 320×240 的图：压到 96×72、体积 < 48KB、落进 localStorage
+ *   2. 选一张 320×240 的图：在裁剪窗里框成方形 → 输出 96×96、体积 < 48KB、落进 localStorage
  *   3. 建房时随 ROOM_CREATE 带上去，另一端成员列表立刻是图片
  *   4. 已在房里改头像：走「进入茶绘室」把入口弹窗叫回来，改完**不用重进房**，
  *      另一端当场更新（这正是 member:avatar 这条消息存在的理由）
@@ -174,6 +174,12 @@ async function pickAvatar(page, buf, name) {
     page.evaluate(() => document.getElementById('btnPickAvatar').click())
   ]);
   await chooser.setFiles({ name: name || 'ava.png', mimeType: 'image/png', buffer: buf });
+  // v2.0.2 起选图先过裁剪窗：等它弹出，再点「就这个，用它」（默认居中 cover，不用动）
+  await page.waitForFunction(
+    () => document.getElementById('avaCropMask') && !document.getElementById('avaCropMask').classList.contains('hidden'),
+    { timeout: 8000 }
+  );
+  await page.click('#btnAvaCropOk');
   await sleep(800);
 }
 
@@ -254,8 +260,8 @@ async function raw(page, type, payload) {
   const A = await mkPage();
   const B = await mkPage();
 
-  const IMG_A = makePng(320, 240, [200, 40, 40, 255]);   // 320×240 → 期望压成 96×72
-  const IMG_B = makePng(120, 300, [40, 80, 200, 255]);   // 120×300 → 期望压成 38×96（高的那一维顶到 96）
+  const IMG_A = makePng(320, 240, [200, 40, 40, 255]);   // 320×240 → 裁剪输出 96×96
+  const IMG_B = makePng(120, 300, [40, 80, 200, 255]);   // 120×300（竖图）→ 裁剪输出 96×96
 
   // A 打开首页（先不建房，入口弹窗还在）
   await A.goto(BASE + '/', { waitUntil: 'domcontentloaded' });
@@ -272,7 +278,7 @@ async function raw(page, type, payload) {
   ok('没设头像时「清除」是藏着的', pv.clearHidden === true, pv.clearHidden);
 
   /* ================= 2) 选图 → 压缩 ================= */
-  console.log('\n=== 2) 选一张 320×240 的图：压到 96px ===');
+  console.log('\n=== 2) 选一张 320×240 的图：裁剪成 96×96 ===');
   await pickAvatar(A, IMG_A);
   pv = await A.evaluate(() => window.__preview());
   const avaA = await A.evaluate(() => window.__meAva());
@@ -284,7 +290,7 @@ async function raw(page, type, payload) {
   ok('压出来的东西是合法 dataURL（png/jpeg/webp）',
     /^data:image\/(png|jpeg|webp);base64,/.test(avaA), avaA.slice(0, 30));
   ok('体积在 48KB 上限以内（不然会被服务端丢掉）', lenA > 0 && lenA <= P.AVATAR_MAX, lenA + ' 字符');
-  ok('长边压到 96px（320×240 → 96×72）', !!sizeA && sizeA[0] === 96 && sizeA[1] === 72, sizeA);
+  ok('裁剪输出固定 96×96（方形）', !!sizeA && sizeA[0] === 96 && sizeA[1] === 96, sizeA);
   ok('顺手存进了 localStorage（下次打开还在）', lsA === avaA && lsA.length > 0, lsA.length + ' 字符');
   ok('「清除」按钮露出来了', pv.clearHidden === false, pv.clearHidden);
 
@@ -318,8 +324,8 @@ async function raw(page, type, payload) {
   await closeEntry(B);
   const avaB = await B.evaluate(() => window.__meAva());
   const sizeB = await B.evaluate(() => window.__avaSize());
-  ok('乙的头像压好了（120×300 → 38×96，高的一维顶到 96）',
-    !!sizeB && sizeB[1] === 96 && sizeB[0] === 38, sizeB);
+  ok('乙的头像裁剪输出也是固定 96×96（方形）',
+    !!sizeB && sizeB[0] === 96 && sizeB[1] === 96, sizeB);
   const gotA = await waitFor(async () => {
     const r = await A.evaluate(() => window.__avaRow('乙'));
     return !!(r && r.hasImg && r.src === avaB);

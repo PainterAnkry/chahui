@@ -683,7 +683,7 @@
         <label>头像</label>
         <div class="ava-pick">
           <span class="ava-preview" id="avaPreview">默认</span>
-          <button class="btn tiny" id="btnPickAvatar" title="选一张图片当头像（本机会自动压到 96px）">选择图片…</button>
+          <button class="btn tiny" id="btnPickAvatar" title="选一张图片，裁一块方形当头像（自动压到 96×96）">选择图片…</button>
           <button class="btn tiny ghost hidden" id="btnClearAvatar">清除</button>
         </div>
         <span class="hint">压到 96px 后随成员列表同步，同房间的人都能看到</span>
@@ -1167,7 +1167,8 @@
       <div class="form-row">
         <label>主题词库</label>
         <select id="gameTheme"></select>
-        <span class="hint">只从选中的词库里出题（接龙面板里也能选）</span>
+        <button class="mini" id="btnGameThemeManage" title="新建 / 编辑自定义词库">管理…</button>
+        <span class="hint">只从选中的词库里出题（接龙面板、自定义词库共用这一份选择）</span>
       </div>
       <div class="form-row">
         <label>作画时间</label>
@@ -1346,6 +1347,27 @@
       <button class="btn" id="btnTrophyStop">结束游戏</button>
       <span class="spacer"></span>
       <button class="btn primary" id="btnTrophyAgain">再来一局</button>
+    </div>
+  </div>
+</div>
+
+<!-- 头像裁剪：选图后先在这里框一块方形（圆形视口就是实际显示效果），确定再压成 96×96 -->
+<div class="modal-mask hidden" id="avaCropMask">
+  <div class="modal ava-crop">
+    <div class="modal-head">
+      <h3>裁剪头像</h3>
+      <button class="icon-btn" id="btnAvaCropClose">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="ac-view" id="acView">
+        <img id="acImg" alt="" draggable="false">
+      </div>
+      <p class="hint ac-hint">拖动图片调整位置，滚轮或滑块缩放 —— 圈里看到的就是上传后的样子</p>
+      <input type="range" class="ac-zoom" id="acZoom" min="0" max="1000" value="0" />
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" id="btnAvaCropCancel">取消</button>
+      <button class="btn" id="btnAvaCropOk">就这个，用它</button>
     </div>
   </div>
 </div>

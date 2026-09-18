@@ -3184,33 +3184,6 @@
    * 先试 PNG（带透明更好看），太大再退到 JPEG；JPEG 没有 alpha，所以先垫白底
    * —— 否则透明区域会变成黑块。
    */
-  function shrinkAvatar(img) {
-    var max = 96;
-    var w = img.width || img.naturalWidth || 0, h = img.height || img.naturalHeight || 0;
-    if (!w || !h) return '';
-    var k = Math.min(1, max / Math.max(w, h));
-    var cw = Math.max(1, Math.round(w * k)), ch = Math.max(1, Math.round(h * k));
-    var c = document.createElement('canvas');
-    c.width = cw; c.height = ch;
-    var cx = c.getContext('2d');
-    cx.drawImage(img, 0, 0, cw, ch);
-    var png = c.toDataURL('image/png');
-    if (png.length <= P.AVATAR_MAX) return png;
-    // JPEG 没有 alpha：不垫白底的话，透明区域出来会是黑块
-    var flat = document.createElement('canvas');
-    flat.width = cw; flat.height = ch;
-    var fx = flat.getContext('2d');
-    fx.fillStyle = '#ffffff';
-    fx.fillRect(0, 0, cw, ch);
-    fx.drawImage(c, 0, 0);
-    var qs = [0.9, 0.8, 0.7, 0.6, 0.5];
-    for (var i = 0; i < qs.length; i++) {
-      var j = flat.toDataURL('image/jpeg', qs[i]);
-      if (j.length <= P.AVATAR_MAX) return j;
-    }
-    return '';
-  }
-
   function pickAvatar() {
     var inp = document.createElement('input');
     inp.type = 'file';
@@ -3220,19 +3193,136 @@
       if (!f) return;
       if (!/^image\//.test(f.type || '')) { toast('请选一张图片文件', 'err'); return; }
       if (f.size > 12 * 1024 * 1024) { toast('这张图太大了（超过 12MB）', 'err'); return; }
-      var url = URL.createObjectURL(f);
-      var img = new Image();
-      img.onload = function () {
-        URL.revokeObjectURL(url);
-        var data = '';
-        try { data = shrinkAvatar(img); } catch (e) { data = ''; }
-        if (!data) { toast('这张图压不成头像，换一张试试', 'err'); return; }
-        setMyAvatar(data);
-      };
-      img.onerror = function () { URL.revokeObjectURL(url); toast('这张图读不出来', 'err'); };
-      img.src = url;
+      var fr = new FileReader();
+      fr.onload = function () { openAvaCrop(String(fr.result)); };
+      fr.onerror = function () { toast('这张图读不出来', 'err'); };
+      fr.readAsDataURL(f);
     };
     inp.click();
+  }
+
+  /* ------------------------------------------------------------ 头像裁剪 */
+  /* 选图后先框一块方形再上传：圆形视口就是头像的实际显示效果，
+     拖动定位、滚轮 / 滑块缩放，确定后按框内区域出 96×96。
+     （旧的 shrinkAvatar 是整图压成长边 96，不是方的，已随裁剪上线移除。） */
+
+  var ac = null;   // { img, imgEl, view, scale, min, max, ox, oy }
+
+  function acClamp() {
+    var w = ac.img.naturalWidth * ac.scale, h = ac.img.naturalHeight * ac.scale;
+    // 图片必须一直盖住视口，不许露出底色
+    ac.ox = Math.min(0, Math.max(ac.view - w, ac.ox));
+    ac.oy = Math.min(0, Math.max(ac.view - h, ac.oy));
+  }
+
+  function acRender() {
+    ac.imgEl.style.transform = 'translate(' + ac.ox + 'px,' + ac.oy + 'px) scale(' + ac.scale + ')';
+    var z = $('#acZoom');
+    if (z) z.value = String(Math.round(1000 * (ac.scale - ac.min) / Math.max(1e-6, ac.max - ac.min)));
+  }
+
+  /** 缩放（围绕视口中心），ns 新的 scale 值，调用方负责 min/max 夹取 */
+  function acZoomTo(ns) {
+    var k = ns / ac.scale;
+    var cv = ac.view / 2;
+    ac.ox = cv - (cv - ac.ox) * k;
+    ac.oy = cv - (cv - ac.oy) * k;
+    ac.scale = ns;
+    acClamp();
+    acRender();
+  }
+
+  function openAvaCrop(url) {
+    var img = new Image();
+    img.onload = function () {
+      var view = 264;
+      var w = img.naturalWidth || 1, h = img.naturalHeight || 1;
+      var min = Math.max(view / w, view / h);   // cover：刚好盖住视口
+      ac = {
+        img: img, imgEl: $('#acImg'), view: view,
+        min: min, max: min * 8, scale: min, ox: 0, oy: 0
+      };
+      ac.imgEl.src = url;
+      ac.ox = (view - w * min) / 2;
+      ac.oy = (view - h * min) / 2;
+      $('#avaCropMask').classList.remove('hidden');
+      acRender();
+    };
+    img.onerror = function () { toast('这张图读不出来', 'err'); };
+    img.src = url;
+  }
+
+  function closeAvaCrop() {
+    $('#avaCropMask').classList.add('hidden');
+    ac = null;
+  }
+
+  function acConfirm() {
+    if (!ac) return;
+    // 视口里看到的方形 → 映射回原图坐标 → 画成 96×96
+    var side = ac.view / ac.scale;
+    var sx = -ac.ox / ac.scale, sy = -ac.oy / ac.scale;
+    var c = document.createElement('canvas');
+    c.width = 96; c.height = 96;
+    var cx = c.getContext('2d');
+    var data = '';
+    try {
+      cx.drawImage(ac.img, sx, sy, side, side, 0, 0, 96, 96);
+      data = c.toDataURL('image/png');
+      if (data.length > P.AVATAR_MAX) {
+        // PNG 超限退白底 JPEG —— 不垫白底的话透明区域会变黑块
+        var flat = document.createElement('canvas');
+        flat.width = 96; flat.height = 96;
+        var fx = flat.getContext('2d');
+        fx.fillStyle = '#ffffff';
+        fx.fillRect(0, 0, 96, 96);
+        fx.drawImage(c, 0, 0);
+        var qs = [0.9, 0.8, 0.7, 0.6, 0.5];
+        for (var i = 0; i < qs.length; i++) {
+          var u = flat.toDataURL('image/jpeg', qs[i]);
+          if (u.length <= P.AVATAR_MAX) { data = u; break; }
+        }
+      }
+    } catch (e) { data = ''; }
+    if (!data) { toast('这张图裁不出来，换一张试试', 'err'); return; }
+    setMyAvatar(data);
+    closeAvaCrop();
+  }
+
+  function bindAvaCrop() {
+    var view = $('#acView');
+    var drag = null;
+    view.addEventListener('pointerdown', function (e) {
+      if (!ac) return;
+      drag = { x: e.clientX, y: e.clientY, ox: ac.ox, oy: ac.oy };
+      view.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    view.addEventListener('pointermove', function (e) {
+      if (!ac || !drag) return;
+      ac.ox = drag.ox + (e.clientX - drag.x);
+      ac.oy = drag.oy + (e.clientY - drag.y);
+      acClamp(); acRender();
+    });
+    view.addEventListener('pointerup', function () { drag = null; });
+    view.addEventListener('pointercancel', function () { drag = null; });
+    view.addEventListener('wheel', function (e) {
+      if (!ac) return;
+      e.preventDefault();
+      var f = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+      acZoomTo(Math.min(ac.max, Math.max(ac.min, ac.scale * f)));
+    }, { passive: false });
+    $('#acZoom').addEventListener('input', function () {
+      if (!ac) return;
+      var t = Number(this.value) / 1000;
+      acZoomTo(ac.min + (ac.max - ac.min) * t);
+    });
+    $('#btnAvaCropClose').addEventListener('click', closeAvaCrop);
+    $('#btnAvaCropCancel').addEventListener('click', closeAvaCrop);
+    $('#btnAvaCropOk').addEventListener('click', acConfirm);
+    $('#avaCropMask').addEventListener('click', function (e) {
+      if (e.target === this) closeAvaCrop();
+    });
   }
 
   /** 设 / 清自己的头像；已经进房的话顺手广播出去（不用重进房） */
@@ -3908,6 +3998,7 @@
 
   function updateCursor(m) {
     if (m.userId === S.me.userId) return;
+    if (cursorsHiddenNow()) return;        // 自己正在画（经典画手 / 接龙作画）→ 别人的光标不显示
     var entry = S.cursors.get(m.userId);
     if (!entry) {
       var el = document.createElement('div');
@@ -3943,6 +4034,32 @@
   function clearCursors() {
     S.cursors.forEach(function (e) { e.el.remove(); });
     S.cursors.clear();
+  }
+
+  /**
+   * 该不该把**别人的**远端光标藏起来（#5）。
+   *
+   *   经典模式：我当画手时藏 —— 别人这回合被锁着笔，光标却还在画布上飘，
+   *             画的人只会被那一堆标签挡住自己要落笔的地方。
+   *   接龙：**作画这一步全员藏** —— 这一步每个人的笔迹本来就只回给自己
+   *         （见服务端的私密作画），别人的画布上不会再出现新光标，
+   *         留着那些停在原地的小旗子只会让人以为卡了。
+   *
+   * 纯本机显示，不改任何同步状态、不影响别人。
+   */
+  function cursorsHiddenNow() {
+    var g = S.game;
+    if (!g) return false;
+    if (g.mode === 'chain') return g.phase === 'chain_draw';
+    return g.phase === 'draw' && !!g.isDrawer;
+  }
+
+  function syncCursorVisibility() {
+    var box = $('#cursors');
+    if (!box) return;
+    var hide = cursorsHiddenNow();
+    // 直接清掉而不是只 display:none —— 不然回来时那批元素还停在几分钟前的位置上
+    if (hide && S.cursors.size) clearCursors();
   }
 
   /* ============================================================ 同步处理 */
@@ -5956,10 +6073,16 @@
         else { S.stickers.push(url); added++; }
         done();
       };
-      // 小图（含动图）原样保留，大图压到 220px
-      if (f.size <= 160 * 1024) {
+      // 小图原样保留；GIF 无论大小都原样保留 —— canvas 重编码会把动画压成静态第一帧
+      if (f.size <= 160 * 1024 || /gif/i.test(f.type || '')) {
         var fr = new FileReader();
-        fr.onload = function () { accept(P.normalizeSticker(String(fr.result))); };
+        fr.onload = function () {
+          var u = P.normalizeSticker(String(fr.result));
+          if (!u && /gif/i.test(f.type || '')) {
+            toast('「' + (f.name || 'GIF') + '」超过 220KB，加不进表情（太大的 GIF 保不住动画）', 'err');
+          }
+          accept(u);
+        };
         fr.onerror = function () { accept(null); };
         fr.readAsDataURL(f);
       } else {
@@ -6331,6 +6454,7 @@
     if (btnAva) btnAva.addEventListener('click', pickAvatar);
     var btnAvaClr = $('#btnClearAvatar');
     if (btnAvaClr) btnAvaClr.addEventListener('click', function () { setMyAvatar(''); });
+    bindAvaCrop();
     $('#btnPurgeRooms').addEventListener('click', purgeRooms);
     $('#serverInput').addEventListener('change', function () { applyServer(this.value); this.value = net.url; });
     $('#btnCreateRoom').addEventListener('click', doCreate);
@@ -6432,6 +6556,12 @@
     $('#btnChainCancel').addEventListener('click', function () { $('#chainMask').classList.add('hidden'); });
     $('#btnChainStart').addEventListener('click', startChainGame);
     $('#btnThemeManage').addEventListener('click', openThemeManager);
+
+    /* ---- 主题词库：两份下拉共享同一份选择（见 themeChoice） ---- */
+    $('#gameTheme').addEventListener('change', function () { setThemeChoice(this.value); });
+    $('#chainTheme').addEventListener('change', function () { setThemeChoice(this.value); });
+    // 经典面板也放一个「管理…」—— 自定义词库不该只有接龙那边能建（#1）
+    $('#btnGameThemeManage').addEventListener('click', openThemeManager);
 
     /* ---- 房间密码框 ---- */
     $('#btnPassOk').addEventListener('click', submitRoomPassword);
@@ -6717,6 +6847,8 @@
     if (g) S.gameSkew = (g.serverNow || Date.now()) - Date.now();
     S.game = g || null;
     var phase = S.game ? S.game.phase : 'off';
+    // 阶段一变，「别人的光标该不该藏」的答案就跟着变（自己当画手 / 接龙作画步）
+    syncCursorVisibility();
 
     renderGameHud();
     renderGameScore();
@@ -7769,9 +7901,12 @@
   function closeThemeManager() {
     var mask = $('#themeMask');
     if (mask) mask.classList.add('hidden');
-    // 关掉后刷新接龙面板的主题下拉（可能刚建/改/删过）
+    // 关掉后刷新**两个**面板的主题下拉（可能刚建/改/删过）
     S.themes = null;
+    var gt = $('#gameTheme');
+    if (gt) gt.dataset.built = '';        // 清掉签名，逼它下一次按新菜单重建
     renderChainDialog();
+    buildThemeSelect($('#gameTheme'));
     probePublicUrl();
   }
 
@@ -7896,6 +8031,8 @@
         toast('已保存「' + j.name + '」（' + j.count + ' 个词）'
           + (rejected.length ? '，丢掉了 ' + rejected.length + ' 个不合格的' : ''), 'ok', 3600);
         TM.editing = j.id || TM.editing;
+        // 建它就是为了用它：新建/改完之后直接把这份词库选上（两个面板一起切过去）
+        if (j.id) setThemeChoice(j.id);
         loadThemeList();
         setTimeout(function () { renderThemeList(); }, 60);
       })
@@ -7950,6 +8087,51 @@
 
   /* ---- 接龙开局对话框 ---- */
 
+  /* ---- 主题词库：两个面板共用同一份选择 ----
+   *
+   * 「你画我猜」面板和接龙面板各有一个「主题词库」下拉。以前它们各存各的，
+   * 于是用户在「你画我猜」里挑好「明日方舟」、切到接龙页签，接龙面板还是
+   * 逼他再挑一次（而且默认是别的主题）—— 白挑。现在两份下拉听**同一个**偏好，
+   * 存 localStorage，谁改都同步过去。 */
+  var THEME_KEY = 'chahu.theme';
+
+  /** 当前选中的主题（两个下拉共享；还没选过就是 default） */
+  function themeChoice() {
+    if (!S.themeChoice) S.themeChoice = lsGet(THEME_KEY, 'default') || 'default';
+    return S.themeChoice;
+  }
+
+  /** 换主题：写进偏好 + 把两个下拉一起刷成新的 */
+  function setThemeChoice(id) {
+    if (!id || id === S.themeChoice) return;
+    S.themeChoice = id;
+    lsSet(THEME_KEY, id);
+    syncThemeSelects();
+  }
+
+  /** 在一份已经填好的下拉里挑出「该选中的那一项」；共享项不在里面就退回第一项 */
+  function pickThemeOption(sel) {
+    var want = themeChoice();
+    for (var i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].value === want) return want;
+    }
+    // 共享的那一项这个下拉里没有（自定义词库被删了 / 换了服务器）—— 落到「通用」
+    return sel.options.length ? sel.options[0].value : 'default';
+  }
+
+  /** 把共享的主题刷到两个下拉上。**列表里还没有这一项就先不动它** ——
+   *  （刚新建的词库要等下一次拉到菜单才出现，这时候硬把下拉扳回「通用」是白闪一下） */
+  function syncThemeSelects() {
+    var want = themeChoice();
+    ['#gameTheme', '#chainTheme'].forEach(function (id) {
+      var el = $(id);
+      if (!el || !el.options.length) return;
+      for (var i = 0; i < el.options.length; i++) {
+        if (el.options[i].value === want) { el.value = want; return; }
+      }
+    });
+  }
+
   /**
    * 把服务端下发的主题列表填进任意一个词库下拉（经典面板 / 接龙面板共用）。
    * 列表随快照下发（服务端只给 id/name，绝不含词）。
@@ -7965,16 +8147,16 @@
     if (list && list.length) {
       var sig = list.map(function (t) { return t.id; }).join(',');
       if (sel.dataset.built !== sig) {
-        var keep = sel.value;
         sel.innerHTML = '';
         list.forEach(function (t) {
           var o = document.createElement('option');
           o.value = t.id; o.textContent = t.name;
           sel.appendChild(o);
         });
-        if (keep) sel.value = keep;
         sel.dataset.built = sig;
       }
+      // 选中项**听共享的那一份**，而不是这个下拉自己上一次的值 —— 见 themeChoice 的说明
+      sel.value = pickThemeOption(sel);
     } else if (!sel.options.length) {
       // 还没拿到真正的列表 —— 先摆一项占位，等服务端的数据到了再换掉
       sel.innerHTML = '<option value="default">通用（什么都能画）</option>';

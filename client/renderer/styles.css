@@ -1064,6 +1064,33 @@ body.tool-dragging { cursor: grabbing; user-select: none; }
   display: grid; place-items: center;
 }
 .ava-preview img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+/* 头像裁剪弹窗：圆形视口 = 头像的实际显示效果，拖图 / 滚轮或滑块缩放 */
+.ava-crop { max-width: 348px; }
+.ava-crop .modal-body { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.ac-view {
+  position: relative;
+  width: 264px; height: 264px;
+  flex: none;
+  overflow: hidden;
+  border-radius: 50%;
+  border: 2px solid var(--line);
+  background: #fafbfd;
+  touch-action: none;
+  cursor: grab;
+}
+.ac-view:active { cursor: grabbing; }
+.ac-view img {
+  position: absolute; left: 0; top: 0;
+  transform-origin: 0 0;
+  max-width: none;
+  user-select: none;
+  -webkit-user-drag: none;
+  will-change: transform;
+}
+.ac-hint { font-size: 11.5px; color: var(--text-dim); text-align: center; line-height: 1.6; }
+.ac-zoom { width: 224px; accent-color: var(--accent); cursor: pointer; }
+
 /* 远端光标标签里的小头像：跟着名字走，认人比认字快 */
 .remote-cursor .tag-ava {
   width: 14px; height: 14px;
@@ -2239,10 +2266,12 @@ body.panel-dragging * { cursor: grabbing !important; }
 .game-hud .gh-timer.warn { color: var(--danger); }
 .game-hud .gh-word {
   color: var(--text-dim);
-  white-space: nowrap;
-  max-width: 320px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* 长词 / 长串 □ 遮罩允许折行，不再截成省略号 */
+  white-space: normal;
+  max-width: min(60vw, 520px);
+  line-height: 1.45;
+  text-align: center;
+  overflow-wrap: anywhere;
 }
 .game-hud .gh-word b {
   color: var(--text);

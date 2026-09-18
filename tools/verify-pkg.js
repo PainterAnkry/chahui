@@ -27,10 +27,12 @@ if (!fs.existsSync(ASAR)) {
 const CHECKS = [
   ['renderer/config.js', [/appVersion:\s*'([0-9.]+)'/]],
   ['renderer/engine.js', [/renderUnits/, /composeGroup/, /activeGroupIds/, /applyStrokeToMask/, /dropMask/]],
-  ['renderer/app.js', [/groupAdd/, /pickUpdateAsset/, /groups/, /tunnelRowHtml/, /setMyAvatar/, /shrinkAvatar/,
+  ['renderer/app.js', [/groupAdd/, /pickUpdateAsset/, /groups/, /tunnelRowHtml/, /setMyAvatar/,
     // v2.0.1：图层蒙版 / 剪贴蒙版 + PSD 导入 + 入口页那颗「离线模式」开关
     // serverButtonAction 是「按按钮文案行事」那一下 —— 有它才说明不是旧的「关闭服务器」语义
-    /importPsdBytes/, /toggleOffline/, /serverButtonAction/, /renderServerToggle/, /maskEdit/]],
+    /importPsdBytes/, /toggleOffline/, /serverButtonAction/, /renderServerToggle/, /maskEdit/,
+    // v2.0.2：GIF 表情不再 canvas 重编码（否则动画变静态第一帧）+ 头像方形裁剪
+    /GIF 无论大小都原样保留/, /openAvaCrop/, /acConfirm/]],
   ['renderer/project.js', [/groups/, /maskPng/]],
   // PSD 导出（v1.10.0）：整块自己写的编码器，特征挑格式里最认得出的几个
   ['renderer/psd.js', [/8BPS/, /luni/, /lddg/, /packbits/, /grayChannelRLE/]],
@@ -42,9 +44,15 @@ const CHECKS = [
   ['server/rooms.js', [/normalizeGroups/, /moveGroup/, /setLayerGroup/, /avatar/, /hasMask/, /dupLayer/]],
   ['server/index.js', [/GROUP_ADD/, /GROUP_UPD/, /MEMBER_AVATAR/, /GAME_GUESS/,
     // v2.0.1：关服务器再开要重建 wss、离线模式要能从外部挂客户端
-    /stopListening/, /createWss/, /function onClient/]],
+    /stopListening/, /createWss/, /function onClient/,
+    // v2.0.2：接龙私密作画（笔迹广播抑制 + 按人过滤历史/重同步）
+    /privateDrawOn/, /strokeBroadcast/, /strokesFor/]],
   // 中途进房的人先观战（v1.10.0）
-  ['server/game.js', [/spectators/]],
+  ['server/game.js', [/spectators/,
+    // v2.0.2：换一组必须仍在所选主题词库里（第三个参数是主题词池）
+    /poolForTheme\(this\.theme\)/]],
+  // v2.0.2：接龙不自画 / 掉线顶替 / 观众不投票
+  ['server/chain.js', [/pickStandIn/, /isPlayer/]],
   // 应用内一键隧道（v1.10.0）：模块本身也要真的进包
   ['tunnel.js', [/createTunnel/, /trycloudflare/]],
   // 离线模式（v2.0.1）：不占端口的那个客户端，必须在包里

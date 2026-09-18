@@ -561,8 +561,57 @@ async function main() {
     '猫咪 vs 猫喵 = ' + P.isNearGuess('猫咪', '猫喵'));
   ok('词库里没有单字词', require('../server/src/words.js').WORDS.every(w => w.length >= 2));
 
+  /* ---------------- 「换一组」不许跳词库（#2 回归） ---------------- */
+  console.log('\n[15] 换一组 · 候选词必须留在本局的主题词池里');
+  // 曾经的 bug：repick() 调 WORDS.pickChoices 时漏了第 3 个参数（主题词池），
+  // 于是「换一组」换出来的候选悄悄掉回通用词库 —— 不报错、流程照走，
+  // 只有词变了，肉眼还以为是随机。这条用例专门把它钉死。
+  {
+    const THEMES = require('../server/src/themes');
+    const pool = THEMES.wordsOf('genshin');
+    if (info.words) {
+      // CHAHU_WORDS 的优先级高于主题词库（words.js 的约定，别的用例靠它固定答案），
+      // 这台服务端不是主题词库模式，线上词池断言不适用。
+      console.log('    （服务端用 CHAHU_WORDS 覆盖了词库，线上词池断言不适用，跳过）');
+    } else {
+      const all = [A, B, C];
+      all.forEach(c => { c.word = ''; });
+      A.send(P.C2S.GAME_START, { rounds: 1, theme: 'genshin' });
+      const pickReady = await waitFor(() => {
+        const dd = all.find(c => c.gstate && c.gstate.phase === 'pick' && (c.gstate.choices || []).length > 0);
+        return !!dd;
+      }, 4000, '带主题的选词阶段');
+      ok('带主题开局能进到选词阶段', pickReady);
+      const d = all.find(c => c.gstate && c.gstate.phase === 'pick' && (c.gstate.choices || []).length > 0) || A;
+      ok('快照里带的就是本局主题', !!d.gstate && d.gstate.theme === 'genshin',
+        'theme=' + (d.gstate && d.gstate.theme));
+      const before = (d.gstate.choices || []).slice();
+      ok('开局候选词全部出自本局主题词池',
+        before.length === P.GAME.CHOICES && before.every(w => pool.indexOf(w) >= 0),
+        'pool=genshin(' + pool.length + ') got=' + JSON.stringify(before));
+      ok('画手还有换词次数', d.gstate.repickLeft === P.GAME.REPICK_LIMIT,
+        'repickLeft=' + d.gstate.repickLeft);
+
+      d.send(P.C2S.GAME_REPICK, {});
+      const repicked = await waitFor(() =>
+        d.gstate.phase === 'pick' && d.gstate.repickLeft === 0
+        && (d.gstate.choices || []).length === P.GAME.CHOICES, 4000, '换一组');
+      ok('换一组成功', repicked, 'repickLeft=' + (d.gstate && d.gstate.repickLeft));
+      const after = (d.gstate.choices || []).slice();
+      ok('★ 换一组之后候选词仍未跳出主题词池（#2 回归）',
+        after.length === P.GAME.CHOICES && after.every(w => pool.indexOf(w) >= 0),
+        'pool=genshin(' + pool.length + ') got=' + JSON.stringify(after));
+      ok('换一组确实换掉了词（不是原样返回）',
+        after.length === P.GAME.CHOICES && after.some(w => before.indexOf(w) < 0),
+        'before=' + JSON.stringify(before) + ' after=' + JSON.stringify(after));
+
+      A.send(P.C2S.GAME_STOP, {});
+      ok('停局', await waitFor(() => A.phase() === 'off', 5000, 'off'));
+    }
+  }
+
   /* ---------------- 收尾 ---------------- */
-  console.log('\n[14] 收尾');
+  console.log('\n[16] 收尾');
   A.send(P.C2S.ROOM_DESTROY, {});
   ok('房间可以正常解散', await waitFor(() => clients.every(c => c.msgs(P.S2C.ROOM_DESTROYED).length > 0), 5000));
   clients.forEach(c => c.close());

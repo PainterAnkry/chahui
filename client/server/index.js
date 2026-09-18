@@ -291,6 +291,48 @@ function roomBroadcast(room, type, payload, exceptId) {
   }
 }
 
+/** 只发给房间里的某一个人（找不到人就算了） */
+function sendToUser(room, userId, type, payload) {
+  const raw = JSON.stringify(Object.assign({ t: type }, payload || {}));
+  for (const m of room.members.values()) {
+    if (m.userId !== userId) continue;
+    if (m.ws.readyState === m.ws.OPEN) m.ws.send(raw);
+    return;
+  }
+}
+
+/* ------------------------------------------------------------------ 私密作画
+ *
+ * 接龙的「作画」这一步是**并行多条链**：一圈里可能有好几个人同时要画，
+ * 而且画的还是不同的链。可房间只有一块画布 —— 如果照常广播，结果就是
+ *   ① 大家能实时看见别人正在画什么（下一位猜词的人等于提前拿到答案，链条永远不跑偏）
+ *   ② 每个人的 exportPNG 导出的是**所有人叠在一起的画面**，交上去的作品全是同一张
+ * 两条都足以把玩法毁掉。
+ *
+ * 所以作画这一步的笔迹**只回给作者本人**：服务端照旧存进房间笔迹（这样作者掉线重连
+ * 能把画找回来），但不发给别人；重连 / 中途进房时也只把这**自己的**那几笔发过去。
+ * 步骤首尾的 resetCanvas() 会把画布清干净，所以私有笔迹不会活到下一步。
+ *
+ * ⚠ 新增「会带笔迹像素出去」的消息时，**必须**用 strokeBroadcast() 而不是 roomBroadcast()，
+ * 否则就是在私密作画期间把它泄给全场。
+ */
+function privateDrawOn(room) {
+  const g = room && room.game;
+  return !!(g && g.mode === 'chain' && g.phase === CHAIN_PHASE.DRAW);
+}
+
+/** 笔迹类广播的统一出口：私密作画期间**谁都不发** */
+function strokeBroadcast(room, type, payload, exceptId) {
+  if (privateDrawOn(room)) return;
+  roomBroadcast(room, type, payload, exceptId);
+}
+
+/** 某人此刻**能看到的**历史笔迹（私密作画期间只有他自己画的那几笔） */
+function strokesFor(room, userId) {
+  if (!privateDrawOn(room)) return room.strokes;
+  return room.strokes.filter(s => s.userId === userId);
+}
+
 function sanitizeName(s, fallback) {
   if (typeof s !== 'string') return fallback;
   const t = s.replace(/[\u0000-\u001f\u007f<>]/g, '').trim().slice(0, 16);
@@ -302,10 +344,11 @@ function sanitizeText(s, max) {
   return s.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').slice(0, max);
 }
 
-function historyChunks(room) {
+function historyChunks(room, userId) {
+  const src = strokesFor(room, userId);
   const chunks = [];
-  for (let i = 0; i < room.strokes.length; i += P.HISTORY_CHUNK_SIZE) {
-    chunks.push(room.strokes.slice(i, i + P.HISTORY_CHUNK_SIZE));
+  for (let i = 0; i < src.length; i += P.HISTORY_CHUNK_SIZE) {
+    chunks.push(src.slice(i, i + P.HISTORY_CHUNK_SIZE));
   }
   return chunks;
 }
@@ -615,14 +658,14 @@ function joinRoom(ws, room, name, avatar) {
     // 游戏状态随入房一起给：新进来的人立刻就能看到 HUD，不用等下一次状态同步
     game: room.game && room.game.active ? room.game.snapshotFor(member.userId) : null,
     history: {
-      count: room.strokes.length,
+      count: strokesFor(room, member.userId).length,
       lastSeq: room.seq,
       baseImages: room.baseImageMap(),
       maskImages: room.maskImageMap()
     }
   });
 
-  const chunks = historyChunks(room);
+  const chunks = historyChunks(room, member.userId);
   if (chunks.length === 0) send(ws, P.S2C.HISTORY_CHUNK, { strokes: [], done: true });
   else chunks.forEach((c, i) => send(ws, P.S2C.HISTORY_CHUNK, { strokes: c, done: i === chunks.length - 1 }));
 
@@ -751,12 +794,12 @@ function handle(ws, msg) {
         },
         game: room.game && room.game.active ? room.game.snapshotFor(member.userId) : null,
         history: {
-          count: room.strokes.length, lastSeq: room.seq,
+          count: strokesFor(room, member.userId).length, lastSeq: room.seq,
           baseImages: room.baseImageMap(),
           maskImages: room.maskImageMap()
         }
       });
-      const chunks = historyChunks(room);
+      const chunks = historyChunks(room, member.userId);
       if (!chunks.length) send(ws, P.S2C.HISTORY_CHUNK, { strokes: [], done: true });
       else chunks.forEach((c, i) => send(ws, P.S2C.HISTORY_CHUNK, { strokes: c, done: i === chunks.length - 1 }));
       // 重连的人可能是画手，得把词补发给他
@@ -1040,7 +1083,7 @@ function handle(ws, msg) {
       if (!stroke.id) return;
       ws._activeStroke = stroke;
       member.drawing = true;
-      roomBroadcast(room, P.S2C.STROKE_BEGIN, { stroke: strokeHeader(stroke) }, ws._connId);
+      strokeBroadcast(room, P.S2C.STROKE_BEGIN, { stroke: strokeHeader(stroke) }, ws._connId);
       return;
     }
 
@@ -1056,7 +1099,7 @@ function handle(ws, msg) {
       }
       if (!pts.length) return;
       stroke.points.push(...pts);
-      roomBroadcast(room, P.S2C.STROKE_POINTS, { id: stroke.id, pts }, ws._connId);
+      strokeBroadcast(room, P.S2C.STROKE_POINTS, { id: stroke.id, pts }, ws._connId);
       return;
     }
 
@@ -1066,7 +1109,7 @@ function handle(ws, msg) {
       if (!room || !stroke) return;
       if (member) member.drawing = false;
       if (stroke.points.length === 0) {
-        roomBroadcast(room, P.S2C.STROKE_CANCEL, { id: stroke.id }, ws._connId);
+        strokeBroadcast(room, P.S2C.STROKE_CANCEL, { id: stroke.id }, ws._connId);
         return;
       }
       // 补上结束时刻（起始时刻 buildStroke 里已打 ts）。
@@ -1074,7 +1117,7 @@ function handle(ws, msg) {
       stroke.te = Date.now();
       room.addStroke(stroke);
       store.markDirty(room);
-      roomBroadcast(room, P.S2C.STROKE_END, { id: stroke.id, seq: stroke.seq }, ws._connId);
+      strokeBroadcast(room, P.S2C.STROKE_END, { id: stroke.id, seq: stroke.seq }, ws._connId);
       send(ws, P.S2C.STROKE_END, { id: stroke.id, seq: stroke.seq });
       return;
     }
@@ -1084,7 +1127,7 @@ function handle(ws, msg) {
       ws._activeStroke = null;
       if (!room || !stroke) return;
       if (member) member.drawing = false;
-      roomBroadcast(room, P.S2C.STROKE_CANCEL, { id: stroke.id }, ws._connId);
+      strokeBroadcast(room, P.S2C.STROKE_CANCEL, { id: stroke.id }, ws._connId);
       return;
     }
 
@@ -1096,7 +1139,7 @@ function handle(ws, msg) {
       room.removeStrokes(ids);
       store.markDirty(room);
       // 发起者已在本地乐观移除，不回显（否则其重做栈会被 pruneUndo 清空）
-      roomBroadcast(room, P.S2C.STROKE_REMOVED, { ids, reason: 'undo', by: member.userId }, ws._connId);
+      strokeBroadcast(room, P.S2C.STROKE_REMOVED, { ids, reason: 'undo', by: member.userId }, ws._connId);
       return;
     }
 
@@ -1111,7 +1154,7 @@ function handle(ws, msg) {
       stroke.points = s.points.map(p => P.qp(p));
       const saved = room.redoStroke(stroke);
       store.markDirty(room);
-      roomBroadcast(room, P.S2C.STROKE_ADDED, { stroke: saved });
+      strokeBroadcast(room, P.S2C.STROKE_ADDED, { stroke: saved });
       send(ws, P.S2C.STROKE_ADDED, { stroke: saved });
       return;
     }
@@ -1119,13 +1162,28 @@ function handle(ws, msg) {
     case P.C2S.STROKE_CLEAR: {
       if (!room || !member) return;
       const scope = msg.scope === 'all' ? 'all' : 'layer';
+      const layerId = sanitizeText(msg.layerId, 40);
       if (writeBlocked(ws, room, member)) return;
       if (scope === 'all' && member.userId !== room.ownerId) {
         return send(ws, P.S2C.ERROR, { code: 'not_owner', message: '只有房主可以清空整个画布' });
       }
-      const removed = room.clear(scope, sanitizeText(msg.layerId, 40));
+      // 私密作画期间：画布是共用的（只是互相看不见），所以「清空」只能清**自己**那几笔 ——
+      // 照常按图层清会把别人正在画的私密笔迹一起抹掉，他那边看着画面还在、服务端却已经没了。
+      // 回执也只给发起者：别人根本不知道这张画的存在，没必要知道有人清过。
+      if (privateDrawOn(room)) {
+        const own = room.strokes
+          .filter(s => s.userId === member.userId && (scope === 'all' || s.layerId === layerId))
+          .map(s => s.id);
+        const gone = room.removeStrokes(own);
+        if (!gone) return;
+        store.markDirty(room);
+        return send(ws, P.S2C.STROKE_REMOVED, {
+          ids: [], reason: 'clear', scope, layerId, by: member.userId, removed: gone
+        });
+      }
+      const removed = room.clear(scope, layerId);
       store.markDirty(room);
-      roomBroadcast(room, P.S2C.STROKE_REMOVED, { ids: [], reason: 'clear', scope, layerId: msg.layerId, by: member.userId, removed });
+      roomBroadcast(room, P.S2C.STROKE_REMOVED, { ids: [], reason: 'clear', scope, layerId, by: member.userId, removed });
       broadcastLayers(room, room.baseImageMap());
       return;
     }
@@ -1610,6 +1668,9 @@ function handle(ws, msg) {
         return;
       }
       member.cursorAt = Date.now();
+      // 私密作画期间不广播光标：大家各画各的，别人屏幕上一群光标乱飞既吵又暗示
+      // 「有人正在那张画上落笔」。客户端在作画阶段本来也会把远端光标藏起来，这里是第二道。
+      if (privateDrawOn(room)) return;
       roomBroadcast(room, P.S2C.CURSOR, {
         userId: member.userId, name: member.name, color: member.color,
         x: Number(msg.x) || 0, y: Number(msg.y) || 0, active: !!msg.active,

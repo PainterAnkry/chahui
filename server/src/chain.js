@@ -90,18 +90,21 @@ function pickWords(pool, n, used) {
 
 /**
  * 一个「格子」= 链条上的一个位置：链 idx、第几步。
- * 每个人在每一轮都恰好占一个格子，所以 总格子数 = 链数 × 轮数。
+ * 每个人在每一圈都恰好占一个格子，所以 总格子数 = 链数 × 圈数。
  */
-function stepsPerRound(rounds) { return rounds; }
 
 class ChainGame {
   /**
    * @param {Room} room
-   * @param {{sync:Function, systemChat:Function, resetCanvas:Function,
-   *          captureStep:Function, applyStepArt:Function}} api
-   *   - 前三个同经典模式
-   *   - captureStep(stepId, cb)  让「画的那一步」的产物落盘（从房间图层抓成 PNG）
-   *   - applyStepArt(png)        把要参照的画贴到画布上，供当事者临摹/参考
+   * @param {{sync:Function, systemChat:Function, resetCanvas:Function}} api
+   *   - sync()         把（按人裁剪过的）状态推给全场
+   *   - systemChat()   系统播报
+   *   - resetCanvas()  清空画布（只由 DRAW 步的首尾调用）
+   *
+   * ⚠ 作画的产物**不由服务端抓**：客户端把画布导成 PNG，走 C2S.GAME_ART 回传，
+   *   服务端只做哑存储（submitArt）。服务端从头到尾不碰像素 —— 这与图层像素同一套分工。
+   *   早期版本这里还写着 captureStep / applyStepArt 两个回调，但实现里从没用过
+   *   （画面靠 GAME_TASK 里的 image 字段下发，不落进画布），已删除以免误导。
    */
   constructor(room, api) {
     this.room = room;
@@ -129,7 +132,6 @@ class ChainGame {
 
     // 本步的临时状态
     this.assign = new Map(); // userId -> cell（这一步该谁做什么）
-    this.assignRound = 0;    // 上面这套安排属于第几圈（防重复 beginRound 重洗）
     this.submitted = new Set(); // 本步已提交的人
     this.replay = null;      // 回放数据（逐链逐一格）
     this.votes = new Map();  // userId -> Set(chainId)（投了「对不上」的）
@@ -462,13 +464,21 @@ class ChainGame {
     this.submitted = new Set();
     this.assign = new Map();
 
-    // 这一圈的安排：每个人的「链主人」逐一站起来，做他自己那条链的第 round 步。
-    // 走的是「自己起词 → 下一个人接着做」的固定传递规则，见 composeStep()。
+    // 这一圈的安排：每条链把「该做的第 k 格」派出去，走的是 composeStep() 里
+    // 「自己起词 → 下一个人接着做」的固定传递规则。
+    const onlineIds = online.map(p => p.userId);
     for (const c of this.chains) {
       const idx = this.chains.indexOf(c);
       const step = this.composeStep(c);
       if (!step) continue;
-      const who = step.userId;
+      let who = step.userId;
+      // 掉线补偿：轮到的那个人已经不在线（或者这一圈已经接了别的活），
+      // 就顺着传递顺序往后找第一个「在线 + 这一圈还没安排」的人顶上。
+      // 不补的话这一步压根没人做，全场干等到时限走完（60 ~ 120 秒）才跳过。
+      if (onlineIds.indexOf(who) < 0 || this.assign.has(who)) {
+        const standIn = this.pickStandIn(c, step.userId, onlineIds);
+        if (standIn) who = standIn;
+      }
       // 该用户这一步要做的事挂到他名下（一个用户在一圈里只会被安排一次）
       this.assign.set(who, Object.assign({ chainIdx: idx }, step));
     }
@@ -483,6 +493,32 @@ class ChainGame {
     }
 
     this.enterPhaseForCurrentSteps();
+  }
+
+  /**
+   * 给一格找顶替的人：从「名义上的那个人」沿传递顺序往后走，取第一个
+   * **在线、且这一圈还没接到活、也不是这条链主人**的人。找不到返回 ''。
+   *
+   * 三个条件都不能少：
+   *   - 在线     —— 不在线的人接不了活，接了就是全场等他超时
+   *   - 没接过活 —— 一圈里每人只做一步（beginRound 的派法保证不会重复安排），
+   *                 一个人接两步会让他在同一时刻收到两份互相冲突的题面
+   *   - 不是主人 —— 与 composeStep 同一条规矩：谁都不该接到自己那条链
+   */
+  pickStandIn(chain, fromUserId, onlineIds) {
+    const order = this.order || [];
+    const n = order.length;
+    if (!n) return '';
+    const from = order.indexOf(fromUserId);
+    if (from < 0) return '';
+    for (let i = 1; i <= n; i++) {
+      const id = order[(from + i) % n];
+      if (id === chain.ownerId) continue;
+      if (onlineIds.indexOf(id) < 0) continue;
+      if (this.assign.has(id)) continue;
+      return id;
+    }
+    return '';
   }
 
   /**
@@ -506,12 +542,19 @@ class ChainGame {
     const ownerIdx = order.indexOf(chain.ownerId);
     if (ownerIdx < 0) return null;             // 链主人退出了，这条链本圈跳过
 
-    // 第 k 格由「链主人往后数 k 个人」来做 —— 保证不会轮到自己（n >= 4）
-    const who = order[(ownerIdx + k) % n];
+    if (k === 0) return { step: STEP.WRITE, userId: chain.ownerId };
 
     const prev = chain.cells[k - 1];
-    if (k === 0) return { step: STEP.WRITE, userId: chain.ownerId };
     if (!prev) return null;                    // 上一格缺了（有人掉线），这一步没法安排
+
+    // 第 k 格由「链主人往后数 k 个人」来做，**数的时候要跳过链主人自己**：
+    // 直接 `(ownerIdx + k) % n` 在 k = n 时会绕回链主人身上 —— 而圈数可以选到 6、
+    // 人数最少只有 4，那时他会接到自己那条链递下来的东西（自问自答）。
+    // 按「除自己以外的那一圈」取，圈数再大也只是在别人之间循环。
+    const others = [];
+    for (let i = 1; i < n; i++) others.push(order[(ownerIdx + i) % n]);
+    const who = others[(k - 1) % others.length];
+
     if (prev.step === STEP.WRITE || prev.step === STEP.GUESS) {
       // 上一步的产物是「词」→ 这一步作画
       return { step: STEP.DRAW, userId: who, word: prev.word };
@@ -749,13 +792,20 @@ class ChainGame {
 
   /** 投票阶段结束 → 结算奖杯 */
   finishVoting() {
-    const totalPlayers = Math.max(1, this.playerList().length);
+    const players = this.playerList();
+    const totalPlayers = Math.max(1, players.length);
+    // **只算现在还是玩家的人投的票**：中途进房的看客不算玩家（他不进分母），
+    // 但他的票如果照样计进去，一两个看客就能把某条链掀翻 —— 分母和分子必须同一批人。
+    const isPlayer = new Set(players.map(p => p.userId));
     const result = [];
 
     for (const chain of this.replay) {
       // 多少人认为「对不上」
       let against = 0;
-      for (const set of this.votes.values()) if (set.has(chain.id)) against += 1;
+      for (const [uid, set] of this.votes) {
+        if (!isPlayer.has(uid)) continue;
+        if (set.has(chain.id)) against += 1;
+      }
       // 服务端初判「一致」+ 多数人不反对 → 起词的人拿奖杯
       const ok = chain.matched && against * 2 < totalPlayers;
       if (ok && chain.ownerId) {
@@ -822,7 +872,6 @@ class ChainGame {
     this.phase = CHAIN_PHASE.LOBBY;
     this.deadline = 0;
     this.assign = new Map();
-    this.assignRound = 0;
     this.submitted = new Set();
     this.api.sync();
     if (reason) this.api.systemChat(reason);
@@ -834,7 +883,6 @@ class ChainGame {
     this.deadline = 0;
     this.chains = [];
     this.assign = new Map();
-    this.assignRound = 0;
     this.submitted = new Set();
     this.replay = null;
     this.votes = new Map();
@@ -866,6 +914,13 @@ class ChainGame {
       this.spectators.delete(member.userId);
       this.api.sync();
       return;
+    }
+    // 走的是一条链的主人：composeStep 从此会一直跳过这条链（找不到主人了），
+    // 得说一声 —— 不然大家只能看见「进度条上有一条链永远停在第一格」，完全不知道为什么。
+    const owned = this.chains.filter(c => c.ownerId === member.userId);
+    if (owned.length) {
+      this.api.systemChat(member.name + ' 离开了，TA 起的那 ' + owned.length
+        + ' 条链接不下去（主人不在就没人接），回放里会少掉');
     }
     const min = P.GAME.CHAIN_MIN_PLAYERS;
     if (this.playerList().length < min) {

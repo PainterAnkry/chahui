@@ -43,6 +43,8 @@ const SUITE = [
   'test-passkeys.js',
   'test-mobile.js',
   'test-chain-sim.js',
+  // 接龙「私密作画」：并行作画时笔迹只回作者本人（#4/#5 的回归）
+  'test-chain-private.js',
   'test-theme-ui.js',
   // 入口页那颗「开启 / 关闭服务器」按钮（桌面端桥用打桩的，所以不用起 Electron）
   'test-server-button.js',

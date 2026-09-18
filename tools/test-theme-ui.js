@@ -615,6 +615,82 @@ async function openChainDialog(page) {
     window.ChaSFX.setVolume(0.22);
   });
 
+  // ---- [8.7] 经典面板的入口 + 两块面板共用一份主题（#1 / #3 回归） ----
+  console.log('\n[8.7] 经典面板的「管理…」与共享的主题选择');
+  // #1：以前只有接龙面板有「管理…」，经典模式压根没有入口 —— 想用自定义词库
+  //     就得先去接龙面板绕一圈。用户报的就是这个。
+  // #3：主题选择以前两块面板各存各的，主弹窗里选完、进接龙还被要求再选一次。
+  // 两条合在一条用例里，因为它们都挂在同一组 DOM 上。
+  {
+    // 上一节刚 reload 过，先把「在房间里」这件事确定下来（开局面板要求 joined）
+    const inRoom = await host.evaluate(() => {
+      const e = document.querySelector('#entryMask');
+      return !e || e.classList.contains('hidden');
+    });
+    if (!inRoom) { await createRoom(host, '房主'); await sleep(400); }
+
+    await host.click('#btnGame');
+    await host.waitForSelector('#gameMask:not(.hidden)', { timeout: 6000 });
+    await sleep(250);
+    ok('默认玩法是「你画我猜」（经典面板）',
+      await host.evaluate(() => document.querySelector('#gmClassic').classList.contains('active')));
+    ok('★ 经典面板上也有「管理…」按钮（#1 回归）', await host.isVisible('#btnGameThemeManage'));
+    const gameOpts = await host.evaluate(() =>
+      Array.from(document.querySelectorAll('#gameTheme option')).map(o => o.value));
+    ok('经典面板的主题下拉也是填好的（≥15 套内置）', gameOpts.length >= 15,
+      '实际 ' + gameOpts.length);
+
+    await host.click('#btnGameThemeManage');
+    await host.waitForSelector('#themeMask:not(.hidden)', { timeout: 5000 });
+    ok('★ 经典面板的「管理…」能打开词库管理（#1 回归）', await host.isVisible('#themeMask'));
+    await host.click('#btnThemeDone');
+    await sleep(250);
+    ok('关掉词库管理后回到开局面板', await host.isVisible('#gameMask'));
+
+    // #3：两块面板听同一份偏好
+    await host.evaluate(() => {
+      const el = document.querySelector('#gameTheme');
+      el.value = 'starrail';
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await sleep(200);
+    const lsTheme = await host.evaluate(() => localStorage.getItem('chahu.theme'));
+    ok('在经典面板选主题会记进共享偏好', lsTheme === 'starrail', 'chahu.theme=' + lsTheme);
+
+    // 切到接龙 → 面板顶出来 → 下拉应当已经是刚才那个
+    await host.click('#gmChain');
+    await sleep(200);
+    await host.click('#btnGameStart');
+    await host.waitForSelector('#chainMask:not(.hidden)', { timeout: 6000 });
+    await sleep(300);
+    const chainVal = await host.inputValue('#chainTheme');
+    ok('★ 切到接龙时主题已经跟着选中，不用再选一次（#3 回归）', chainVal === 'starrail',
+      'chainTheme=' + chainVal);
+
+    // 反向：在接龙面板改，经典面板也要跟着变
+    await host.evaluate(() => {
+      const el = document.querySelector('#chainTheme');
+      el.value = 'touhou';
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await sleep(200);
+    ok('★ 在接龙面板改主题，经典面板也跟着变（#3 回归，双向）',
+      (await host.inputValue('#gameTheme')) === 'touhou',
+      'gameTheme=' + (await host.inputValue('#gameTheme')));
+
+    // 还原成默认，别影响后面的用例
+    await host.evaluate(() => {
+      const el = document.querySelector('#chainTheme');
+      el.value = 'default';
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await sleep(150);
+    await host.click('#btnChainCancel');
+    await sleep(250);
+    ok('关掉接龙面板（收尾）',
+      await host.evaluate(() => document.querySelector('#chainMask').classList.contains('hidden')));
+  }
+
   // ---- [9] 控制台干净 ----
   console.log('\n[9] 控制台干净');
   // 只放过「自己故意打出来的 4xx」—— 别的 error 一律算问题
