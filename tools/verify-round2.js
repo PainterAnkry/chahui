@@ -155,9 +155,16 @@ function check(name, ok, extra) {
   console.log('  选区擦掩膜像素: ' + beforeMask + ' → ' + afterMask);
   check('选取擦真的擦掉了选区', afterMask < beforeMask * 0.9, `${beforeMask} → ${afterMask}`);
 
-  // 蚂蚁线（上面已经查过了，这里只确认取消选区后停下）
+  // 蚂蚁线（上面已经查过了，这里只确认**选区真的没了**之后会停下）
+  // ⚠ 上面那次擦只是「擦掉一块」，掩膜仍有 60 来个抗锯齿残点，
+  //   引擎判「还有选区」是对的，蚂蚁线继续跑也是对的 —— 拿它当「擦空」来断言是假红。
+  //   这里显式清空选区，再查蚂蚁线是否停。
+  await page.evaluate(() => window.ChaApp.engine.restoreSelection(null));
+  await sleep(400);
+  const maskAfterClear = await maskPx();
   const antsAfterClear = await page.evaluate(() => !!window.ChaApp.engine._antsTimer);
-  check('擦空选区后蚂蚁线停下', antsAfterClear === false, String(antsAfterClear));
+  check('清空选区后蚂蚁线停下', maskAfterClear === 0 && antsAfterClear === false,
+    'maskPx=' + maskAfterClear + ' ants=' + antsAfterClear);
   await page.evaluate(() => document.querySelector('#btnSelNone').click());
   await sleep(400);
   console.log('  状态栏「有选区」点击可取消:', await page.evaluate(() => !!document.querySelector('#selHint')));

@@ -331,6 +331,12 @@
         def('window', 'window.panelReset', '恢复默认面板布局', {
           run: function () { A().resetPanels(); }
         }),
+        // 把所有布局相关的开关集中到一个面板里 —— 以前这些散在菜单各处
+        // （面板显隐在「显示操作面板」、缩放另起一项、栏宽只能拖），找不全
+        def('window', 'window.layoutSet', '布局设置…', {
+          mnemonic: 'L', key: 'Ctrl+Alt+L',
+          run: function () { A().openLayoutSettings(); }
+        }),
         SEP,
         // 「他人笔触」= 别人的笔迹在本机显示得多清楚。只改自己这块屏幕，
         // 不同步、不影响导出 —— 画布上人多的时候一眼分清哪笔是自己画的。
@@ -558,18 +564,73 @@
    * 碰到右边缘就往左移回来。以前是纯 CSS 定位，靠底部的「色阶」这类
    * 最后几项的子菜单会掉到屏幕外，根本点不到。
    */
+  /**
+   * 顶级菜单下拉定位。
+   *
+   * 为什么不用纯 CSS 的 `position:absolute; top:100%`：
+   * 窄屏断点（≤660px）给 .menu-bar 加了 `overflow-x:auto`（一行放不下就横滑），
+   * 而 overflow ≠ visible 会让 .menu-bar 变成绝对定位后代的**包含块并裁剪它** ——
+   * 下拉超出菜单栏那 30px 的部分照样会被画出来（所以「看得见」），
+   * 但整个盒子收不到点击（所以「点不到」）。
+   * 改成 fixed 定位、坐标用 JS 算，就彻底摆脱祖先 overflow 的裁剪。
+   */
+  function placeDrop(drop, btn) {
+    var r = btn.getBoundingClientRect();
+    var vw = window.innerWidth || document.documentElement.clientWidth;
+    var vh = window.innerHeight || document.documentElement.clientHeight;
+
+    // 先摆到标题正下方，再量真实尺寸决定是否翻转
+    drop.style.left = Math.round(r.left) + 'px';
+    drop.style.top = Math.round(r.bottom) + 'px';
+    drop.style.right = 'auto';
+    drop.style.bottom = 'auto';
+
+    var d = drop.getBoundingClientRect();
+    // 右边界超出就往左收（但不越过屏幕左边缘）
+    if (d.right > vw - 4) {
+      var left = Math.max(4, Math.min(r.left, vw - d.width - 4));
+      drop.style.left = Math.round(left) + 'px';
+      d = drop.getBoundingClientRect();
+    }
+    // 下边界超出就向上弹
+    if (d.bottom > vh - 4) {
+      var top = r.top - d.height;
+      drop.style.top = Math.round(Math.max(4, top)) + 'px';
+    }
+  }
+
   function placeSub(subBox, wrap) {
+    // 下拉与子菜单都是 fixed 定位（见 .menu-drop 的注释），
+    // 所以子菜单的坐标必须显式按「父项矩形」算，不能再靠 CSS 的 left:100%。
+    var pr = wrap.getBoundingClientRect();
     subBox.classList.remove('up', 'flip-x');
-    subBox.style.left = '';
-    subBox.style.right = '';
-    var r = subBox.getBoundingClientRect();
+    subBox.style.left = Math.round(pr.right) + 'px';
+    subBox.style.right = 'auto';
+    subBox.style.top = Math.round(pr.top - 5) + 'px';
+    subBox.style.bottom = 'auto';
+
     var vh = window.innerHeight || document.documentElement.clientHeight;
     var vw = window.innerWidth || document.documentElement.clientWidth;
-    if (r.bottom > vh - 4) subBox.classList.add('up');
-    // 重新量一次（加了 up 之后高度不变，但左边界可能变）
-    r = subBox.getBoundingClientRect();
-    if (r.right > vw - 4) subBox.classList.add('flip-x');
-    void wrap;
+    var r = subBox.getBoundingClientRect();
+
+    // 下边界超出：向上弹（对齐父项底部）
+    if (r.bottom > vh - 4) {
+      subBox.classList.add('up');
+      subBox.style.top = Math.round(pr.bottom + 5 - r.height) + 'px';
+      subBox.style.bottom = 'auto';
+      r = subBox.getBoundingClientRect();
+    }
+    // 右边界超出：翻到父项左侧
+    if (r.right > vw - 4) {
+      subBox.classList.add('flip-x');
+      subBox.style.left = Math.round(pr.left - r.width) + 'px';
+      subBox.style.right = 'auto';
+      r = subBox.getBoundingClientRect();
+    }
+    // 左边界也超出（屏幕太窄）：贴左边，别掉出屏幕
+    if (r.left < 4) {
+      subBox.style.left = '4px';
+    }
   }
 
   function buildMenuBar() {
@@ -593,12 +654,21 @@
         ev.stopPropagation();
         var open = !drop.classList.contains('hidden');
         closeAll();
-        if (!open) { drop.classList.remove('hidden'); btn.classList.add('active'); }
+        if (!open) {
+          drop.classList.remove('hidden');
+          btn.classList.add('active');
+          placeDrop(drop, btn);
+        }
       };
       btn.onmouseenter = function () {
         // SAI2 那样：已经打开一个菜单时，滑过别的标题直接切换
         var anyOpen = bar.querySelector('.menu-drop:not(.hidden)');
-        if (anyOpen && anyOpen !== drop) { closeAll(); drop.classList.remove('hidden'); btn.classList.add('active'); }
+        if (anyOpen && anyOpen !== drop) {
+          closeAll();
+          drop.classList.remove('hidden');
+          btn.classList.add('active');
+          placeDrop(drop, btn);
+        }
       };
       wrap.appendChild(btn);
       wrap.appendChild(drop);
@@ -610,12 +680,35 @@
       document.addEventListener('click', closeAll);
       buildMenuBar._clickBound = true;
     }
+    // 下拉是 fixed 定位（坐标由 JS 算），窗口尺寸一变就得重算，
+    // 否则会停在上一次的位置上（曾经用 CSS 定位时不需要这一步）
+    if (!buildMenuBar._resizeBound) {
+      window.addEventListener('resize', function () {
+        var bar2 = document.getElementById('menuBar');
+        if (!bar2) return;
+        var open = bar2.querySelector('.menu-drop:not(.hidden)');
+        if (!open) return;
+        var item = open.parentElement;                       // .menu-item
+        var title = item && item.querySelector('.menu-title');
+        if (title) placeDrop(open, title);
+        var sub = open.querySelector('.menu-sub:not(.hidden)');
+        if (sub) {
+          var sw = sub.closest('.menu-subwrap');
+          if (sw) placeSub(sub, sw);
+        }
+      });
+      buildMenuBar._resizeBound = true;
+    }
   }
 
   function closeAll() {
     var bar = document.getElementById('menuBar');
     if (!bar) return;
-    bar.querySelectorAll('.menu-drop').forEach(function (d) { d.classList.add('hidden'); });
+    bar.querySelectorAll('.menu-drop').forEach(function (d) {
+      d.classList.add('hidden');
+      // fixed 定位的内联坐标要一起清掉，否则下次打开会残留上一次的位置
+      if (d.classList.contains('menu-sub')) { d.style.left = d.style.top = ''; }
+    });
     bar.querySelectorAll('.menu-title').forEach(function (b) { b.classList.remove('active'); });
     bar.querySelectorAll('.menu-row').forEach(function (b) { b.classList.remove('active'); });
   }

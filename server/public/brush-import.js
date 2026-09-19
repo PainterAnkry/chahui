@@ -29,7 +29,25 @@
  *     宁可少给一支，也绝不交付没有笔尖的笔（png 只存不解码的教训：导出来的全是圆头空壳）。
  *     一张内嵌图都没有时明确报错：是 SQLite → 「配置型 .sut」（笔尖引外部素材）；
  *     不是 SQLite → 多半是 SAI 的笔刷形状（裸灰度位图）。这两种暂不支持。
- *     CSP 的数值参数（BrushSize/BrushInterval 等）也在库里，暂不读，形状从笔尖推。
+ *
+ *     ⚠⚠ 两条**必须**守住的规则（都踩过坑，症状都是「导入的笔刷画出来是半个圆、不连成线」）：
+ *     1. **缩略图不是笔尖。** 每个 material 里都带 thumbnail/thumbnail.png，那是素材库
+ *        列表里的预览图（尺寸是显示尺寸，内容常是纯白/纯色底板）。拿它当笔尖 →
+ *        笔刷变成 300px 大白块，盖章间隔一拉就是一堆不相连的半圆。
+ *        所以 thumbnail/preview/icon 一律只当「兜底候选」，且纯色图除非别无选择不用。
+ *     2. **尺寸和间距要读库里的真值，不能硬编码、更不能拿图片像素尺寸顶。**
+ *        Node.NodeVariantID → Variant.VariantID 那一行里的 BrushSize（笔刷直径 px）和
+ *        BrushInterval（占直径的百分比）才是真参数。老代码 spacing 写死 0.1、
+ *        diameter 用图片尺寸，于是 1000px 的素材图直接变成 1000px 的笔刷。
+ *        见 sutBrushMeta()；读不到时保守退回老行为，不瞎猜。
+ *
+ *     这张「方头纯度上色.sut」就是典型：Node 1 行（笔名）、Variant 2 行（一行真参数
+ *     BrushSize=10 / BrushInterval=10，一行全 NULL 是模板）、MaterialFile 1 个 tar，
+ *     内含 catalog.zip / info.zip / data/material_0.layer / thumbnail/thumbnail.png /
+ *     icedata/layerData.xml。layerData.xml 的 systemtag 写着 `BrushPattern` + `Resizable`，
+ *     说明它是「自制笔刷图案」类素材，笔尖=那张 300×300 的方头图案。
+ *     （CSP 自己的 .zip/.layer 用的是 89 'C2F' 私有容器 + 自研压缩，这里不解它——
+ *      没必要，参数从 Variant 读、图从 tar 成员里直接拿 PNG 就够了。）
  *
  * 位图压缩：0 = 原样，1 = PackBits。
  *
@@ -339,7 +357,16 @@
     return base.slice(0, 24);
   }
 
-  function sutUnsupportedMsg(bytes) {
+  function sutUnsupportedMsg(bytes, why) {
+    if (why === 'blank-only') {
+      // 文件里有图，但只有一张空白预览缩略图 —— 真正的笔尖图案在 CSP 私有容器里
+      // （material_*.layer 用 89 'C2F' 自研格式 + 自研压缩，解不出来）。
+      // 这种必须**明确拒绝**：拿空白缩略图当笔尖会导出一支画不出东西的笔，
+      // 用户看到的却是「导入成功了」（曾经就是这样，画出来一团白）。
+      return '这支 CSP 笔刷的笔尖图案存在它自己的私有容器里（material_*.layer），茶绘解不开，'
+        + '文件里只找得到一张空白的预览缩略图，拿它当笔尖只会画出一团白。'
+        + '建议在 CSP 里把这支笔刷的笔尖导出成 PNG，或用内嵌标准素材的笔刷（如 Procreate / PS 笔刷）导入';
+    }
     if (bytes.length >= 15 && asciiOf(bytes, 0, 15) === 'SQLite format 3') {
       return '这是 CSP 的「配置型」.sut：笔刷参数在库里，但笔尖引用的是外部素材，文件里没有内嵌笔尖图，茶绘暂时导不了这种；可以在 CSP 里换一支内嵌笔尖的笔刷导出再试';
     }
@@ -477,42 +504,184 @@
     return blobs;
   }
 
+  /* ---------- CSP 表读取（带列名） ----------
+   * sqliteTableBlobs 只把 blob 掏出来，够用来找图，但**读不了数值参数**——
+   * 于是 BrushSize / BrushInterval 这些白摆在库里没人看（曾经的锅：
+   * 尺寸只能拿「找到的那张图的像素尺寸」硬顶，笔刷一导入就是错的粗细）。
+   * 这里在上面那套遍历基础上补一份「列名 → 值」的读取：列名从 sqlite_master
+   * 里那行 DDL 的 CREATE TABLE(...) 抠出来。拿不到列名时返回空数组，调用方自然退化成老行为。
+   */
+  function sqliteTableRows(bytes, wantTable) {
+    var pageSize = (bytes[16] << 8) | bytes[17];
+    if (pageSize === 1) pageSize = 65536;
+    // bytes[20] 是「保留区大小」，绝大多数库是 0。夹具（手搓库）经常忘了写这个字段，
+    // 一旦它是垃圾值，usable 就会小得离谱 → 整个读取静默失败。
+    var reserved = bytes[20] <= 32 ? bytes[20] : 0;
+    var usable = pageSize - reserved;
+    if (pageSize < 512 || (pageSize & (pageSize - 1)) !== 0 || usable < 480) throw new Error('SQLite 页大小不对');
+
+    function u32(p) { return ((bytes[p] << 24) | (bytes[p + 1] << 16) | (bytes[p + 2] << 8) | bytes[p + 3]) >>> 0; }
+    function u16(p) { return (bytes[p] << 8) | bytes[p + 1]; }
+    function varint(p) {
+      var v = 0, i, b;
+      for (i = 0; i < 8; i++) {
+        b = bytes[p + i];
+        v = v * 128 + (b & 0x7f);
+        if (!(b & 0x80)) return { val: v, next: p + i + 1 };
+      }
+      return { val: v * 256 + bytes[p + 8], next: p + 9 };
+    }
+    function pageBase(n) { return (n - 1) * pageSize; }
+    function readPayload(off, total) {
+      var X = usable - 35;
+      if (total <= X) return bytes.subarray(off, off + total);
+      var M = (((usable - 12) * 32) / 255 - 23) | 0;
+      var K = M + ((total - M) % (usable - 4));
+      var local = K <= X ? K : M;
+      var parts = [bytes.subarray(off, off + local)];
+      var left = total - local, next = u32(off + local), guard = 0;
+      while (next > 0 && left > 0 && guard++ < 100000) {
+        var pb = pageBase(next), take = Math.min(left, usable - 4);
+        parts.push(bytes.subarray(pb + 4, pb + 4 + take));
+        left -= take; next = u32(pb);
+      }
+      if (left > 0) throw new Error('溢出链提前结束');
+      return concatBytes(parts);
+    }
+    function walkTable(pageNo, cb, depth) {
+      if (depth > 30 || pageNo < 1 || pageNo * pageSize > bytes.length) return;
+      var base = pageBase(pageNo);
+      var hdr = base + (pageNo === 1 ? 100 : 0);
+      var type = bytes[hdr], ncells = u16(hdr + 3), i, cellPtr, off;
+      if (type === 5) {
+        cellPtr = hdr + 12;
+        for (i = 0; i < ncells; i++) {
+          off = base + u16(cellPtr + i * 2);
+          walkTable(u32(off), cb, depth + 1);
+        }
+        walkTable(u32(hdr + 8), cb, depth + 1);
+      } else if (type === 13) {
+        cellPtr = hdr + 8;
+        for (i = 0; i < ncells; i++) {
+          off = base + u16(cellPtr + i * 2);
+          var pLen = varint(off), rid = varint(pLen.next);
+          try { cb(readPayload(rid.next, pLen.val)); } catch (e) { /* 跳过坏行 */ }
+        }
+      }
+    }
+
+    var root = 0, ddl = '';
+    walkTable(1, function (row) {
+      var cols = recordValues(row);
+      if (cols.length >= 4 && cols[1] === wantTable) {
+        if (typeof cols[3] === 'number') root = cols[3];
+        if (typeof cols[4] === 'string') ddl = cols[4];
+      }
+    }, 0);
+    if (!root) throw new Error('库里没有 ' + wantTable + ' 表');
+
+    var names = cspColumnNames(ddl);
+    var rows = [];
+    walkTable(root, function (row) {
+      var vals = recordValues(row);
+      var o = {};
+      for (var i = 0; i < vals.length; i++) o[names[i] || ('c' + i)] = vals[i];
+      rows.push(o);
+    }, 0);
+    return rows;
+  }
+
+  /** 从 `CREATE TABLE X(a INTEGER, b TEXT, ...)` 里抠列名 */
+  function cspColumnNames(ddl) {
+    if (!ddl) return [];
+    var open = ddl.indexOf('(');
+    if (open < 0) return [];
+    var depth = 0, end = ddl.length, k;
+    for (k = open; k < ddl.length; k++) {
+      if (ddl[k] === '(') depth++;
+      else if (ddl[k] === ')') { depth--; if (!depth) { end = k; break; } }
+    }
+    return ddl.slice(open + 1, end).split(',').map(function (x) {
+      return x.trim().split(/\s+/)[0];
+    }).filter(function (x) {
+      return x && !/^(PRIMARY|UNIQUE|FOREIGN|CHECK|CONSTRAINT)$/i.test(x);
+    });
+  }
+
+  /** 列里是不是 UTF-8 文本（recordValues 把 TEXT 解成了 latin1 码点） */
+  function utf8FromLatin1(s) {
+    if (typeof s !== 'string' || !s) return '';
+    var out = '', i, c;
+    for (i = 0; i < s.length; i++) {
+      c = s.charCodeAt(i) & 0xff;
+      if (c < 0x80) out += String.fromCharCode(c);
+      else if (c >= 0xc0 && c < 0xe0 && i + 1 < s.length) {
+        out += String.fromCharCode(((c & 0x1f) << 6) | (s.charCodeAt(++i) & 0x3f));
+      } else if (c >= 0xe0 && c < 0xf0 && i + 2 < s.length) {
+        out += String.fromCharCode(((c & 0x0f) << 12) | ((s.charCodeAt(++i) & 0x3f) << 6) | (s.charCodeAt(++i) & 0x3f));
+      } else out += '?';
+    }
+    return out;
+  }
+
   function parseSut(buf) {
     var bytes = asBytes(buf);
     var cands = [];
 
-    function offer(name, data) { cands.push({ name: name, data: data }); }
+    // 分类：'tip' = 可能是笔尖素材的图，'thumb' = 预览/缩略图（只能兜底用）
+    function offer(name, data, role) { cands.push({ name: name, data: data, role: role || 'tip' }); }
 
     // ① 正路：走 SQLite 把 MaterialFile 的 blob 按溢出链拼回来（blob 是 tar，成员名可当笔名）
+    //
+    //    ⚠ 这里必须区分「素材本体」和「缩略图」：
+    //    CSP 的每个 material tar 里都带 thumbnail/thumbnail.png，那只是**素材列表里的预览图**，
+    //    尺寸是 300×300 之类的显示尺寸，内容还常常是纯白/纯色底板。
+    //    曾经不分青红皂白把所有图都当笔尖收，结果就是拿缩略图当笔尖 →
+    //    导入的笔刷变成一个 300px 的大白方块，画出来「半个圆、不连成线」。
+    //    所以 thumbnail / preview 一律降级为 thumb，只有在找不到任何真素材时才拿来兜底。
     try {
       sqliteTableBlobs(bytes, 'MaterialFile').forEach(function (blob) {
         findTarMembers(blob).forEach(function (m) {
-          if (m.size > 0 && isPngAt(blob, m.start)) offer(m.name, blob.subarray(m.start, m.start + m.size));
+          if (m.size > 0 && isPngAt(blob, m.start)) {
+            offer(m.name, blob.subarray(m.start, m.start + m.size), roleOfTarPath(m.name));
+          }
         });
         findPngRanges(blob).forEach(function (r) {
-          offer('', blob.subarray(r.start, r.end));
+          offer('', blob.subarray(r.start, r.end), 'tip');
         });
       });
     } catch (e) { /* 不是 SQLite / 没有该表 → 走兜底 */ }
 
     // ② 兜底：整文件裸扫。跨页切碎的 PNG 解码会失败、自动跳过；
     //    整段放进一页的小图、图不在 MaterialFile 表里的场合，靠这条路吃到。
+    //    裸扫分不清哪些是缩略图，但已知这类文件里 thumbnail/ 的路径名也扫得到，所以同样判定。
     findTarMembers(bytes).forEach(function (m) {
-      if (m.size > 0 && isPngAt(bytes, m.start)) offer(m.name, bytes.subarray(m.start, m.start + m.size));
+      if (m.size > 0 && isPngAt(bytes, m.start)) {
+        offer(m.name, bytes.subarray(m.start, m.start + m.size), roleOfTarPath(m.name));
+      }
     });
     findPngRanges(bytes).forEach(function (r) {
-      offer('', bytes.subarray(r.start, r.end));
+      offer('', bytes.subarray(r.start, r.end), 'tip');
     });
+
+    // 先真素材、后缩略图——同一个 seen 表，先到先得，于是缩略图天然被真素材挤掉
+    cands.sort(function (a, b) { return (a.role === 'thumb' ? 1 : 0) - (b.role === 'thumb' ? 1 : 0); });
 
     var seen = {};
     var brushes = [];
+    var sawBlank = false;      // 见过图、但都是空白（→ 用专门的报错文案）
+    var sawAnyImage = false;
     cands.forEach(function (c) {
       var key = c.data.length + ':' + quickHash(c.data);
       if (seen[key]) return;
       seen[key] = 1;
       var img;
       try { img = decodePngGray(c.data); } catch (e) { return; }   // 解不出就跳过
+      sawAnyImage = true;
       if (img.w < 4 || img.h < 4) return;                          // 太小的不可能是笔尖
+      // 空白/纯色图不是笔尖形状：CSP 的预览缩略图常是白底 + 极淡角标，
+      // 收下它只会得到一支画不出东西的笔（见 isFlatImage 注释）。
+      if (isFlatImage(img)) { sawBlank = true; return; }
       brushes.push({
         name: tipNameFromPath(c.name),
         spacing: 0.1,
@@ -520,9 +689,102 @@
         png: c.data
       });
     });
-    if (!brushes.length) throw new Error(sutUnsupportedMsg(bytes));
-    brushes.forEach(function (b, i) { if (!b.name) b.name = 'CSP 笔刷 ' + (i + 1); });
+    if (!brushes.length) {
+      throw new Error(sutUnsupportedMsg(bytes, (sawBlank && sawAnyImage) ? 'blank-only' : ''));
+    }
+
+    // ③ 读真实参数：CSP 把这些摆在 Variant 表里，以前完全不看。
+    //    拿到就用来改尺寸/间距，拿不到就维持老行为（不冒险猜）。
+    var meta = sutBrushMeta(bytes);
+    brushes.forEach(function (b, i) {
+      // 笔名优先级：库里的真笔名（Node.NodeName）> tar 成员名 > 兜底。
+      // ⚠ 反过来就错了：tar 成员名是 CSP 的内部素材名（data/material_0.png 之类），
+      //   那是**资源的文件名**，不是笔刷名；拿它当笔名会让用户看到一头雾水的
+      //   「material_0」。只有库里读不出名字时才退到成员名。
+      var realName = meta && meta.name;
+      if (realName) b.name = realName;
+      else if (!b.name) b.name = 'CSP 笔刷 ' + (i + 1);
+      if (!meta) return;
+      // BrushInterval 是「占笔刷直径的百分比」（CSP 里 10 = 10%），茶绘的 spacing 同义 → 直接除 100。
+      // 下限 0.02：再密下去只是在同一像素上反复盖章，白费性能。
+      if (isFinite(meta.interval) && meta.interval > 0) {
+        b.spacing = Math.max(0.02, Math.min(1, meta.interval / 100));
+      }
+      // 笔尖位图导入后是按「笔尖像素 × 缩放」盖章的，所以这里给一个**建议直径**。
+      // BrushSize 是 CSP 笔刷的显示尺寸（px），比「图片像素尺寸」靠谱得多：
+      // 素材图常有 1000px+ 的，直接照搬会让笔刷大得没法用。
+      if (isFinite(meta.size) && meta.size > 0) b.diameter = meta.size;
+      if (isFinite(meta.hardness)) b.hardnessHint = meta.hardness / 100;
+      // 带「方头」性质的（BrushThickness 满、无柔边）不用额外处理——
+      // 形状本来就在笔尖位图里，这里只是把软硬程度透传出去。
+    });
     return { version: 0, brushes: brushes };
+  }
+
+  /** tar 成员路径 → 角色。thumbnail/preview 这类只是素材预览图，不当笔尖首选 */
+  function roleOfTarPath(p) {
+    if (!p) return 'tip';
+    return /(^|\/)(thumbnail|thumb|preview|icon)s?\//i.test(String(p)) ? 'thumb' : 'tip';
+  }
+
+  /** 整张图几乎只有一个值 → 不是笔尖形状（空白板 / 纯色缩略图）
+   *
+   *  ⚠ 判定不能用「极差」：CSP 的预览缩略图常是**白底 + 极淡的角标/水印**，
+   *  实测「方头纯度上色.sut」的 thumbnail 是 90000 像素里 89700 个纯白，
+   *  剩 300 个浅浅的灰（176..191），极差 65 —— 用极差早就被骗过去了。
+   *  可靠的做法是看**主色占比**：≥97% 的像素挤在很小的色域里就是「空白图」。
+   */
+  function isFlatImage(img) {
+    var g = img.gray, n = img.w * img.h;
+    if (!n) return true;
+    // 用 16 档直方图找主峰，主峰占比 ≥97% 即视为空白/纯色
+    var hist = new Array(16).fill(0);
+    for (var i = 0; i < n; i++) hist[Math.min(15, g[i] >> 4)]++;
+    var top = 0;
+    for (var k = 0; k < 16; k++) if (hist[k] > top) top = hist[k];
+    return top / n >= 0.97;
+  }
+
+  /* ---------- 从库里读 CSP 笔刷的真实参数 ----------
+   * 位置：Node 表一行（笔刷名 + NodeVariantID）→ Variant 表用 VariantID 对应的一行。
+   * 这张 .sut 就是「一支笔」的素材：Node 1 行、Variant 1 行有效（另一行是全 NULL 的模板）。
+   * 一个文件里可能有多支笔（Node 多行），那时按行序与图片一一对应并不可靠，
+   * 所以这里只在「恰好一支有效笔」时启用参数，多支时保守返回 null（宁可保持老行为也不乱配）。
+   */
+  function sutBrushMeta(bytes) {
+    var variants, nodes;
+    try {
+      variants = sqliteTableRows(bytes, 'Variant');
+      nodes = sqliteTableRows(bytes, 'Node');
+    } catch (e) { return null; }
+
+    function hasNum(r, k) { return r && typeof r[k] === 'number'; }
+    // 有效 Variant：BrushSize 是个正经数值的那种（全 NULL 的那行是模板，跳过）
+    var valid = (variants || []).filter(function (r) { return hasNum(r, 'BrushSize'); });
+    if (valid.length !== 1) return null;
+    var v = valid[0];
+
+    var name = '';
+    // 优先 Node 里 name 与这张 Variant 对得上的那行
+    (nodes || []).forEach(function (n) {
+      if (n && n.NodeVariantID === v.VariantID) name = utf8FromLatin1(n.NodeName) || name;
+    });
+    if (!name) {
+      (nodes || []).some(function (n) {
+        var t = utf8FromLatin1(n && n.NodeName);
+        if (t) { name = t; return true; }
+        return false;
+      });
+    }
+
+    return {
+      name: String(name || '').replace(/[\\/:*?"<>|\x00-\x1f]/g, '').trim().slice(0, 24),
+      size: v.BrushSize,
+      interval: v.BrushInterval,
+      // BrushHardness 是 0-100 的百分比，CSP 里 100 = 硬边
+      hardness: typeof v.BrushHardness === 'number' ? v.BrushHardness : NaN,
+      usePattern: v.BrushUsePatternImage === 1
+    };
   }
 
   /* ============================================================ Procreate 底层 */
@@ -1307,8 +1569,24 @@
       // Procreate 那条路已经自己算好 tip/hardness/diameter 了，只有 gray 才需要补算
       if (b.gray) {
         b.tip = packTip(b.gray, b.w, b.h);
-        b.hardness = hardnessOf(b.gray, b.w, b.h);
-        b.diameter = Math.max(b.w, b.h);
+        // ⚠ 顺序要紧：hardnessOf / 兜底 diameter 都要用**源图**尺寸，
+        //   所以必须趁 w/h 还是源尺寸时先算完，最后再改成打包后的尺寸。
+        //   （曾经把 w/h 改早了，hardnessOf 拿到 48×48 去采样 300×300 的 gray → 越界/错值。）
+        if (typeof b.hardnessHint === 'number') {
+          b.hardness = b.hardnessHint;      // .sut：CSP 的 BrushHardness 才是真值
+          delete b.hardnessHint;
+        } else {
+          b.hardness = hardnessOf(b.gray, b.w, b.h);
+        }
+        // diameter：只有 CSP 没给 BrushSize 时才退回「用图片像素尺寸」
+        if (!(typeof b.diameter === 'number' && b.diameter > 0)) {
+          b.diameter = Math.max(b.w, b.h);
+        }
+        // ⚠ packTip 把任意尺寸的图**统一重采样成 TIP_SIZE×TIP_SIZE**，
+        //   所以 w/h 最后要改成打包后的尺寸，否则记录里会有
+        //   「w=300 h=300 但 tip 头写着 48x48x4」这种自相矛盾（曾真的这样）。
+        //   消费端（app 的导入列表 / engine 的 tipCanvas）都按 w/h 还原。
+        b.w = TIP_SIZE; b.h = TIP_SIZE;
       }
       delete b.gray;
       delete b.png;   // 原始 PNG 不许跟着记录走（体积太大，localStorage 会爆）
@@ -1329,6 +1607,10 @@
     readZip: readZip,
     readBplist: readBplist,
     resolveArchive: resolveArchive,
-    decodePngGray: decodePngGray
+    decodePngGray: decodePngGray,
+    // CSP 库读取：夹具（手搓 SQLite）出错时，要能一眼看出是夹具写错了还是解析器错了
+    sqliteTableRows: sqliteTableRows,
+    sqliteTableBlobs: sqliteTableBlobs,
+    sutBrushMeta: sutBrushMeta
   };
 })(window);

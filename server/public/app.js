@@ -69,13 +69,33 @@
     gameWordShown: '',    // 已经提示过的词，避免每次状态同步都再弹一次
     hintKey: '',          // 已经响过提示音的「露字」去重键
     tickAt: -1,           // 倒计时音效已经响到第几秒（250ms 的定时器不能每次都响）
-    // 接龙：这一步轮到我做什么（服务端 GAME_TASK 单发，只有我能收到）
+    // 接龙：这一步轮到我做什么（服务端 GAME_TASK 单发，只有我能收到）。
+    // step 取值 'WORD' / 'DRAWING' / 'GUESS'（与协议一致的大写）。
     // 我拿到的是「答案」而不是「题面」时（作画/猜词那两步），聊天要闭嘴，免得剧透
     chainTask: null,
-    replayIndex: 0,           // 回放翻到第几格（客户端算，服务端不关心）
-    chainInputSubmitted: false, // 猜词框已提交（挡住重复提交 + 显示「已提交」）
+    // 接龙回放：S2C.GAME_REVEAL 广播一次（迟到者按 version 补发）。
+    // 数据只在 REVEAL/VOTE/SCORE 阶段存在，播放器在这份数据上翻页。
+    chainReveal: null,
+    // 接龙回放播放器：当前第几条链 / 第几格、自动播放、速度、翻格定时器。
+    // v9 起回放是「逐格播」而不是「一屏摊开」——所以客户端要一个自己的小状态机。
+    cr: { chain: 0, item: 0, playing: false, speed: 1, timer: null },
+    chainInputSubmitted: false, // 输入框已提交（挡住重复提交 + 显示「已提交」）
     chainTaskToast: '',       // 「轮到你…」通知去重（同一圈同一步只弹一次）
     themes: null,             // 接龙主题列表（{id,name}），从 /api/share 或快照拿
+    // 画皮：我的身份（服务端 SKIN_ROLE 单发，只有我能收到）。
+    // **绝不能从 S.game 里读身份** —— 那条是广播快照，里面压根没有这个字段。
+    skinRole: null,
+    // 画皮：夜里的裁定（SKIN_NIGHT 单发）。预言家拿到的是验人结果，
+    // 被刀的人拿到的是「你走了」。天亮面板要显示它，所以缓存下来。
+    skinNight: null,
+    skinDrawnSubmitted: false, // 本轮画已交（挡住重复提交）
+    skinRoleToast: '',        // 「你的身份是…」通知去重
+    skinVotePick: '',         // 画廊里当前点选的投票对象
+    skinPrevPhase: '',        // 上一帧的 phase（按阶段播报用）
+    skinPrevRound: -1,
+    skinTaskToast: '',        // 画皮的「该你动手」提示去重
+    skinReveal: null,         // 结算时的真相表（服务端 <SKIN_ROLE>:all 广播）
+    skinViewer: null,         // 点开的大图（元素引用）
     tool: 'brush',
     color: '#2b2b2b',
     bgColor: '#ffffff',
@@ -104,6 +124,10 @@
     stickers: [],             // 自定义表情（dataURL）
     stickerManaging: false,
     pressure: lsGet('chahu.pressure', '1') === '1',
+    // 最近一次可信的笔压（起笔那一下 Chrome 常给占位值 0.5，用它兜底）
+    lastPressure: 0.5,
+    // 压感自检结果：null=还没测到 / 'pen'=正常 / 'guess'=被驱动报成鼠标但识别为笔 / 'none'=没有压感
+    penDetect: null,
     stabilize: Number(lsGet('chahu.stabilize', '0')) || 0,
     sym: P.SYMMETRY_MODES.indexOf(lsGet('chahu.sym', 'none')) >= 0 ? lsGet('chahu.sym', 'none') : 'none',
     // 画笔光标样式：auto（大笔刷圆环 / 小笔刷十字）、ring（始终圆环）、cross（始终十字）
@@ -1112,6 +1136,7 @@
     $('#brushBlend').value = b.blend;
     $('#filledChk').checked = !!b.filled;
     $('#pressureChk').checked = S.pressure;
+    renderPenHint();
     setSlider('stabilizeRange', S.stabilize, Math.round);
     syncEffectUI();
     markSizePresets();
@@ -3489,6 +3514,117 @@
     return base;
   }
 
+  /* ============================================================ 笔压来源判定
+   *
+   * 为什么要这么绕：Chromium 只认两种来源能拿到数位板压力 ——
+   * Windows Ink（WM_POINTER）和 wintab 桥。Wacom 驱动装完会自动注册，
+   * 但绘王(Huion) / 高漫 / 部分 Parblo 的驱动默认走「鼠标模式」或没注册 Ink，
+   * 于是浏览器把笔**当成鼠标**报上来：pointerType === 'mouse'、pressure 恒 0.5。
+   * 旧代码只写了一句 `pointerType !== 'mouse'` 就丢弃压力 —— 对这些板子等于没压感，
+   * 而且一点提示都没有，用户根本不知道是自己的驱动没配好。
+   *
+   * 现在分三档：
+   *   'pen'   —— 浏览器明确说是笔，直接用它的压力
+   *   'guess' —— 报成 mouse，但压力/接触面积在变化（真鼠标做不到），按笔处理
+   *   'none'  —— 真鼠标（或压感关掉了），恒定 0.5
+   */
+
+  /** 每支指针最近几帧的压力 / 接触面积，用来判断「这玩意到底是不是笔」 */
+  var penProbe = { id: null, vals: [], types: {} };
+
+  /** 记一帧指针样本。指针变了（笔/鼠标切换）就重开一局 */
+  function notePointerSample(e) {
+    if (penProbe.id !== e.pointerId) {
+      penProbe.id = e.pointerId;
+      penProbe.vals = [];
+      penProbe.types = {};
+    }
+    penProbe.types[e.pointerType] = true;
+    penProbe.vals.push({ p: e.pressure, w: e.width || 0, h: e.height || 0 });
+    if (penProbe.vals.length > 24) penProbe.vals.shift();
+  }
+
+  /**
+   * 这块「鼠标」像不像数位板？
+   * 依据：真鼠标的 pressure 永远是 0.5、width/height 永远是 1x1；
+   * 只要出现别的取值，或者数值在动，就基本可以断定是板子（被驱动报成了鼠标）。
+   */
+  function looksLikePen() {
+    if (penProbe.types.pen || penProbe.types.touch) return false;   // 已经明确有笔/触摸，不用猜
+    if (!penProbe.types.mouse) return false;
+    var v = penProbe.vals;
+    if (v.length < 3) return false;
+    var pMin = 1, pMax = 0, area = 0;
+    for (var i = 0; i < v.length; i++) {
+      pMin = Math.min(pMin, v[i].p);
+      pMax = Math.max(pMax, v[i].p);
+      if (v[i].w > 1.001 || v[i].h > 1.001) area = 1;
+    }
+    // 压力有了变化、或接触面积不是 1x1（鼠标的特征值）→ 是笔
+    return (pMax - pMin) > 0.002 || area === 1;
+  }
+
+  /** 这一次落笔该不该用压力（真笔直接用；疑似笔要等样本攒够） */
+  function pressureUsable(pointerType) {
+    if (!S.pressure) return false;
+    if (pointerType === 'pen') return true;
+    if (pointerType === 'mouse') return looksLikePen();
+    return false;   // touch / 其他：手机上画画本来就没有压感
+  }
+
+  /** 压力值本身也要擦干净：Chrome 在 pointerdown 常给 0.5 或 0（那是占位值，不是真压力） */
+  function normPressure(e, fallback) {
+    var p = e && e.pressure;
+    if (typeof p !== 'number' || p <= 0 || p >= 1) {
+      // 0 表示「没有压力信息」，1 通常来自不支持的设备；都退回上一次 / 默认
+      return fallback == null ? 0.5 : fallback;
+    }
+    return p;
+  }
+
+  /**
+   * 压感自检的结论 + 面板上那行提示。
+   * 为什么要有这个：板子被驱动报成鼠标时，茶绘这边完全静默 ——
+   * 用户只会觉得「这软件没压感」，而真正的原因在驱动设置里。
+   * 这里把判断结果直接写出来，并附上该去哪儿改。
+   */
+  function updatePenDetect(type, e) {
+    var next;
+    if (type === 'pen') next = 'pen';
+    else if (type === 'mouse') next = looksLikePen() ? 'guess' : 'none';
+    else if (type === 'touch') next = 'none';
+    else next = null;
+    if (!next) return;
+    // 一旦测到真笔就别被后来的鼠标悬停降级
+    if (S.penDetect === 'pen' && next === 'none') return;
+    if (S.penDetect === next) return;
+    S.penDetect = next;
+    renderPenHint(e);
+  }
+
+  function renderPenHint(e) {
+    var el = $('#penHint');
+    if (!el) return;
+    if (!S.pressure || !S.penDetect || S.penDetect === 'pen') {
+      el.className = 'pen-hint';
+      el.innerHTML = '';
+      return;
+    }
+    if (S.penDetect === 'guess') {
+      // 识别到了压力变化，但浏览器仍把它当鼠标 —— 能用，只是提示一下更稳的做法
+      el.className = 'pen-hint on good';
+      el.innerHTML = '已识别到数位笔压力（驱动把笔报成了鼠标，茶绘已自动兼容）。' +
+        '若压感忽有忽无，可在手绘板驱动里开启 <b>Windows Ink</b> 并关闭「鼠标模式」。';
+      return;
+    }
+    // 'none'：有鼠标事件但完全没有压力信息 —— 基本可以断定驱动没把笔交给浏览器
+    var extra = e && e.pointerType === 'mouse' ? '' : '';
+    el.className = 'pen-hint on';
+    el.innerHTML = '<b>没有检测到笔压。</b>如果你正在用数位板，多半是驱动的问题，' +
+      '请打开手绘板驱动：① 开启「Windows Ink」；② 关闭「鼠标模式 / 相对坐标」；' +
+      '③ 重启浏览器或茶绘后再试。' + extra;
+  }
+
   function beginLocal(px, py, pressure, pointerType) {
     var layer = engine.activeLayer();
     if (!layer || !S.joined) return;
@@ -3497,7 +3633,14 @@
     if (_bm) { toast(_bm, 'err', 1600); return; }
     if (layer.locked) { toast('图层「' + layer.name + '」已锁定'); return; }
 
-    var usePressure = S.pressure && pointerType && pointerType !== 'mouse';
+    var usePressure = pressureUsable(pointerType);
+    updatePenDetect(pointerType, { pointerType: pointerType });
+    // Chrome 在 pointerdown 那一下经常给 pressure = 0.5 —— 那是**占位值**，
+    // 和「真的按到一半」没法从数值上区分。真实压力要等第一个 pointermove。
+    // 所以起笔先按这个值画，并记住首点位置：等第一个可信的移动压力到了，
+    // 把首点改写成「和后续压力同档」的值（见 moveLocal 里的 fixFirstPoint）。
+    var startP = usePressure ? normPressure({ pressure: pressure }, S.lastPressure) : 0.5;
+    if (usePressure && pressure > 0 && pressure < 1) S.lastPressure = pressure;
     var id = P.rid('s');
 
     if (S.tool === 'fill') {
@@ -3533,12 +3676,18 @@
     var info2 = strokeInfo(id, layer, usePressure, { add: S.modShift, subtract: S.modAlt });
     var stroke = engine.beginStroke(Object.assign({ local: true }, info2));
     if (!stroke) return;
-    S.session = { id: id, last: [px, py], pending: [], tool: S.tool, local: isSelectToolId(S.tool) };
+    S.session = {
+      id: id, last: [px, py], pending: [], tool: S.tool, local: isSelectToolId(S.tool),
+      // Chrome 的起笔占位压力**恰好就是 0.5**，数值上没法和「真按到一半」区分。
+      // 保守起见：起笔压力正好落在 0.5 就当作可疑，等第一个真实移动压力到了再回改。
+      // （若用户真的一直半压，回改后的值也还是 0.5，没有副作用。）
+      firstUnreliable: usePressure && Math.abs(normPressure({ pressure: pressure }, -1) - 0.5) < 1e-6
+    };
     smooth.x = px; smooth.y = py;
 
     // 选区是本机私有的状态，不进历史、不同步
     if (S.session.local) {
-      var p0 = P.qp([px, py, usePressure ? pressure : 0.5]);
+      var p0 = P.qp([px, py, usePressure ? startP : 0.5]);
       S.session.last = [p0[0], p0[1]];
       engine.addPoints(id, [p0]);
       return;
@@ -3548,16 +3697,32 @@
 
     // 与协议一致地量化采样点：远端回放用的是量化后的坐标，
     // 本地若用原始浮点会出现亚像素差异（模糊 / 水彩边缘会把它放大）
-    var p = P.qp([px, py, usePressure ? pressure : 0.5]);
+    var p = P.qp([px, py, usePressure ? startP : 0.5]);
     S.session.last = [p[0], p[1]];
     engine.addPoints(id, [p]);
     S.session.pending.push(p);
     flushPoints(true);
   }
 
+  /**
+   * 把 getCoalescedEvents 里的中间帧喂进当前笔迹。
+   * 参数是「裸的」PointerEvent，需要自己换算成画布坐标（走 stagePoint 的反向：
+   * e.clientX/Y 是屏幕坐标，和主事件走同一套换算即可）。
+   */
+  function feedCoalesced(ce) {
+    if (!S.session || S.session.local) return;   // 选区类工具的中间帧没意义
+    var sp = stagePoint(ce);
+    var dp = engine.screenToDoc(sp.x, sp.y);
+    if (dp.x < -2 || dp.y < -2 || dp.x > engine.width + 2 || dp.y > engine.height + 2) return;
+    moveLocal(dp.x, dp.y, ce.pressure, ce.pointerType || 'pen');
+  }
+
   function moveLocal(px, py, pressure, pointerType) {
     if (!S.session) return;
-    var usePressure = S.pressure && pointerType && pointerType !== 'mouse';
+    var usePressure = pressureUsable(pointerType);
+    // 移动阶段压力是可信的（真鼠标这里恒定 0.5，会被 normPressure 退回默认值）
+    var curP = usePressure ? normPressure({ pressure: pressure }, S.lastPressure) : 0.5;
+    if (usePressure && pressure > 0 && pressure < 1) S.lastPressure = pressure;
     var x = px, y = py;
     if (S.stabilize > 0) {
       var k = 1 - Math.min(0.88, S.stabilize * 0.058);
@@ -3570,7 +3735,18 @@
     var minStep = Math.max(0.7, S.brush.size * 0.07);
     if (d < minStep && S.session.pending.length > 0) return;
 
-    var p = P.qp([x, y, usePressure ? pressure : 0.5]);
+    // 起笔用的是不可信的占位压力 → 第一个真值到了就把它一起改掉，
+    // 否则每笔起手都是「半压的小圆头」。只回改一次。
+    if (S.session.firstUnreliable && usePressure && pressure > 0 && pressure < 1) {
+      S.session.firstUnreliable = false;
+      var fixed = engine.patchTailPressure(S.session.id, 12, curP);
+      // 已经发给服务端的那部分没法回改，但还没发的（pending）可以同步改掉
+      if (fixed && S.session.pending.length) {
+        for (var pi = 0; pi < S.session.pending.length; pi++) S.session.pending[pi][2] = curP;
+      }
+    }
+
+    var p = P.qp([x, y, curP]);
     S.session.last = [p[0], p[1]];
     engine.addPoints(S.session.id, [p]);
     S.session.pending.push(p);
@@ -3724,6 +3900,7 @@
 
       view.setPointerCapture(e.pointerId);
       e.preventDefault();
+      notePointerSample(e);            // 攒一帧样本，供「这块鼠标是不是板子」判断
       beginLocal(dp.x, dp.y, e.pressure, e.pointerType);
     });
 
@@ -3734,6 +3911,15 @@
       S.pointer.sx = sp.x;
       S.pointer.sy = sp.y;
       S.pointer.inside = true;
+      notePointerSample(e);            // 攒样本：判断「报成 mouse 的是不是数位板」
+      // 落笔途中把浏览器合并掉的中间帧也补进来 —— 板子的采样率远高于事件频率，
+      // 不取 coalesced 的话快速运笔会丢压力变化（笔迹忽粗忽细、转折处发直）
+      if (S.session) {
+        var coins = (typeof e.getCoalescedEvents === 'function') ? e.getCoalescedEvents() : null;
+        if (coins && coins.length > 1) {
+          for (var ci = 1; ci < coins.length; ci++) feedCoalesced(coins[ci]);
+        }
+      }
       // 尺子定义中：拖出橡皮筋
       if (S.rulerArm && S.rulerDragging) {
         var rdp = engine.screenToDoc(sp.x, sp.y);
@@ -4065,6 +4251,9 @@
     var g = S.game;
     if (!g) return false;
     if (g.mode === 'chain') return g.phase === 'chain_draw';
+    // 画皮：作画阶段大家都看不见别人的画，光标当然也一起藏 ——
+    // 一条光标飘过去就等于告诉全场「那个人在画布好大一块」。
+    if (g.mode === 'skin') return g.phase === 'skin_draw';
     return g.phase === 'draw' && !!g.isDrawer;
   }
 
@@ -4079,6 +4268,14 @@
   /* ============================================================ 同步处理 */
 
   function handleMessage(msg) {
+    // 画皮结算的「真相表」走的是 `<SKIN_ROLE>:all`（见 server/src/index.js 的 syncGame）。
+    // 放在 switch 之前判掉：它不是一个独立的协议常量，没必要为一处用途去污染 S2C 表 ——
+    // 协议表里每多一条「只有一处用」的消息，将来就多一处定义与实现对不上的风险。
+    if (msg.t === P.S2C.SKIN_ROLE + ':all') {
+      S.skinReveal = msg.all || null;
+      renderSkinOver();
+      return;
+    }
     switch (msg.t) {
       case P.S2C.HELLO_OK:
         renderConn('online');
@@ -4106,6 +4303,11 @@
         engine.setMeId(S.me.userId);
         S.myUndo = []; S.myRedo = [];
         clearCursors();
+        // 换了房间：画皮的身份、夜里的裁定、结算真相表统统作废。
+        // 不清的话会把上一个房间的底牌带进新房间 —— 那是真的能看出别人身份的程度。
+        S.skinRole = null; S.skinNight = null; S.skinReveal = null;
+        S.skinDrawnSubmitted = false; S.skinRoleToast = ''; S.skinTaskToast = '';
+        S.skinPrevPhase = ''; S.skinPrevRound = -1; S.skinVotePick = '';
 
         engine.init({
           width: msg.room.width, height: msg.room.height,
@@ -4321,8 +4523,28 @@
         applyChainTask(msg.task);
         break;
 
+      /* 接龙专用：回放数据（进 REVEAL 阶段广播一次，迟到者按 version 补发）。
+         完整链条第一次公开 —— 之后客户端播放器就在这份数据上翻页，
+         不再向服务端要任何东西。 */
+      case P.S2C.GAME_REVEAL:
+        applyChainReveal(msg.chains || []);
+        break;
+
       case P.S2C.GAME_WORD:
         onGameWord(msg.word);
+        break;
+
+      /* 画皮：我的身份（只发给我）。全场唯一一份「我是谁」的来源 ——
+         快照里没有它，所以重连 / 中途同步都会重发一份，这里覆盖即可。 */
+      case P.S2C.SKIN_ROLE:
+        applySkinRole(msg);
+        break;
+
+      /* 画皮：夜里的裁定（只发给我）。预言家的验人结果 / 我被刀了。 */
+      case P.S2C.SKIN_NIGHT:
+        S.skinNight = msg || null;
+        renderSkinDawn();
+        if (S.game && S.game.phase === 'skin_night') renderSkinNight();
         break;
 
       case P.S2C.GAME_CORRECT:
@@ -4335,6 +4557,7 @@
           S.themes = msg.themes;
           buildThemeSelect($('#gameTheme'));   // 经典模式的开局面板
           renderChainDialog();
+          renderSkinDialog();                  // 画皮的开局面板
           if (TM.list) loadThemeList();       // 词库面板开着的话也顺手刷新
         }
         break;
@@ -6187,6 +6410,7 @@
     $('#pressureChk').addEventListener('change', function () {
       S.pressure = this.checked;
       lsSet('chahu.pressure', S.pressure ? '1' : '0');
+      renderPenHint();          // 关掉压感时把提示也撤掉
     });
     $('#stabilizeRange').addEventListener('input', function () {
       S.stabilize = Number(this.value);
@@ -6602,12 +6826,49 @@
     $('#btnOverStop').addEventListener('click', function () { stopGame(); });
     $('#btnOverAgain').addEventListener('click', function () {
       closeOver();
-      net.send(P.C2S.GAME_START, { rounds: Number($('#gameRounds').value) || P.GAME.DEFAULT_ROUNDS });
+      // 用和「开始」同一份参数 —— 只发 { rounds } 会把主题丢掉（见 classicStartPayload）
+      net.send(P.C2S.GAME_START, classicStartPayload());
     });
 
-    /* ---- 玩法切换（你画我猜 / 接龙） ---- */
+    /* ---- 玩法切换（你画我猜 / 接龙 / 画皮） ---- */
     $('#gmClassic').addEventListener('click', function () { setGameDialogMode('classic'); });
     $('#gmChain').addEventListener('click', function () { setGameDialogMode('chain'); });
+    $('#gmSkin').addEventListener('click', function () { setGameDialogMode('skin'); });
+
+    /* ---- 画皮开局面板 ---- */
+    $('#btnSkinClose').addEventListener('click', function () { $('#skinMask').classList.add('hidden'); });
+    $('#btnSkinCancel').addEventListener('click', function () { $('#skinMask').classList.add('hidden'); });
+    $('#btnSkinStart').addEventListener('click', startSkinGame);
+    $('#btnSkinThemeManage').addEventListener('click', openThemeManager);
+    $('#skinTheme').addEventListener('change', function () { setThemeChoice(this.value); });
+    $('#btnSkinStop').addEventListener('click', function () {
+      confirmDialog('结束画皮？这一局的身份不会被保留。', {
+        title: '结束画皮', yes: '结束画皮', danger: true
+      }).then(function (yes) { if (yes) { stopGame(); $('#skinMask').classList.add('hidden'); } });
+    });
+
+    /* ---- 画皮：交稿 ---- */
+    $('#sdbSubmit').addEventListener('click', submitSkinArt);
+
+    /* ---- 画皮：身份卡折叠 ---- */
+    $('#srCollapse').addEventListener('click', function () {
+      var box = $('#skinRole');
+      box.classList.toggle('collapsed');
+      this.textContent = box.classList.contains('collapsed') ? '▸' : '–';
+    });
+
+    /* ---- 画皮：弃票 ---- */
+    $('#sgVoteSkip').addEventListener('click', function () {
+      sendSkinAction('vote', '');   // 空目标 = 撤票
+    });
+
+    /* ---- 画皮：结算面板 ---- */
+    $('#btnSkinOverClose').addEventListener('click', function () { $('#skinOverMask').classList.add('hidden'); });
+    $('#btnSkinOverStop').addEventListener('click', function () { stopGame(); closeSkinUi(); });
+    $('#btnSkinOverAgain').addEventListener('click', function () {
+      $('#skinOverMask').classList.add('hidden');
+      openSkinDialog();
+    });
 
     /* ---- 接龙开局面板 ---- */
     $('#btnChainClose').addEventListener('click', function () { $('#chainMask').classList.add('hidden'); });
@@ -6664,23 +6925,52 @@
     });
     $('#ciInput').addEventListener('input', updateChainInputPreview);
 
-    /* ---- 回放 + 投票 ---- */
+    /* ---- 接龙大厅：准备 / 取消准备（全员就绪自动开局） ---- */
+    $('#btnChainReady').addEventListener('click', function () {
+      net.send(P.C2S.GAME_READY, { ready: !(S.game && S.game.myReady) });
+      SFX.play('tap');
+    });
+
+    /* ---- 回放播放器 + 投票 ---- */
     $('#rpPrev').addEventListener('click', function () { stepReplay(-1); });
     $('#rpNext').addEventListener('click', function () { stepReplay(1); });
-    $('#rpVoteBad').addEventListener('click', function () { voteChain(false); });
-    $('#rpVoteOk').addEventListener('click', function () { voteChain(true); });
+    $('#rpPlay').addEventListener('click', crPlay);
+    $('#rpPrevItem').addEventListener('click', function () { crStepItem(-1); });
+    $('#rpNextItem').addEventListener('click', function () { crStepItem(1); });
+    $('#rpSpeed').addEventListener('change', function () {
+      S.cr.speed = Number(this.value) || 1;
+      if (S.cr.playing) crScheduleNext();    // 播放中改速度：立刻按新节奏走
+    });
+    $('#rpVoteBad').addEventListener('click', function () { voteKeep(false); });
+    $('#rpVoteOk').addEventListener('click', function () { voteKeep(true); });
     $('#btnRpNext').addEventListener('click', function () { net.send(P.C2S.GAME_NEXT, {}); });
     $('#btnRpExit').addEventListener('click', function () {
       // 收起面板 = 我先不看了，但票还是要投的 —— 服务端到点自动结算。
-      rpClearTimers();
+      S.cr.playing = false;
+      crClearTimer();
       $('#replayMask').classList.add('hidden');
     });
-    // 进度小点：直接跳链（4~16 条链时比一下下点箭头快得多）
+    // 头部小点：直接跳链（4~16 条链时比一下下点箭头快得多）
     $('#rpChainHead').addEventListener('click', function (ev) {
       var pill = ev.target.closest ? ev.target.closest('.rp-pill') : null;
       if (!pill) return;
       var pills = Array.prototype.slice.call(this.querySelectorAll('.rp-pill'));
       gotoReplay(pills.indexOf(pill));
+    });
+    // 控制条里的小点：跳格
+    $('#rpPills').addEventListener('click', function (ev) {
+      var pill = ev.target.closest ? ev.target.closest('.rp-pill') : null;
+      if (!pill || pill.dataset.item == null) return;
+      var chain = S.chainReveal && S.chainReveal[S.cr.chain];
+      if (!chain) return;
+      var i = Number(pill.dataset.item);
+      if (!isFinite(i)) return;
+      S.cr.item = Math.max(0, Math.min(i, (chain.steps || []).length - 1));
+      S.cr.playing = false;
+      crClearTimer();
+      syncRpPlayBtn();
+      SFX.play('flip');
+      renderChainReveal();
     });
     // 键盘左右翻链（面板开着时才有意义）
     document.addEventListener('keydown', function (ev) {
@@ -6695,12 +6985,7 @@
     $('#btnTrophyStop').addEventListener('click', function () { stopGame(); closeTrophy(); });
     $('#btnTrophyAgain').addEventListener('click', function () {
       closeTrophy();
-      var rounds = Number($('#chainRounds').value) || P.GAME.CHAIN_ROUNDS;
-      var theme = $('#chainTheme').value || 'default';
-      net.send(P.C2S.GAME_START, {
-        mode: 'chain', rounds: rounds, theme: theme,
-        drawSeconds: Number($('#chainDrawTime').value) || 0
-      });
+      net.send(P.C2S.GAME_START, chainStartPayload());
     });
 
     /* ---- 顶栏「立刻推进」（接龙里房主用来跳过没交的人 / 提前结算投票） ---- */
@@ -6949,16 +7234,31 @@
       closePick();
       hideRoundCard();
       closeOver();
+      closeSkinUi();
       applyChainState(S.game, prevPhase);
       return;
     }
-    // 从接龙切回自由绘画 / 经典：把接龙的浮层收干净
+
+    /* 画皮同理，第三套 UI：身份卡 / 匿名画廊 / 夜里的动作面板。 */
+    if (S.game && S.game.mode === 'skin') {
+      closePick();
+      hideRoundCard();
+      closeOver();
+      closeChainUi();
+      applySkinState(S.game, prevPhase);
+      return;
+    }
+    // 从接龙 / 画皮切回自由绘画 / 经典：把它们的浮层收干净
     if (!S.game || S.game.mode !== 'chain') {
       if (prev && prev.mode === 'chain') closeChainUi();
       else {
         var tsk = $('#chainTask'); if (tsk) tsk.classList.add('hidden');
         var cp = $('#chainProgress'); if (cp) cp.classList.add('hidden');
       }
+    }
+    if (!S.game || S.game.mode !== 'skin') {
+      if (prev && prev.mode === 'skin') closeSkinUi();
+      else closeSkinUi();
     }
 
     // 选词弹窗：只有画手会拿到 choices，所以其他端天然打不开
@@ -7021,19 +7321,34 @@
     hud.classList.remove('hidden');
     var g = S.game;
     var chain = g.mode === 'chain';
+    var skin = g.mode === 'skin';
     $('#ghPhase').textContent = g.phaseLabel || PHASE_TEXT[g.phase] || '';
 
-    // 接龙按「圈」数（每条链传几手），经典按「回合」数
+    // 接龙按「圈」数（每条链传几手），画皮按「轮」数，经典按「回合」数
     if (chain) {
       $('#ghRound').textContent = '第 ' + Math.max(1, Math.min(g.round, g.rounds)) + ' / ' + g.rounds + ' 圈'
         + (g.stepTotal ? '（' + g.stepDone + '/' + g.stepTotal + ' 已完成）' : '');
+    } else if (skin) {
+      $('#ghRound').textContent = '第 ' + Math.max(1, Math.min(g.round, g.maxRounds)) + ' / ' + g.maxRounds + ' 轮';
     } else {
       $('#ghRound').textContent = '第 ' + Math.max(1, Math.min(g.round, g.rounds)) + ' / ' + g.rounds + ' 回合';
+    }
+
+    // 画皮多一段「还活着几个人」—— 这是全场最关心的数字，不该藏进面板里
+    var skinState = $('#ghSkinState');
+    if (skinState) {
+      var showState = skin && g.players && g.players.length;
+      skinState.classList.toggle('hidden', !showState);
+      if (showState) {
+        skinState.textContent = '在场 ' + g.aliveCount + ' 人';
+      }
     }
 
     var wordEl = $('#ghWord');
     if (chain) {
       renderChainHudWord(wordEl, g);
+    } else if (skin) {
+      renderSkinHudWord(wordEl, g);
     } else if (g.phase === 'draw') {
       if (g.isDrawer) {
         wordEl.innerHTML = '你要画：<b>' + esc(g.word || '') + '</b>';
@@ -7058,37 +7373,84 @@
       wordEl.textContent = '';
     }
 
-    // 「立刻推进」：接龙专用，只有房主看得见。
+    // 「立刻推进」：接龙 / 画皮共用，只有房主看得见。
     // 用途是「有人挂了 / 交不了，别干等」—— 写词/画/猜 跳过没交的人，投票直接结算。
     var next = $('#ghNext');
     if (next) {
-      var canNext = chain && S.me.isOwner && (
-        chainStepActive() || g.phase === 'chain_vote'
-      );
+      var canNext = false;
+      if (chain) canNext = S.me.isOwner && (chainStepActive() || g.phase === 'chain_vote');
+      else if (skin) canNext = S.me.isOwner && skinCanAdvance(g);
       next.classList.toggle('hidden', !canNext);
     }
 
     updateGameTimer();
   }
 
-  /** 接龙的 HUD 文案：这一步我在做什么 / 全场的进度 */
+  /** 画皮：房主现在能不能「立刻推进」（与 skin.js 的 next() 一一对应） */
+  function skinCanAdvance(g) {
+    if (!g) return false;
+    return g.phase === 'skin_night' || g.phase === 'skin_dawn' ||
+      g.phase === 'skin_draw' || g.phase === 'skin_talk' ||
+      g.phase === 'skin_vote' || g.phase === 'skin_vote_end';
+  }
+
+  /** 画皮的 HUD 文案 */
+  function renderSkinHudWord(el, g) {
+    if (!el) return;
+    if (g.phase === 'lobby') {
+      el.textContent = S.me.isOwner ? '点「开始画皮」' : '等房主开局';
+      return;
+    }
+    if (g.phase === 'skin_night') {
+      el.textContent = '天黑请闭眼 —— 该动的人在动';
+    } else if (g.phase === 'skin_dawn') {
+      el.textContent = '天亮了，看看昨晚发生了什么';
+    } else if (g.phase === 'skin_draw') {
+      el.innerHTML = g.canDraw
+        ? '本轮主题：<b>' + esc(g.word || '') + '</b>（' + g.drawDone + '/' + g.drawTotal + ' 已交）'
+        : '本轮主题：<b>' + esc(g.word || '') + '</b>';
+    } else if (g.phase === 'skin_talk') {
+      el.textContent = '看画猜人 —— 谁在装？';
+    } else if (g.phase === 'skin_vote') {
+      el.textContent = '投票放逐（' + g.voteDone + '/' + g.voteTotal + ' 已投）';
+    } else if (g.phase === 'skin_vote_end') {
+      el.textContent = g.voteResult && g.voteResult.exiledName
+        ? g.voteResult.exiledName + ' 被放逐了'
+        : '投票平票 —— 无人出局';
+    } else if (g.phase === 'over') {
+      el.textContent = '本局结束 —— ' + (g.winnerName || '');
+    } else {
+      el.textContent = '';
+    }
+  }
+
+  /** 接龙的 HUD 文案：这一步我在做什么 / 全场的进度（多链并行：每格每人都有一件事） */
   function renderChainHudWord(el, g) {
     if (!el) return;
     var t = S.chainTask;
+    var mine = g ? (g.myStep || '') : '';
     if (g.phase === 'lobby') {
-      el.textContent = S.me.isOwner ? '点「开始接龙」' : '等房主开局';
+      el.textContent = g.canStart
+        ? '都到齐了 —— 准备就绪开局（' + (g.readyCount || 0) + '/' + (g.players || []).length + '）'
+        : '点「准备」，全员就绪自动开局';
       return;
     }
-    if (g.phase === 'chain_write') {
-      el.textContent = t && t.step === 'write' ? '给你的链写一个词' : '大家在写词…';
+    if (g.phase === 'chain_init') {
+      el.textContent = '链已排好，马上开始 —— 共 ' + (g.stepTotal || 0) + ' 条链并行';
+    } else if (g.phase === 'chain_write') {
+      el.textContent = mine === 'WORD' ? '给你的链写一个初始词' : '大家在写初始词…';
     } else if (g.phase === 'chain_draw') {
-      el.textContent = t && t.step === 'draw' ? '轮到你作画' : '其他人正在作画…';
+      el.textContent = mine === 'DRAWING'
+        ? '轮到你作画：' + (t && t.word ? t.word : '')
+        : '第 ' + ((g.stepIndex | 0) + 1) + ' 手 —— 其他人正在作画…';
     } else if (g.phase === 'chain_guess') {
-      el.textContent = t && t.step === 'guess' ? '轮到你猜词' : '其他人正在猜词…';
+      el.textContent = mine === 'GUESS' ? '轮到你猜词' : '第 ' + ((g.stepIndex | 0) + 1) + ' 手 —— 其他人正在猜词…';
+    } else if (g.phase === 'chain_reveal') {
+      el.textContent = '回放 —— 看看每条链怎么跑偏的';
     } else if (g.phase === 'chain_vote') {
-      el.textContent = '来看这一局跑偏成什么样（可投票）';
-    } else if (g.phase === 'over') {
-      el.textContent = '本局结束 —— 看奖杯';
+      el.textContent = '投票：每条链对得上吗 + 你最喜欢的一张画';
+    } else if (g.phase === 'chain_score') {
+      el.textContent = '本局结束 —— 看结算';
     } else {
       el.textContent = '';
     }
@@ -7110,7 +7472,10 @@
     // 倒计时音效：按「秒数跨过阈值」响，不是按定时器次数 ——
     // 这个函数 250ms 跑一次，直接响会变成机关枪。
     // 10 秒一声提醒，最后 5 秒每秒一声、音高递增（tickUrgent 的 n 越大越高）。
-    var counting = ['draw', 'pick', 'chain_write', 'chain_guess', 'chain_draw'].indexOf(S.game.phase) >= 0;
+    var counting = ['draw', 'pick', 'chain_init', 'chain_write', 'chain_guess', 'chain_draw',
+      'chain_reveal', 'chain_vote', 'chain_score',
+      'skin_night', 'skin_dawn', 'skin_draw', 'skin_talk', 'skin_vote', 'skin_vote_end']
+      .indexOf(S.game.phase) >= 0;
     if (counting && left > 0) {
       if (left !== S.tickAt) {
         S.tickAt = left;
@@ -7124,17 +7489,54 @@
       var pt = $('#pickTimer');
       if (pt) pt.textContent = left;
     }
-    // 接龙的倒计时同时喂给「猜词输入框」和「回放投票」两个面板
+    // 接龙的倒计时同时喂给「猜词输入框」和「回放播放器」两个面板，顺带管自动提交
     if (S.game.mode === 'chain') {
       var ci = $('#ciTimer');
       if (ci) ci.textContent = left;
       var rp = $('#rpTimer');
       if (rp) rp.textContent = left;
+      chainAutoSubmit(left);
+    }
+    // 画皮同理：夜里动作面板 / 天亮公告各有一个倒计时
+    if (S.game.mode === 'skin') {
+      var sn = $('#snTimer');
+      if (sn) sn.textContent = left;
+      var sd = $('#sdTimer');
+      if (sd) sd.textContent = left;
     }
     var next = $('#rcNext');
     if (next) {
       next.textContent = (S.game.phase === 'round_end' && left > 0)
         ? left + ' 秒后继续' : '';
+    }
+  }
+
+  /**
+   * 倒计时到 0 的自动提交（接龙）：
+   *   DRAWING —— 直接发交画信号（笔迹早已按 STROKE_* 入库，不交白不交）；
+   *   GUESS   —— 输入框里有字就交，没字就算了（服务端收格时按「空」处理）；
+   *   WORD    —— 不自动交：乱写一个词只会坑下家，宁可空格。
+   * 服务端另有 GRACE_MS 宽限，这个包路上多花点时间也收得到。
+   */
+  function chainAutoSubmit(left) {
+    var g = S.game, t = S.chainTask;
+    if (!g || !t || left > 0 || S.chainInputSubmitted) return;
+    if (!chainStepActive() || t.step !== g.myStep) return;
+    if (t.step === 'DRAWING') {
+      S.chainInputSubmitted = true;
+      net.send(P.C2S.GAME_SUBMIT, {});
+      renderChainTask();
+      toast('时间到 —— 作品已自动交上去', 'ok', 2600);
+    } else if (t.step === 'GUESS') {
+      var inp = $('#ciInput');
+      var v = inp ? inp.value.trim() : '';
+      if (v) {
+        S.chainInputSubmitted = true;
+        net.send(P.C2S.GAME_SUBMIT, { text: v });
+        renderChainTask();
+        closeChainInput();
+        toast('时间到 —— 猜词已自动交上去', 'ok', 2600);
+      }
     }
   }
 
@@ -7184,13 +7586,31 @@
     }
     var g = S.game;
     if (g.mode === 'chain') {
-      var t = S.chainTask;
-      if (g.phase === 'chain_write') el.textContent = '写词阶段 —— 画布先留着，等有人要作画';
-      else if (g.phase === 'chain_guess') el.textContent = '猜词阶段 —— 画布上放的是上家的画，别动它';
-      else if (g.phase === 'chain_draw') el.textContent = '这一手不是你在画，先看着';
-      else if (g.phase === 'chain_vote') el.textContent = '回放 / 投票中 —— 画布暂时不能动';
-      else if (t && t.step === 'draw') el.textContent = '轮到你作画';
+      var mine = g.myStep || '';
+      if (g.phase === 'chain_init') el.textContent = '马上开始 —— 链已排好，画布已清空';
+      else if (g.phase === 'chain_write') el.textContent = '写初始词阶段 —— 画布先留着，下一步才画';
+      else if (g.phase === 'chain_guess') el.textContent = '猜词阶段 —— 要猜的画在题面里，画布上不用动';
+      else if (g.phase === 'chain_draw') el.textContent = mine === 'DRAWING' ? '轮到你作画' : '这一手不是你在画，先看着';
+      else if (g.phase === 'chain_reveal') el.textContent = '回放中 —— 画布暂时不能动';
+      else if (g.phase === 'chain_vote') el.textContent = '投票中 —— 画布暂时不能动';
+      else if (g.phase === 'chain_score') el.textContent = '本局结算 —— 画布暂时不能动';
       else el.textContent = '接龙进行中';
+      return;
+    }
+    if (g.mode === 'skin') {
+      if (g.phase === 'skin_draw') {
+        el.textContent = g.canDraw
+          ? '轮到你作画 —— 别人看不到你的画，交稿后匿名摊开'
+          : '这一轮你不能画（出局 / 观战中），等大家交稿';
+      } else if (g.phase === 'skin_night') {
+        el.textContent = '天黑请闭眼 —— 夜里不能画画';
+      } else if (g.phase === 'skin_talk') {
+        el.textContent = '看画与讨论中 —— 想指着自己的画解释，可以截图发群里';
+      } else if (g.phase === 'skin_vote') {
+        el.textContent = '投票放逐中 —— 画布暂时不能动';
+      } else {
+        el.textContent = '画皮进行中';
+      }
       return;
     }
     if (g.phase === 'pick') el.textContent = '正在选词，稍等片刻';
@@ -7205,10 +7625,19 @@
     if (gameActive() && S.game.mode === 'chain') {
       // 接龙的猜词走独立输入框（因为题目是「一幅画」），聊天就是普通聊天。
       // 但手里攥着答案的人发言会被服务端拦掉，这里先把话说清楚。
-      if (chainStepActive() && S.chainTask && S.chainTask.step !== 'write') {
+      if (chainStepActive() && S.chainTask && S.chainTask.step !== 'WORD') {
         hint = '你手上正拿着这一步的答案，这里说的话不会发出去';
       } else {
-        hint = '说点什么…（接龙的猜词请用画布左下角的输入框）';
+        hint = '说点什么…（接龙的猜词请用题面里的输入框）';
+      }
+    } else if (gameActive() && S.game.mode === 'skin') {
+      // 画皮里聊天就是「发言」，是玩法本身 —— 只有夜里要闭嘴
+      if (S.game.phase === 'skin_night') {
+        hint = '天黑请闭眼 —— 夜里说的话发不出去';
+      } else if (S.game.phase === 'skin_talk') {
+        hint = '讨论：谁在装？双击画廊里自己的画能放大' ;
+      } else {
+        hint = '说点什么…（画皮里发言就是你的「嘴」，但别把身份喊出来）';
       }
     } else if (gameActive() && S.game.phase === 'draw') {
       if (gameImDrawer()) hint = '你是画手：可以聊天给提示，但别把答案说出来（带答案的话发不出去）';
@@ -7222,8 +7651,13 @@
     var mask = $('#pickMask');
     if (!mask) return;
     if (!choices || !choices.length) { mask.classList.add('hidden'); return; }
-    // 同一个回合已经开着就别重建（否则点一下又被同步覆盖回列表）
-    if (!mask.classList.contains('hidden') && mask.dataset.round === String(S.game.round)) {
+    // ⚠ 判据必须是「候选词**变了没有**」，不能只看回合号。
+    //    以前这里判的是 `dataset.round === S.game.round`：点「换一组」之后，
+    //    服务端会推一份**新的 choices** 过来，但回合号没变 —— 于是直接 return，
+    //    界面上还挂着旧的那三个词。用户看到的正是「点了换一组没反应」，
+    //    要等下一回合重新开这个弹窗才「突然换了词」（那时早就进作画阶段了）。
+    var sig = String(S.game.round) + '|' + choices.join(',');
+    if (!mask.classList.contains('hidden') && mask.dataset.sig === sig) {
       updateRepickUi();
       return;
     }
@@ -7237,11 +7671,11 @@
       b.addEventListener('click', function () {
         net.send(P.C2S.GAME_PICK, { index: i });
         mask.classList.add('hidden');
-        mask.dataset.round = '';
+        mask.dataset.sig = '';
       });
       box.appendChild(b);
     });
-    mask.dataset.round = String(S.game.round);
+    mask.dataset.sig = sig;
     mask.classList.remove('hidden');
     updateRepickUi();
     updateGameTimer();
@@ -7271,7 +7705,7 @@
     var mask = $('#pickMask');
     if (!mask) return;
     mask.classList.add('hidden');
-    mask.dataset.round = '';
+    mask.dataset.sig = '';
   }
 
   function showRoundCard(rr) {
@@ -7367,7 +7801,7 @@
 
   /** 切玩法：换文案、按玩法显隐「回合数」那一行 */
   function setGameDialogMode(mode) {
-    gameDialogMode = mode === 'chain' ? 'chain' : 'classic';
+    gameDialogMode = (mode === 'chain' || mode === 'skin') ? mode : 'classic';
     var seg = $('#gameModeSeg');
     if (seg) {
       var btns = seg.querySelectorAll('.seg-btn');
@@ -7377,25 +7811,36 @@
     }
     var rule = $('#gameRule');
     if (rule) {
-      rule.innerHTML = gameDialogMode === 'chain'
-        ? '每人先想一个词并画出来，画作匿名传给下一个人去猜；猜出来的词再传给下一个人去画，'
-          + '一路传下去。最后所有人一起看回放，投票「首尾对得上吗」。'
-          + '需要 <b>4～16 人</b>，至少走 3 圈才有猜词环节。'
-        : '轮流当画手：<b>画手</b>从三个词里挑一个，只能用画的；'
+      if (gameDialogMode === 'chain') {
+        rule.innerHTML = '每个人先给自己的链写一个词，<b>N 条链并行</b>沿打乱的顺序传：拿到词的人画、'
+          + '拿到画的人猜，一路传下去 —— 互看不到别人的内容。传完后一起看回放，'
+          + '投票「首尾对得上吗」+「最喜欢的一张画」。需要 <b>4～16 人</b>。';
+      } else if (gameDialogMode === 'skin') {
+        rule.innerHTML = '把「发言」换成<b>限时作画</b>的狼人杀：所有人都有身份，每轮天亮后'
+          + '<b>画同一个主题</b>（60 秒），画完<b>匿名摊开</b>，大家看画猜作者想表达什么，'
+          + '讨论之后投票放逐。<b>伪装者</b>混在画师里靠画风和言语的破绽被抓。'
+          + '好人赢 = 放逐所有伪装者；伪装者赢 = 人数不少于画师。需要 <b>6～12 人</b>。';
+      } else {
+        rule.innerHTML = '轮流当画手：<b>画手</b>从三个词里挑一个，只能用画的；'
           + '其他人在<b>聊天框</b>里打字猜。猜得越快分越高，画手也会因为别人猜出来而得分。'
           + '回合之间画布会自动清空。';
+      }
     }
     var row = $('#gameRounds').closest('.form-row');
-    if (row) row.classList.toggle('hidden', gameDialogMode === 'chain');
+    if (row) row.classList.toggle('hidden', gameDialogMode !== 'classic');
     var bs = $('#btnGameStart');
-    if (bs) bs.textContent = gameDialogMode === 'chain' ? '开始接龙' : '开始游戏';
+    if (bs) {
+      bs.textContent = gameDialogMode === 'chain' ? '开始接龙'
+        : gameDialogMode === 'skin' ? '开始画皮' : '开始游戏';
+    }
   }
 
   function openGameDialog() {
     if (!S.joined) { toast('先进一个茶绘室再开局', 'err'); return; }
-    // 房间已经在玩接龙 → 直接把接龙面板顶出来（两套玩法不会同时挂在一个房间上，
-    // 所以按「当前玩法」二选一，不用问用户想开哪个）
+    // 房间已经在玩接龙 / 画皮 → 直接把对应的面板顶出来（一个房间同时只挂一种玩法，
+    // 所以按「当前玩法」三选一，不用问用户想开哪个）
     if (gameActive() && S.game.mode === 'chain') { openChainDialog(); return; }
+    if (gameActive() && S.game.mode === 'skin') { openSkinDialog(); return; }
     setGameDialogMode(gameDialogMode);
     updateGameDialog();
     buildThemeSelect($('#gameTheme'));    // 开局前快照里可能还没有词库列表，顺手再问一次
@@ -7404,21 +7849,41 @@
   }
 
   function startGame() {
-    // 在「游戏」弹窗里选了接龙 → 转给接龙面板，别拿经典模式的回合数去开接龙
-    // （#gameRounds 是 2/4/6/8/12，接龙的圈数是 3/4/5/6，两者不是一回事）
+    // 在「游戏」弹窗里选了接龙 / 画皮 → 转给对应的面板，别拿经典模式的回合数去开
+    // （#gameRounds 是 2/4/6/8/12，接龙的圈数是 3~6，画皮的轮数是 4~12，三者不是一回事）
     if (gameDialogMode === 'chain') {
       $('#gameMask').classList.add('hidden');
       openChainDialog();
       return;
     }
+    if (gameDialogMode === 'skin') {
+      $('#gameMask').classList.add('hidden');
+      openSkinDialog();
+      return;
+    }
     var rounds = Number($('#gameRounds').value) || P.GAME.DEFAULT_ROUNDS;
-    net.send(P.C2S.GAME_START, {
-      mode: 'classic',
-      rounds: rounds,
-      theme: $('#gameTheme').value || '',
-      drawSeconds: Number($('#gameDrawTime').value) || 0
-    });
+    net.send(P.C2S.GAME_START, classicStartPayload());
     $('#gameMask').classList.add('hidden');
+  }
+
+  /**
+   * 经典模式的开局参数 —— 对话框里的「开始」和结算页的「再来一局」**共用这一份**。
+   *
+   * ⚠ 以前「再来一局」是自己手写 `{ rounds }` 的，**漏了 theme**：
+   *   服务端 game.start() 里 `this.theme = opts.theme && hasTheme(...) ? ... : ''`
+   *   → 主题被清成「通用」，而界面上的下拉框还停在刚才选的主题。
+   *   表现就是用户说的「词库串主题」：明明选了明日方舟，下一局冒出来的
+   *   却是通用词库里的「长颈鹿」；「换一组」也跟着从通用库抽
+   *   （它用的是同一个 this.theme），看起来就像换词按钮坏了。
+   *   抽成一份之后，以后再加字段（比如以后画布尺寸）不会只补一处。
+   */
+  function classicStartPayload() {
+    return {
+      mode: 'classic',
+      rounds: Number($('#gameRounds').value) || P.GAME.DEFAULT_ROUNDS,
+      theme: ($('#gameTheme') && $('#gameTheme').value) || '',
+      drawSeconds: Number($('#gameDrawTime').value) || 0
+    };
   }
 
   function stopGame() {
@@ -7438,6 +7903,7 @@
     hideRoundCard();
     closeOver();
     closeChainUi();
+    closeSkinUi();
     $('#gameMask').classList.add('hidden');
     var hud = $('#gameHud');
     if (hud) hud.classList.add('hidden');
@@ -7463,9 +7929,10 @@
   function applyChainTask(t) {
     var prev = S.chainTask;
     S.chainTask = t || null;
-    var step = t ? t.step : '';
-    var prevKey = prev ? prev.step + '|' + (prev.word || '') + '|' + (prev.choices || []).join(',') : '';
-    var nowKey = t ? step + '|' + (t.word || '') + '|' + (t.choices || []).join(',') : '';
+    // 去重键：chainId + step + 题面内容。服务端按 taskVersion 重发同一份题面
+    // （重连 / RESYNC 补发），键没变就不重置「已提交」、不重响「轮到你」。
+    var prevKey = prev ? prev.chainId + '|' + prev.step + '|' + (prev.word || '') + '|' + (prev.choices || []).join(',') : '';
+    var nowKey = t ? t.chainId + '|' + t.step + '|' + (t.word || '') + '|' + (t.choices || []).join(',') : '';
     if (prevKey !== nowKey) {
       S.chainInputSubmitted = false;
       // 题面换了 = 轮到我了。这是接龙里最该被听见的一声：
@@ -7476,11 +7943,23 @@
     syncChainInput();
   }
 
+  /** GUESS 题面的笔迹 → dataURL。只在题面到达时渲一次（把结果缓存在题面对象上） */
+  function chainTaskImage(t) {
+    if (!t || t.step !== 'GUESS') return '';
+    if (t._img !== undefined) return t._img;
+    var url = '';
+    try {
+      if (t.strokes && t.strokes.length) url = engine.renderStrokesPNG(t.strokes);
+    } catch (e) { url = ''; }
+    t._img = url;
+    return url;
+  }
+
   function renderChainTask() {
     var box = $('#chainTask');
     if (!box) return;
     var t = S.chainTask;
-    // 只有「做事」的阶段才有题面；回放/投票/结束都不显示这块
+    // 只有「做事」的阶段才有题面；大厅/回放/投票/结算都不显示这块
     if (!isChainMode() || !t || !chainStepActive()) {
       box.classList.add('hidden');
       return;
@@ -7488,14 +7967,13 @@
     box.classList.remove('hidden');
     var body = $('#ctBody');
     var label = $('#ctStep');
-    if (t.step === 'write') {
-      label.textContent = '写一个词';
-      body.innerHTML = '';
+    if (t.step === 'WORD') {
+      label.textContent = '写一个初始词';
       if (S.chainInputSubmitted) {
         body.innerHTML = '<div class="ct-done">✓ 已提交，等其他人</div>';
         return;
       }
-      body.innerHTML = '<div class="ct-note">挑一个词，下一个人要照它作画：</div>' +
+      body.innerHTML = '<div class="ct-note">给你的那条链挑一个起词，下一个人要照它作画：</div>' +
         '<div class="ct-choices"></div>';
       var list = body.querySelector('.ct-choices');
       (t.choices || []).forEach(function (w) {
@@ -7503,7 +7981,7 @@
         b.type = 'button';
         b.className = 'ct-choice';
         b.textContent = w;
-        b.addEventListener('click', function () { submitChainWord({ index: (t.choices || []).indexOf(w) }); });
+        b.addEventListener('click', function () { submitChainWord({ text: w }); });
         list.appendChild(b);
       });
       var own = document.createElement('button');
@@ -7511,41 +7989,43 @@
       own.className = 'ct-choice';
       own.innerHTML = '<span style="color:var(--text-dim)">✎ 自己写一个…</span>';
       own.addEventListener('click', function () {
-        net.send(P.C2S.GAME_SUBMIT, { text: prompt('写一个词（2 字以上中文）') || '' });
+        var w = (prompt('写一个词（2 字以上中文）') || '').trim();
+        if (w) submitChainWord({ text: w });
       });
       list.appendChild(own);
       return;
     }
-    if (t.step === 'draw') {
+    if (t.step === 'DRAWING') {
       label.textContent = '照这个词作画';
       if (S.chainInputSubmitted) {
         body.innerHTML = '<div class="ct-done">✓ 已交作品</div><div class="ct-word">' + esc(t.word || '') + '</div>';
         return;
       }
-      body.innerHTML = '<div class="ct-word">' + esc(t.word || '') + '</div>' +
-        '<div class="ct-note">画得让别人能猜出来就行 —— 不用太精细。</div>' +
+      body.innerHTML = '<div class="ct-word">' + esc(t.word || '（空）') + '</div>' +
+        '<div class="ct-note">直接在画布上画（别人看不到你的笔迹），画完点下面；倒计时到点会自动交。</div>' +
         '<button class="btn primary ct-submit">画好了，交上去</button>';
       body.querySelector('.ct-submit').addEventListener('click', submitChainArt);
       return;
     }
-    if (t.step === 'guess') {
+    if (t.step === 'GUESS') {
       label.textContent = '这幅画画的是什么？';
       if (S.chainInputSubmitted) {
         body.innerHTML = '<div class="ct-done">✓ 已提交，等其他人</div>';
         return;
       }
-      body.innerHTML = (t.image
-        ? '<img class="ct-img" id="ctImg" alt="上家的画">'
-        : '<div class="ct-note">（上一幅是空白 —— 上家没交）</div>') +
-        '<div class="ct-note" style="margin-top:8px">猜一个词，填进下面的输入框。</div>' +
+      var img = chainTaskImage(t);
+      body.innerHTML = (img
+        ? '<img class="ct-img" id="ctImg" alt="上家的画" title="点击放大">'
+        : '<div class="ct-note">（上一格是空的 —— 上家没交）</div>') +
+        '<div class="ct-note" style="margin-top:8px">猜一个词 —— 猜错也没关系，就是要看它跑偏成什么样。</div>' +
         '<button class="btn primary ct-guess" style="margin-top:8px;width:100%">回答</button>';
-      if (t.image) {
+      if (img) {
         var im = body.querySelector('#ctImg');
-        // 页面侧是同步的，但 dataURL 解码要等一拍 —— 等 decode() 再挂上去，
-        // 否则小图会闪一下、大图会先出白框
+        // dataURL 解码要等一拍 —— 等解码完再挂上去，否则小图会闪一下
         var probe = new Image();
-        probe.onload = function () { if (im.parentNode) im.src = t.image; };
-        probe.src = t.image;
+        probe.onload = function () { if (im.parentNode) im.src = img; };
+        probe.src = img;
+        im.addEventListener('click', function () { openSkinViewer(img); });
       }
       body.querySelector('.ct-guess').addEventListener('click', function () {
         openChainGuess();
@@ -7562,7 +8042,7 @@
   }
 
   function submitChainWord(payload) {
-    if (!payload || (payload.text === '' && payload.index == null)) return;
+    if (!payload || !payload.text) return;
     S.chainInputSubmitted = true;
     net.send(P.C2S.GAME_SUBMIT, payload);
     SFX.play('submit');
@@ -7570,16 +8050,18 @@
     closeChainInput();
   }
 
-  /** 交作品：把当前画布导成 PNG 交给服务端（服务端只做哑存储） */
+  /**
+   * 交作品（DRAWING 格）：发一个「画好了」的信号即可 ——
+   * 笔迹早在下笔时就按 STROKE_* 进了房间笔迹表（私密作画期不广播但都入库），
+   * 服务端收格时按作者从表里摘取。v9 起不再导 PNG 整图上交：
+   * 回放能按真实笔序重演，也不再受「导出瞬间画布状态」的干扰。
+   */
   function submitChainArt() {
     var t = S.chainTask;
-    if (!t || t.step !== 'draw') return;
+    if (!t || t.step !== 'DRAWING') return;
     if (S.chainInputSubmitted) return;
-    var png;
-    try { png = engine.exportPNG(); } catch (e) { png = ''; }
-    if (!png) { SFX.play('error'); return toast('导出作品失败，再试一次', 'warn', 2600); }
     S.chainInputSubmitted = true;
-    net.send(P.C2S.GAME_ART, { png: png });
+    net.send(P.C2S.GAME_SUBMIT, {});
     SFX.play('submit');
     renderChainTask();
     toast('作品已交给下一位', 'ok', 2600);
@@ -7591,10 +8073,9 @@
     var mask = $('#chainInputMask');
     if (!mask) return;
     var t = S.chainTask;
-    var show = !!(t && t.step === 'guess' && chainStepActive() && !S.chainInputSubmitted);
+    var show = !!(t && t.step === 'GUESS' && chainStepActive() && !S.chainInputSubmitted);
     mask.classList.toggle('hidden', !show);
     if (!show) return;
-    var g = S.game;
     $('#ciTitle').textContent = '这幅画画的是什么？';
     $('#ciHint').textContent = '猜一个词（2 字以上中文）。猜错也没关系，这条链就是要看它跑偏成什么样。';
     var inp = $('#ciInput');
@@ -7619,8 +8100,14 @@
     if (!inp || !pv) return;
     var v = inp.value.trim();
     if (!v) { pv.textContent = ''; return; }
-    if (!/[\u4e00-\u9fa5]/.test(v)) { pv.innerHTML = '<span class="bad">请用中文写</span>'; return; }
     if (v.length > 20) { pv.innerHTML = '<span class="bad">太长了（最多 20 字）</span>'; return; }
+    // 出题那一步才卡「能玩的词」；猜词是自由输入，别拦标点。
+    // 规则和前端的词库自检 / 服务端是同一条（protocol.isPlayableWord）。
+    var isWrite = !!(S.game && S.game.task && S.game.task.step === 'WORD');
+    if (isWrite && !P.isPlayableWord(v, 12)) {
+      pv.innerHTML = '<span class="bad">别带空格写，1~12 个字符</span>';
+      return;
+    }
     pv.textContent = v.length + ' 个字';
   }
 
@@ -7634,277 +8121,378 @@
     updateChainInputPreview();
   }
 
-  /* ---- 链条进度面板 ---- */
+  /* ---- 链条进度面板（多链并行：全场同一格，只报「第几手 / 交了几份」，不含内容） ---- */
 
   function renderChainProgress() {
     var box = $('#chainProgress');
     if (!box) return;
-    if (!isChainMode() || !S.game || !S.game.progress || !S.game.progress.length) {
+    var g = S.game;
+    var playingPhase = g && (g.phase === 'chain_init' || g.phase === 'chain_write' ||
+      g.phase === 'chain_draw' || g.phase === 'chain_guess');
+    if (!isChainMode() || !playingPhase) {
       box.classList.add('hidden');
       return;
     }
     box.classList.remove('hidden');
     var list = $('#cpList');
+    var len = Math.max(1, g.chainLength || 1);
+    var k = g.stepIndex | 0;
+    var dots = '';
+    for (var i = 0; i < len; i++) {
+      // 用「步」的类型给点上色：写词蓝 / 作画绿 / 猜词黄（0 是写词，奇数作画、偶数猜词）
+      var cls = 'cp-dot';
+      if (i < k) cls += (i === 0) ? ' filled' : (i % 2 === 1 ? ' draw' : ' guess');
+      if (i === k) cls += ' now';
+      dots += '<i class="' + cls + '"></i>';
+    }
+    var stepName = g.phase === 'chain_write' ? '写初始词'
+      : g.phase === 'chain_draw' ? '照词作画' : g.phase === 'chain_guess' ? '看画猜词' : '马上开始';
+    list.innerHTML =
+      '<div class="cp-row mine">' +
+      '<span class="cp-name">' + stepName + ' · 第 ' + Math.min(k + 1, len) + ' / ' + len + ' 手</span>' +
+      '<span class="cp-dots">' + dots + '</span></div>' +
+      '<div class="cp-row"><span class="cp-name">已交 ' + (g.stepDone | 0) + ' / ' + (g.stepTotal || 0) + ' 份</span>' +
+      '<span class="cp-note">' + (g.myDone ? '你已交 ✓' : (g.myStep ? '等你交' : '这一格没有你的事')) + '</span></div>';
+  }
+
+  /* ---- 接龙大厅（lobby 阶段的小面板：名单 + 准备按钮） ---- */
+
+  function renderChainLobby() {
+    var box = $('#chainLobby');
+    if (!box) return;
+    var g = S.game;
+    var show = !!(isChainMode() && g && g.phase === 'lobby');
+    box.classList.toggle('hidden', !show);
+    if (!show) return;
+    var players = g.players || [];
+    var playing = players.filter(function (p) { return !p.spectating; });
+    var cnt = $('#clCount');
+    if (cnt) cnt.textContent = playing.length + ' 人（需 ≥ ' + (g.minPlayers || 4) + '）';
     var html = '';
-    S.game.progress.forEach(function (p) {
-      var mine = p.ownerId === S.me.userId;
-      var dots = '';
-      for (var i = 0; i < p.total; i++) {
-        // 用「步」的类型给点上色：写词蓝 / 作画绿 / 猜词黄。
-        // 服务端只给「走到第几格」，具体类型前端按同样的规则推算 ——
-        // 0 是写词，之后奇数作画、偶数猜词。
-        var cls = 'cp-dot';
-        if (i < p.step) cls += (i === 0) ? ' filled' : (i % 2 === 1 ? ' draw' : ' guess');
-        dots += '<i class="' + cls + '"></i>';
-      }
-      html += '<div class="cp-row' + (mine ? ' mine' : '') + '">' +
-        '<span class="cp-name">' + esc(p.ownerName) + (mine ? '（我）' : '') + '</span>' +
-        '<span class="cp-dots">' + dots + '</span></div>';
+    players.forEach(function (p) {
+      html += '<span class="cl-player' + (p.spectating ? ' spec' : '') + (p.ready ? ' ready' : '') + '">' +
+        '<i class="dot" style="background:' + esc(p.color || '#9aa0a8') + '"></i>' +
+        esc(p.name) + (p.spectating ? '（观战）' : (p.ready ? ' ✓' : '')) + '</span>';
     });
-    list.innerHTML = html;
+    var list = $('#clPlayers');
+    if (list) list.innerHTML = html || '<span class="cl-player">（还没有人）</span>';
+    var btn = $('#btnChainReady');
+    if (btn) {
+      btn.textContent = g.myReady ? '取消准备' : '准备';
+      btn.classList.toggle('primary', !g.myReady);
+      btn.classList.toggle('ghost', !!g.myReady);
+      btn.disabled = !!g.spectating;
+    }
+    var hint = $('#clHint');
+    if (hint) {
+      var left = Math.max(0, (g.minPlayers || 4) - playing.length);
+      hint.textContent = g.spectating
+        ? '你是这一局进来的 —— 先观战，下一局自动入伙'
+        : left > 0 ? '还差 ' + left + ' 人才能开局'
+        : '全员就绪自动开局；房主也能用「立刻推进」强制开局';
+    }
   }
 
-  /* ---- 回放 + 投票 ----
+  /* ---- 回放播放器 + 投票 ----
    *
-   * 三段式渲染，是为了做「揭晓」的节奏：
-   *   ① renderReplay()        —— 只铺格子骨架，内容全部是盖着的
-   *   ② revealReplayCells()   —— 一格一格翻开（每格一行延迟），翻完收尾
-   *   ③ renderReplayVerdict() —— 最后才揭晓首尾判定 + 投票区
+   * v9 的回放是「播放器」而不是「一屏摊开」：
+   *   S.chainReveal —— 服务端 GAME_REVEAL 广播的完整链条（N 条 × 每链 len 格），
+   *                    一次性收到后客户端自给自足，翻页/播放不再打扰服务端。
+   *   S.cr          —— 播放器状态：第几条链 / 第几格 / 自动播放 / 速度 / 定时器。
    *
-   * 为什么不一次性铺完再用 CSS 动画：那样「翻到第几格」和「揭示判定」的时机
-   * 就只能靠 animation-delay 硬凑，一旦用户中途手动翻页（换链）就全乱了。
-   * 用 JS 排时更可控，也更好在换链时整体取消重排。
+   * 每条链按格序演：词（起词）→ 画（整图淡入，笔迹在本地按需渲染）→ 猜词 → …
+   * VOTE 阶段给两票：keep（这条链首尾对得上吗，对当前链）+ fav（最喜欢的一张画，
+   * 画格上的 ♥ 按钮）。
    */
 
-  /** 回放面板的重排句柄：换链 / 关面板时必须清掉，否则旧定时器会翻新链的格子 */
-  var RP = { timers: [], cellMs: 0, revealMs: 0 };
-
-  function rpClearTimers() {
-    RP.timers.forEach(function (t) { clearTimeout(t); });
-    RP.timers = [];
+  /** 播放器的翻格定时器：换链 / 关面板时必须清掉，否则会翻新链的格子 */
+  function crClearTimer() {
+    if (S.cr.timer) { clearTimeout(S.cr.timer); S.cr.timer = null; }
   }
 
-  function rpAfter(ms, fn) {
-    RP.timers.push(setTimeout(fn, ms));
+  /** 回放数据就位（GAME_REVEAL 到达 / 迟到补发）。开着的播放器保持当前页。 */
+  function applyChainReveal(chains) {
+    S.chainReveal = chains || [];
+    if (S.cr.chain >= S.chainReveal.length) { S.cr.chain = 0; S.cr.item = 0; }
+    renderChainReveal();
   }
 
-  /**
-   * 揭晓节奏：格子越多，每格越快（总时长封顶在 ~1.5s）。
-   * 一条 6 格的链如果每格都等 220ms，光翻开就要 1.3 秒，人会烦。
-   */
-  function rpTiming(cellCount) {
-    var per = Math.max(70, Math.min(220, 900 / Math.max(1, cellCount)));
-    return { cellMs: per, revealMs: per * cellCount + 120 };
-  }
-
-  function renderReplay() {
+  /** 播放器主体：REVEAL / VOTE 阶段打开并渲染当前格；其他阶段收起来 */
+  function renderChainReveal() {
     var mask = $('#replayMask');
     if (!mask) return;
     var g = S.game;
-    var show = !!(g && g.phase === 'chain_vote' && g.replay && g.replay.length);
+    var show = !!(g && (g.phase === 'chain_reveal' || g.phase === 'chain_vote') &&
+      S.chainReveal && S.chainReveal.length);
     if (!show) {
-      // 结算阶段改由奖杯面板展示，回放面板收起来
-      rpClearTimers();
+      crClearTimer();
+      S.cr.playing = false;
       mask.classList.add('hidden');
       return;
     }
-    var wasHidden = mask.classList.contains('hidden');
     mask.classList.remove('hidden');
+    var n = S.chainReveal.length;
+    S.cr.chain = Math.max(0, Math.min(S.cr.chain | 0, n - 1));
+    var chain = S.chainReveal[S.cr.chain];
+    var items = chain ? (chain.steps || []) : [];
+    S.cr.item = Math.max(0, Math.min(S.cr.item | 0, Math.max(0, items.length - 1)));
 
-    var idx = Math.max(0, Math.min(S.replayIndex | 0, g.replay.length - 1));
-    S.replayIndex = idx;
-    var chain = g.replay[idx];
-
-    // 进度条式的位置指示（「第 2 / 4 条」+ 一排小点）
-    var total = g.replay.length;
-    $('#rpIndex').textContent = (idx + 1) + ' / ' + total;
+    // 头部：第几条链 + 一排小点（点小点跳链）
+    $('#rpIndex').textContent = (S.cr.chain + 1) + ' / ' + n;
     var pills = '';
-    for (var p = 0; p < total; p++) {
-      pills += '<i class="rp-pill' + (p === idx ? ' on' : (p < idx ? ' past' : '')) + '"></i>';
+    for (var p = 0; p < n; p++) {
+      pills += '<i class="rp-pill' + (p === S.cr.chain ? ' on' : (p < S.cr.chain ? ' past' : '')) + '"></i>';
     }
     var head = $('#rpChainHead');
     head.innerHTML = '<span class="rp-pills">' + pills + '</span>' +
-      '第 ' + (idx + 1) + ' 条链 · 起词人 <b>' + esc(chain.ownerName) + '</b>' +
-      (chain.ownerId === S.me.userId ? '<span class="rp-mine">我的</span>' : '');
-    // 换链时给整块内容一个轻微的「推进」动效，翻页才不像跳帧
+      '第 ' + (S.cr.chain + 1) + ' 条链 · 起词人 <b>' + esc(chain.ownerName || '某人') + '</b>' +
+      (chain.ownerPlayerId === S.me.userId ? '<span class="rp-mine">我的</span>' : '');
     head.classList.remove('rp-in');
     void head.offsetWidth;          // 强制回流，动画才能重播
     head.classList.add('rp-in');
 
-    // ① 骨架：先把格子摆好，内容盖住
-    var strip = $('#rpStrip');
-    strip.innerHTML = '';
-    strip.classList.remove('rp-in');
-    void strip.offsetWidth;
-    strip.classList.add('rp-in');
+    // 播放控制条里的小点：每格一个，点小点跳格
+    var pills2 = '';
+    for (var q = 0; q < items.length; q++) {
+      pills2 += '<i class="rp-pill' + (q === S.cr.item ? ' on' : (q < S.cr.item ? ' past' : '')) +
+        '" data-item="' + q + '"></i>';
+    }
+    $('#rpPills').innerHTML = pills2;
 
-    var t = rpTiming(chain.cells.length);
-    RP.cellMs = t.cellMs;
-    RP.revealMs = t.revealMs;
-
-    chain.cells.forEach(function (c, i) {
-      var el = document.createElement('div');
-      el.className = 'rp-cell ' + (c.step || '') +
-        (i === 0 ? ' first' : '') + (i === chain.cells.length - 1 ? ' last' : '') +
-        ' covered';
-      el.dataset.i = String(i);
-      var stepName = c.step === 'write' ? '起词' : c.step === 'draw' ? '作画' : '猜词';
-      var inner;
-      if (c.word) inner = '<div class="rpc-word">' + esc(c.word) + '</div>';
-      else if (c.image) inner = '<img class="rpc-img" alt="第' + (i + 1) + '格">';
-      else inner = '<div class="rpc-empty">（空）</div>';
-      el.innerHTML = '<div class="rpc-head"><span class="rpc-step">' + stepName + '</span>' +
-        '<span class="rpc-who">' + esc(c.name || '某人') + '</span>' +
-        '<span class="rpc-idx">' + (i + 1) + '</span></div>' +
-        '<div class="rpc-body">' + inner + '</div>';
-      // 格与格之间的箭头（表示「传下去」）
-      if (i < chain.cells.length - 1) {
-        var arrow = document.createElement('div');
-        arrow.className = 'rp-arrow';
-        arrow.textContent = '→';
-        strip.appendChild(el);
-        strip.appendChild(arrow);
-        return;
-      }
-      strip.appendChild(el);
-      if (c.image && !c.word) {
-        var im = el.querySelector('.rpc-img');
-        var probe = new Image();
-        probe.onload = (function (node, src) {
-          return function () { if (node.parentNode) node.src = src; };
-        })(im, c.image);
-        probe.src = c.image;
-      }
-    });
-
-    // ② 逐格翻开
-    rpClearTimers();
-    revealReplayCells();
-    // 刚打开（而不是换链）时给整条链一点入场延迟，让人来得及看清这是第几条
-    if (wasHidden) toast('回放：' + (idx + 1) + ' / ' + total + ' 条链', 'ok', 1800);
-    updateGameTimer();
-  }
-
-  /**
-   * 一格一格把 `covered` 摘掉。
-   * 同时把「这一格是谁做的」标签淡入 —— 只看内容一闪出来会不知道是谁干的。
-   */
-  function revealReplayCells() {
-    var strip = $('#rpStrip');
-    if (!strip) return;
-    var cells = Array.prototype.slice.call(strip.querySelectorAll('.rp-cell'));
-    cells.forEach(function (el, i) {
-      if (!el.classList.contains('covered')) return;
-      rpAfter(RP.cellMs * i, function () {
-        if (!el.parentNode) return;
-        el.classList.remove('covered');
-        SFX.play('cellReveal');
-      });
-    });
-    // ③ 全部翻开后再揭晓首尾判定（判定是这一屏的结论，必须等过程演完）
-    rpAfter(RP.revealMs, function () {
-      renderReplayVerdict(true);
-    });
-  }
-
-  /**
-   * 首尾判定 + 投票按钮。
-   * @param {boolean} animate 是否带「卷轴展开」的入场（换链时的第一次调用传 true）
-   */
-  function renderReplayVerdict(animate) {
-    var g = S.game;
-    if (!g || !g.replay || !g.replay.length) return;
-    var chain = g.replay[Math.max(0, Math.min(S.replayIndex | 0, g.replay.length - 1))];
-    if (!chain) return;
-
-    // 注意：服务端只把「投了对不上」记进 myVotes（同意是默认值，不留痕），
-    // 所以「有没有投过」要看 myVoted —— 单看 myVotes 会把「投了对得上」当成没投。
-    var votedAlready = (g.myVoted || []).indexOf(chain.id) >= 0;
-    var against = (g.myVotes || []).indexOf(chain.id) >= 0;
-    var myVote = !votedAlready ? '' : (against ? 'bad' : 'ok');
-
+    // 首尾对照：REVEAL 阶段演到最后一格才揭晓（提前亮出来就剧透了）；
+    // VOTE 阶段常驻 —— 投票时需要盯着首尾判断「对得上吗」。
     var verdict = $('#rpVerdict');
-    var tag = chain.matched
-      ? '<span class="rv-tag ok">首尾对得上</span>'
-      : '<span class="rv-tag bad">首尾对不上</span>';
-    verdict.innerHTML =
-      '<span class="rv-a">' + esc(chain.firstWord || '（空）') + '</span>' +
-      '<span class="rv-arrow"><i class="rv-line"></i>' +
-      '传了 ' + Math.max(0, chain.cells.length - 1) + ' 手' +
-      '<i class="rv-line"></i></span>' +
-      '<span class="rv-b">' + esc(chain.lastWord || '（空）') + '</span>' + tag;
-    // 判定「对得上」时绿一下、「对不上」时红一下 —— 这是全屏唯一的结论，值得强调
-    verdict.classList.toggle('ok', !!chain.matched);
-    verdict.classList.toggle('bad', !chain.matched);
-    if (animate) {
-      verdict.classList.remove('rp-in');
-      void verdict.offsetWidth;
-      verdict.classList.add('rp-in');
-      SFX.play(chain.matched ? 'match' : 'mismatch');
+    if (verdict) {
+      var atEnd = S.cr.item >= items.length - 1;
+      if (g.phase === 'chain_vote' || atEnd) {
+        verdict.innerHTML =
+          '<span class="rv-a">' + esc(chain.firstWord || '（空）') + '</span>' +
+          '<span class="rv-arrow"><i class="rv-line"></i>' +
+          '传了 ' + Math.max(0, items.length - 1) + ' 手' +
+          '<i class="rv-line"></i></span>' +
+          '<span class="rv-b">' + esc(chain.lastWord || '（空）') + '</span>' +
+          '<span class="rv-tag ' + (chain.matched ? 'ok">首尾对得上' : 'bad">首尾对不上') + '</span>';
+        verdict.classList.toggle('ok', !!chain.matched);
+        verdict.classList.toggle('bad', !chain.matched);
+      } else {
+        verdict.innerHTML = '';
+        verdict.classList.remove('ok', 'bad');
+      }
     }
 
-    var vb = $('#rpVoteBad'), vk = $('#rpVoteOk');
-    vb.classList.toggle('primary', myVote === 'bad');
-    vk.classList.toggle('primary', myVote === 'ok');
-    vb.classList.toggle('ghost', myVote !== 'bad');
-    vk.classList.toggle('ghost', myVote !== 'ok');
-    $('#rpVoteBad').textContent = myVote === 'bad' ? '已投：对不上' : '对不上';
-    $('#rpVoteOk').textContent = myVote === 'ok' ? '已投：对得上' : '对得上';
-
-    // 「已投」的小勾：投过一次之后让按钮带个记号，避免反复怀疑自己投没投
-    vb.classList.toggle('voted', myVote === 'bad');
-    vk.classList.toggle('voted', myVote === 'ok');
-
-    // 房主才能「立刻结算」
-    var btn = $('#btnRpNext');
-    if (btn) btn.classList.toggle('hidden', !S.me.isOwner);
+    renderChainItem(items[S.cr.item], S.cr.item);
+    renderChainVoteArea(chain);
     updateGameTimer();
   }
 
-  function voteChain(agree) {
-    var g = S.game;
-    if (!g || !g.replay || !g.replay.length) return;
-    var chain = g.replay[Math.max(0, Math.min(S.replayIndex | 0, g.replay.length - 1))];
-    if (!chain) return;
-    // 投「对得上」时如果本来就已经投过对得上，等于没变 —— 那就别响，
-    // 否则连点两下会响两声，听着像投了两票。
-    var votedAlready = (g.myVoted || []).indexOf(chain.id) >= 0;
-    var wasAgainst = (g.myVotes || []).indexOf(chain.id) >= 0;
-    var willBeAgainst = !agree;
-    if (!votedAlready) SFX.play(willBeAgainst ? 'voteBad' : 'voteOk');
-    else if (wasAgainst !== willBeAgainst) SFX.play(willBeAgainst ? 'voteBad' : 'voteUndo');
-    net.send(P.C2S.GAME_VOTE, { chainId: chain.id, agree: !!agree });
+  /** 单格内容：词 / 画 / 猜词 */
+  function renderChainItem(item, idx) {
+    var stage = $('#rpStage');
+    if (!stage) return;
+    stage.classList.remove('rp-in');
+    void stage.offsetWidth;
+    stage.classList.add('rp-in');
+    if (!item) {
+      stage.innerHTML = '<div class="rp-empty">（这一格是空的）</div>';
+      return;
+    }
+    var typeTag = item.type === 'WORD' ? '起词' : item.type === 'DRAWING' ? '作画' : '猜词';
+    var who = '<div class="rp-item-head"><span class="rpc-step">' + typeTag + '</span>' +
+      '<span class="rpc-who">' + esc(item.playerName || '某人') + '</span>' +
+      '<span class="rpc-idx">' + (idx + 1) + '</span></div>';
+    if (item.type === 'DRAWING') {
+      var url = crItemPNG(item);
+      stage.innerHTML = who + (url
+        ? '<img class="rp-img" alt="第' + (idx + 1) + '手" title="点击放大">'
+        : '<div class="rp-empty">（' + esc(item.playerName || '某人') + ' 没有交画）</div>');
+      if (url) {
+        var im = stage.querySelector('.rp-img');
+        var probe = new Image();
+        probe.onload = function () { if (im.parentNode) im.src = url; };
+        probe.src = url;
+        im.addEventListener('click', function () { openSkinViewer(url); });
+        // 投票阶段：画格上给一颗 ♥，全场选出最喜欢的一张
+        if (isChainVote() && url) {
+          var fav = document.createElement('button');
+          fav.type = 'button';
+          fav.className = 'rp-fav-btn' + (isMyFav(S.cr.chain, idx) ? ' on' : '');
+          fav.textContent = isMyFav(S.cr.chain, idx) ? '♥ 已选' : '♡ 最喜欢';
+          fav.addEventListener('click', function () { sendFavVote(S.cr.chain, idx); });
+          stage.appendChild(fav);
+        }
+      }
+      return;
+    }
+    // WORD / GUESS 都是词
+    stage.innerHTML = who + '<div class="rpc-word">' + esc(item.content || '（没交）') + '</div>';
+  }
 
+  /** DRAWING 格的笔迹 → dataURL（结果缓存在格对象上，翻来翻去不重复渲染） */
+  function crItemPNG(item) {
+    if (!item || item.type !== 'DRAWING') return '';
+    if (item._png !== undefined) return item._png;
+    var url = '';
+    try {
+      if (Array.isArray(item.content) && item.content.length) url = engine.renderStrokesPNG(item.content);
+    } catch (e) { url = ''; }
+    item._png = url;
+    return url;
+  }
+
+  function isChainVote() { return !!(S.game && S.game.phase === 'chain_vote'); }
+
+  /** 我在 VOTE 阶段把「最喜欢的一张」投在了这条链的这一格吗 */
+  function isMyFav(ci, si) {
+    var f = S.game && S.game.myFav;
+    var chain = S.chainReveal && S.chainReveal[ci];
+    return !!(f && chain && f.chainId === chain.chainId && f.step === si);
+  }
+
+  /** 投票区（只在 VOTE 阶段出现）：keep 两个按钮对当前链 + fav 状态文字 */
+  function renderChainVoteArea(chain) {
+    var g = S.game;
+    var box = $('#rpVote');
+    if (!box) return;
+    var show = !!(g && g.phase === 'chain_vote');
+    box.classList.toggle('hidden', !show);
+    var btn = $('#btnRpNext');
+    if (btn) {
+      // 房主的「立刻推进」：REVEAL→进投票 / VOTE→结算（SCORE 时服务端自动回大厅，不给按钮）
+      btn.classList.toggle('hidden', !S.me.isOwner || !g ||
+        (g.phase !== 'chain_reveal' && g.phase !== 'chain_vote'));
+      btn.textContent = (g && g.phase === 'chain_vote') ? '立刻结算' : '进入投票';
+    }
+    if (!show) return;
+    var hint = $('#rpVoteHint');
+    if (hint) {
+      hint.textContent = chain.matched
+        ? '这条链看起来对上了 —— 你也这么觉得吗？'
+        : '这条链首尾对不上 —— 投「跑偏了」吧？';
+    }
+    var myKeep = (g.myKeep || {})[chain.chainId];
+    var bad = $('#rpVoteBad'), ok = $('#rpVoteOk');
+    bad.textContent = myKeep === false ? '已投：跑偏了' : '跑偏了';
+    ok.textContent = myKeep === true ? '已投：对得上' : '对得上';
+    bad.classList.toggle('primary', myKeep === false);
+    ok.classList.toggle('primary', myKeep === true);
+    bad.classList.toggle('ghost', myKeep !== false);
+    ok.classList.toggle('ghost', myKeep !== true);
+
+    var favState = $('#rpFavState');
+    if (favState) {
+      var myFav = g.myFav;
+      var total = Math.max(1, (g.players || []).filter(function (p) { return !p.spectating; }).length);
+      favState.textContent = myFav
+        ? '♥ 已选最喜欢的画（' + (g.favVotedCount | 0) + '/' + total + ' 人已投）'
+        : '♡ 点画格上的 ♥ 选出你最喜欢的一张（' + (g.favVotedCount | 0) + '/' + total + ' 人已投）';
+    }
+  }
+
+  /** keep 票：当前这条链「首尾对得上吗」。票可改（服务端按人记 Map）。 */
+  function voteKeep(agree) {
+    var g = S.game;
+    var chain = S.chainReveal && S.chainReveal[S.cr.chain];
+    if (!chain || !g || g.phase !== 'chain_vote') return;
+    var my = (g.myKeep || {})[chain.chainId];
+    SFX.play(agree ? 'voteOk' : 'voteBad');
+    net.send(P.C2S.GAME_VOTE, { kind: 'keep', chainId: chain.chainId, agree: !!agree });
     // 立刻给按钮一个「按下了」的反馈，别等服务端回快照 ——
     // 公网下这一来回有几百毫秒，不立刻反馈的话人会以为没点到，然后连点。
-    var btn = willBeAgainst ? $('#rpVoteBad') : $('#rpVoteOk');
-    if (btn && !votedAlready) {
+    var btn = agree ? $('#rpVoteOk') : $('#rpVoteBad');
+    if (btn && my === undefined) {
       btn.classList.add('pulse');
       setTimeout(function () { btn.classList.remove('pulse'); }, 420);
     }
   }
 
-  function stepReplay(d) {
+  /** fav 票：全场最喜欢的一张画（一人一票，点同一张 = 不变） */
+  function sendFavVote(ci, si) {
     var g = S.game;
-    if (!g || !g.replay || !g.replay.length) return;
-    var before = S.replayIndex;
-    S.replayIndex = (S.replayIndex + d + g.replay.length) % g.replay.length;
-    if (S.replayIndex === before) return;
-    SFX.play('flip');
-    rpClearTimers();                 // 换链：把上一条链的揭晓定时器全部取消
-    renderReplay();
+    var chain = S.chainReveal && S.chainReveal[ci];
+    if (!chain || !g || g.phase !== 'chain_vote') return;
+    var item = chain.steps && chain.steps[si];
+    if (!item || item.type !== 'DRAWING') return;
+    if (isMyFav(ci, si)) { SFX.play('tap'); return; }   // 已经是这张了，别重投
+    SFX.play('voteOk');
+    net.send(P.C2S.GAME_VOTE, { kind: 'fav', chainId: chain.chainId, step: si });
   }
 
-  /** 跳到第几条链（进度小点可以直接点） */
-  function gotoReplay(i) {
-    var g = S.game;
-    if (!g || !g.replay || !g.replay.length) return;
-    var n = Math.max(0, Math.min(i | 0, g.replay.length - 1));
-    if (n === S.replayIndex) return;
-    S.replayIndex = n;
+  /** 换链（‹ / › 与键盘左右）：回第 0 格、停自动播放 */
+  function stepReplay(d) {
+    if (!S.chainReveal || !S.chainReveal.length) return;
+    var n = S.chainReveal.length;
+    S.cr.chain = (S.cr.chain + d + n) % n;
+    S.cr.item = 0;
+    S.cr.playing = false;
+    crClearTimer();
     SFX.play('flip');
-    rpClearTimers();
-    renderReplay();
+    syncRpPlayBtn();
+    renderChainReveal();
+  }
+
+  /** 跳到第几条链（头部小点可以直接点） */
+  function gotoReplay(i) {
+    if (!S.chainReveal || !S.chainReveal.length) return;
+    var n = Math.max(0, Math.min(i | 0, S.chainReveal.length - 1));
+    if (n === S.cr.chain) return;
+    S.cr.chain = n;
+    S.cr.item = 0;
+    S.cr.playing = false;
+    crClearTimer();
+    SFX.play('flip');
+    syncRpPlayBtn();
+    renderChainReveal();
+  }
+
+  /** 翻一格（⏮ / ⏭ 与小点跳格共用）。播放中手动翻格后继续按节奏走 */
+  function crStepItem(d) {
+    var chain = S.chainReveal && S.chainReveal[S.cr.chain];
+    if (!chain) return;
+    var items = chain.steps || [];
+    var next = S.cr.item + d;
+    if (next < 0 || next >= items.length) {
+      S.cr.playing = false;
+      crClearTimer();
+      syncRpPlayBtn();
+      return;
+    }
+    S.cr.item = next;
+    SFX.play('cellReveal');
+    renderChainReveal();
+    if (S.cr.playing) crScheduleNext();
+  }
+
+  /** 自动播放：按速度每格停一拍；到底自动停 */
+  function crPlay() {
+    var chain = S.chainReveal && S.chainReveal[S.cr.chain];
+    if (!chain || !(chain.steps || []).length) return;
+    if (S.cr.playing) { S.cr.playing = false; crClearTimer(); syncRpPlayBtn(); return; }
+    S.cr.playing = true;
+    if (S.cr.item >= (chain.steps || []).length - 1) S.cr.item = 0;   // 到底了就从头演
+    syncRpPlayBtn();
+    renderChainReveal();
+    crScheduleNext();
+  }
+
+  function crScheduleNext() {
+    crClearTimer();
+    if (!S.cr.playing) return;
+    var per = Math.max(600, 2400 / (S.cr.speed || 1));
+    S.cr.timer = setTimeout(function () {
+      if (!S.cr.playing) return;
+      var chain = S.chainReveal && S.chainReveal[S.cr.chain];
+      var items = chain ? (chain.steps || []) : [];
+      if (S.cr.item >= items.length - 1) { S.cr.playing = false; syncRpPlayBtn(); return; }
+      S.cr.item += 1;
+      SFX.play('cellReveal');
+      renderChainReveal();
+      crScheduleNext();
+    }, per);
+  }
+
+  function syncRpPlayBtn() {
+    var b = $('#rpPlay');
+    if (b) b.textContent = S.cr.playing ? '⏸ 暂停' : '▶ 播放';
   }
 
   /* ---- 奖杯结算 ---- */
@@ -7915,27 +8503,44 @@
     var g = S.game;
     if (!g || !g.voteResult) return;
     mask.classList.remove('hidden');
+    var vr = g.voteResult;
+    var chains = vr.chains || [];
+    var fav = vr.fav || [];
 
-    var won = g.voteResult.filter(function (r) { return r.won; });
+    var won = chains.filter(function (r) { return r.won; });
     // 我自己起词的链有没有拿到奖杯 —— 有就放华丽的那一声
-    var iWon = won.some(function (r) { return r.ownerId === S.me.userId; });
-    SFX.play(iWon ? 'trophy' : (won.length ? 'match' : 'noTrophy'));
-    $('#trSummary').innerHTML =
+    var iWon = won.some(function (r) { return r.ownerPlayerId === S.me.userId; });
+    var iFav = fav.some(function (r) { return r.playerId === S.me.userId; });
+    SFX.play((iWon || iFav) ? 'trophy' : (won.length ? 'match' : 'noTrophy'));
+
+    var html =
       '<div class="tr-row' + (won.length ? ' won' : '') + '">' +
       '<b>' + (won.length ? '🎉 ' + won.length + ' 条链安全到达终点' : '这一局全军覆没') + '</b>' +
-      '<span class="tr-flow">首尾一致的链，起词的人拿一个奖杯</span></div>';
+      '<span class="tr-flow">首尾一致且多数人不反对的链，起词的人拿一个奖杯</span></div>';
+
+    // 「最喜欢的画」：独家最高票 +3，平票各 +1（分已在服务端算好，这里只展示）
+    if (fav.length === 1) {
+      html += '<div class="tr-row won"><b>♥ 最受欢迎的画</b>' +
+        '<span class="tr-flow">' + esc(fav[0].playerName) + '（' + esc(favChainTitle(fav[0])) + '）· ' + fav[0].votes + ' 票 · +3 分</span></div>';
+    } else if (fav.length > 1) {
+      html += '<div class="tr-row won"><b>♥ 最受欢迎的画（平票）</b>' +
+        '<span class="tr-flow">' + fav.map(function (r) {
+          return esc(r.playerName) + '（' + esc(favChainTitle(r)) + '）';
+        }).join('、') + ' · 各 +1 分</span></div>';
+    }
 
     var rows = '';
-    g.voteResult.forEach(function (r) {
+    chains.forEach(function (r) {
       rows += '<div class="tr-row ' + (r.won ? 'won' : 'lost') + '">' +
         '<span class="tr-owner">' + esc(r.ownerName) + '</span>' +
         '<span class="tr-flow"><b>' + esc(r.firstWord || '（空）') + '</b> → ' +
-        esc(r.lastWord || '（空）') + (r.against ? '（' + r.against + ' 人投了「对不上」）' : '') + '</span>' +
-        '<span class="tr-flag">' + (r.won ? '🏆 +1' : '—') + '</span></div>';
+        esc(r.lastWord || '（空）') + (r.against ? '（' + r.against + ' 人投了「跑偏了」）' : '') + '</span>' +
+        '<span class="tr-flag">' + (r.won ? '🏆' : '—') + '</span></div>';
     });
-    $('#trSummary').innerHTML += rows;
+    html += rows;
+    $('#trSummary').innerHTML = html;
 
-    // 奖杯榜
+    // 分数榜（奖杯与「最受欢迎」的分都累计在这里）
     var rank = '';
     (g.scores || []).forEach(function (s) {
       var me = s.userId === S.me.userId;
@@ -7944,9 +8549,18 @@
         '<span class="gs-rank">' + s.rank + '</span>' +
         '<span class="gs-name"><i class="dot" style="background:' + esc(mem.color) + '"></i>' +
         esc(s.name) + (me ? '（我）' : '') + '</span>' +
-        '<span class="gs-score">' + s.score + ' 🏆</span></div>';
+        '<span class="gs-score">' + s.score + ' 分</span></div>';
     });
-    $('#trophyList').innerHTML = rank || '<div class="gs-row"><span class="gs-name">还没有奖杯</span></div>';
+    $('#trophyList').innerHTML = rank || '<div class="gs-row"><span class="gs-name">还没有分数</span></div>';
+  }
+
+  /** 「最喜欢的画」来自哪条链（用链主的起词标注） */
+  function favChainTitle(favRow) {
+    var chain = S.chainReveal && S.chainReveal.filter(function (c) {
+      return c.chainId === favRow.chainId;
+    })[0];
+    if (chain && chain.firstWord) return '「' + chain.firstWord + '」那条链';
+    return '某条链';
   }
 
   function closeTrophy() {
@@ -8070,7 +8684,7 @@
     var parts = raw.split(/[,，、;；\s\r\n]+/).map(function (s) { return s.trim(); }).filter(Boolean);
     var seen = {}, ok = 0, bad = [];
     parts.forEach(function (p) {
-      if (!/^[\u4e00-\u9fa5]{2,}$/.test(p) || p.length > 12) { bad.push(p); return; }
+      if (!P.isPlayableWord(p)) { bad.push(p); return; }
       if (seen[p]) return;
       seen[p] = 1; ok += 1;
     });
@@ -8078,7 +8692,8 @@
     if (bad.length) txt += '，' + bad.length + ' 个会被丢掉';
     el.textContent = txt;
     el.style.color = ok >= TM.minWords ? 'var(--text-dim)' : 'var(--danger)';
-    if (bad.length) setThemeWarn('这些会被丢掉（必须是 2 字以上的中文）：' + bad.join('、'));
+    // 和 protocol.isPlayableWord 同一套说法：中文 / 英文 / 数字都行，一个字也行，别带空格
+    if (bad.length) setThemeWarn('这些会被丢掉（非空、不带空格、1~12 个字符，至少一个实义字符）：' + bad.join('、'));
     else setThemeWarn('');
   }
 
@@ -8202,7 +8817,7 @@
    *  （刚新建的词库要等下一次拉到菜单才出现，这时候硬把下拉扳回「通用」是白闪一下） */
   function syncThemeSelects() {
     var want = themeChoice();
-    ['#gameTheme', '#chainTheme'].forEach(function (id) {
+    ['#gameTheme', '#chainTheme', '#skinTheme'].forEach(function (id) {
       var el = $(id);
       if (!el || !el.options.length) return;
       for (var i = 0; i < el.options.length; i++) {
@@ -8242,12 +8857,47 @@
     }
   }
 
+  /** 开局参数（对话框「进入大厅」与结算页「再来一局」共用同一组控件） */
+  function chainStartPayload() {
+    var online = S.members.length;
+    var sel = $('#chainLength');
+    var want = Number(sel && sel.value) || online;
+    // 服务端还会再夹一次（clampInt），这里先夹一遍纯粹是为了让 UI 上看到的即所得
+    var cap = Math.max(P.GAME.CHAIN_LENGTH_MIN, Math.min(online, P.GAME.CHAIN_LENGTH_MAX));
+    var len = Math.max(P.GAME.CHAIN_LENGTH_MIN, Math.min(want, cap));
+    return {
+      mode: 'chain',
+      chainLength: len,
+      theme: ($('#chainTheme') && $('#chainTheme').value) || 'default',
+      drawSeconds: Number($('#chainDrawTime').value) || 0
+    };
+  }
+
   function renderChainDialog() {
     var g = S.game;
     buildThemeSelect($('#chainTheme'));
     var online = S.members.length;
     var min = (g && g.minPlayers) || P.GAME.CHAIN_MIN_PLAYERS;
     var max = (g && g.maxPlayers) || P.GAME.CHAIN_MAX_PLAYERS;
+    // 链长下拉：3 ~ min(在线人数, 上限)，默认 = 人数（每条链传遍全场）。
+    // 人数变了就得重填 —— 否则 8 人房里可能还留着 6 人时的选项。
+    var sel = $('#chainLength');
+    if (sel) {
+      var cap = Math.max(P.GAME.CHAIN_LENGTH_MIN, Math.min(online, P.GAME.CHAIN_LENGTH_MAX));
+      var sig = P.GAME.CHAIN_LENGTH_MIN + '-' + cap;
+      if (sel.dataset.built !== sig) {
+        var old = Number(sel.value) || 0;
+        sel.innerHTML = '';
+        for (var i = P.GAME.CHAIN_LENGTH_MIN; i <= cap; i++) {
+          var o = document.createElement('option');
+          o.value = String(i);
+          o.textContent = i + ' 手' + (i === online ? '（传遍全场）' : '');
+          sel.appendChild(o);
+        }
+        sel.dataset.built = sig;
+        sel.value = (old >= P.GAME.CHAIN_LENGTH_MIN && old <= cap) ? String(old) : String(cap);
+      }
+    }
     var el = $('#chainPlayers');
     if (el) {
       el.textContent = '当前 ' + online + ' 人在线（需要 ' + min + ' ~ ' + max + ' 人）';
@@ -8260,15 +8910,14 @@
     var btn = $('#btnChainStart');
     if (btn) {
       btn.disabled = online < min || online > max;
-      btn.textContent = online < min ? ('还差 ' + (min - online) + ' 人') : '开始接龙';
+      btn.textContent = online < min ? ('还差 ' + (min - online) + ' 人') : '进入大厅';
     }
   }
 
   function startChainGame() {
-    var rounds = Number($('#chainRounds').value) || P.GAME.CHAIN_ROUNDS;
-    var theme = $('#chainTheme').value || 'default';
-    net.send(P.C2S.GAME_START, { mode: 'chain', rounds: rounds, theme: theme });
+    net.send(P.C2S.GAME_START, chainStartPayload());
     $('#chainMask').classList.add('hidden');
+    toast('接龙大厅已开出 —— 大家点「准备」', 'ok', 2800);
   }
 
   function openChainDialog() {
@@ -8280,50 +8929,50 @@
 
   /** 接龙相关的所有 UI 一起收起来（切模式 / 结束游戏时用） */
   function closeChainUi() {
-    rpClearTimers();          // 回放的揭晓定时器必须停，否则会在关掉的树上乱翻
-    ['#chainMask', '#chainInputMask', '#replayMask', '#trophyMask', '#chainTask', '#chainProgress']
+    crClearTimer();           // 播放器的翻格定时器必须停，否则会在关掉的面板上乱翻
+    ['#chainMask', '#chainInputMask', '#chainLobby', '#replayMask', '#trophyMask', '#chainTask', '#chainProgress']
       .forEach(function (id) { var el = $(id); if (el) el.classList.add('hidden'); });
     S.chainTask = null;
-    S.replayIndex = 0;
+    S.chainReveal = null;     // 回放数据随局清空（下一局会有新的 REVEAL 包）
     S.chainInputSubmitted = false;
+    S.cr.playing = false;
+    S.cr.chain = 0;
+    S.cr.item = 0;
   }
 
   /* ---- 接龙状态应用 ---- */
 
   function applyChainState(g, prevPhase) {
     var phase = g ? g.phase : 'off';
+    renderChainLobby();
     renderChainTask();
     renderChainProgress();
     renderChainDialog();
 
-    // 回放 / 投票面板
-    if (phase === 'chain_vote') {
-      var enteringVote = prevPhase !== 'chain_vote';
-      if (enteringVote) S.replayIndex = 0;
-      renderReplay();
-      // 已经在投票阶段时的后续快照（**主要是自己刚投完那一票**）不能重跑揭晓动画：
-      // renderReplay 会把格子重新盖回去再逐格翻开，判定与按钮也被清空 ——
-      // 表现就是「投完了按钮没反应，过一会儿才变」。
-      // 所以这里补一次「无动画」的判定刷新，把按钮状态立刻拉正。
-      if (!enteringVote) renderReplayVerdict(false);
+    // 回大厅：上一局的回放数据作废（新一局会有新的 REVEAL 包），播放器归零
+    if (phase === 'lobby') {
+      S.chainReveal = null;
+      S.cr.chain = 0;
+      S.cr.item = 0;
+      S.cr.playing = false;
+      crClearTimer();
+    }
+
+    // 回放播放器（REVEAL / VOTE 两个阶段都开着）
+    if (phase === 'chain_reveal' || phase === 'chain_vote') {
+      renderChainReveal();
       closeTrophy();
-      if (enteringVote) {
-        toast('全部传递完成！看看这一局跑偏成了什么样', 'ok', 3600);
+      if (phase === 'chain_reveal' && prevPhase !== 'chain_reveal') {
+        toast('全部传完了！回放开始 —— 看看每条链怎么跑偏的', 'ok', 3600);
       }
-    } else if (prevPhase === 'chain_vote' && phase === 'over') {
-      // 从回放进结算：**别把面板的内容重画一遍**。
-      // 换链的 `flip` 音和重新逐格揭晓会在结算瞬间又演一次，看着像出了 bug。
-      // 只把面板收起来即可（结算由奖杯面板负责）。
-      rpClearTimers();
-      $('#replayMask').classList.add('hidden');
     } else {
-      rpClearTimers();
+      crClearTimer();
       $('#replayMask').classList.add('hidden');
     }
 
-    // 结算
-    if (phase === 'over') {
-      if (prevPhase !== 'over') openTrophy();
+    // 结算（SCORE 阶段，到点服务端自动回大厅；也可以让房主「立刻推进」）
+    if (phase === 'chain_score') {
+      if (prevPhase !== 'chain_score') openTrophy();
     } else {
       closeTrophy();
     }
@@ -8331,33 +8980,542 @@
     // 输入框只在猜词阶段开着
     syncChainInput();
 
-    // 阶段播报
+    // 阶段播报 + 音效
     if (phase !== prevPhase) {
-      if (phase === 'chain_write') toast('第一圈：给每条链起一个词', 'ok', 3000);
-      else if (phase === 'lobby') toast('接龙已就绪', 'ok', 2400);
+      if (phase === 'chain_write' && prevPhase === 'chain_init') toast('第一手：给每条链写一个初始词', 'ok', 3000);
+      else if (phase === 'lobby' && prevPhase === 'chain_score') toast('回到大厅 —— 点「准备」再来一局（分数保留）', 'ok', 2600);
+      else if (phase === 'lobby') toast('接龙大厅已就绪', 'ok', 2400);
       else if (phase === 'off' && prevPhase !== 'off') toast('接龙结束，回到自由绘画', 'ok', 2600);
 
-      // ---- 音效：接龙的阶段变化 ----
-      // 注意「轮到我了」的那一声在 applyChainTask 里（题面到达时）——
+      // 「轮到我了」的那一声在 applyChainTask 里（题面到达时）——
       // 这里只负责阶段的整体节奏，两者不会撞在同一帧。
       if (prevPhase === 'off' && phase === 'lobby') SFX.play('gameStart');
       else if (phase === 'off') SFX.play('gameOver');
+      else if (phase === 'chain_init') SFX.play('roundStart');
+      else if (phase === 'chain_reveal' && prevPhase !== 'chain_reveal') SFX.play('roundStart');
       else if (phase === 'chain_vote' && prevPhase !== 'chain_vote') SFX.play('roundStart');
-      else if (phase === 'over' && prevPhase !== 'over') SFX.play('gameOver');
-      else if (phase === 'chain_write' && prevPhase !== 'chain_write') SFX.play('roundStart');
-      else if (g && g.round !== (S.chainPrevRound == null ? -1 : S.chainPrevRound)) SFX.play('roundStart');
-      S.chainPrevRound = g ? g.round : null;
+      else if (phase === 'chain_score' && prevPhase !== 'chain_score') SFX.play('gameOver');
     }
 
-    // 论到我动手时提醒一声（服务端已经用系统播报说了「谁在做什么」，这里只补一句自己的）
+    // 轮到我动手时提醒一声（服务端已经用系统播报说了「谁在做什么」，这里只补一句自己的）
     if (chainStepActive() && S.chainTask && !S.chainInputSubmitted) {
-      var key = g.round + ':' + S.chainTask.step + ':' + (S.chainTask.word || '');
+      var key = g.round + ':' + g.stepIndex + ':' + S.chainTask.step + ':' + (S.chainTask.word || '');
       if (S.chainTaskToast !== key) {
         S.chainTaskToast = key;
-        if (S.chainTask.step === 'draw') toast('轮到你作画：' + S.chainTask.word, 'ok', 4200);
-        else if (S.chainTask.step === 'guess') toast('轮到你看图猜词', 'ok', 3600);
-        else if (S.chainTask.step === 'write') toast('给你的链起一个词', 'ok', 3600);
+        if (S.chainTask.step === 'DRAWING') toast('轮到你作画：' + (S.chainTask.word || '') + ' —— 在画布上直接画', 'ok', 4200);
+        else if (S.chainTask.step === 'GUESS') toast('轮到你看图猜词 —— 题面在左下角', 'ok', 3600);
+        else if (S.chainTask.step === 'WORD') toast('给你的链写一个初始词', 'ok', 3600);
       }
+    }
+  }
+
+  /* ============================================================ 画皮（skin） */
+
+  function isSkinMode() { return !!(S.game && S.game.mode === 'skin'); }
+
+  /**
+   * 我的身份 —— 走 SKIN_ROLE 这条**单发**消息，绝不从 S.game 里读。
+   *
+   * 为什么不放进快照：GAME_STATE 是广播的，房间里每个人都会收到一份。
+   * 把身份放进去，任何人在控制台里都能看到全场的底牌 —— 这个玩法就没了。
+   * 服务端每次 sync 都会重发这一条，所以这里只管覆盖，不需要「只在第一次」之类的判断。
+   */
+  function applySkinRole(msg) {
+    var prev = S.skinRole;
+    S.skinRole = msg || null;
+    var key = msg ? msg.role + '|' + (msg.mates || []).map(function (m) { return m.userId; }).join(',') : '';
+    var prevKey = prev ? prev.role + '|' + (prev.mates || []).map(function (m) { return m.userId; }).join(',') : '';
+    if (key !== prevKey && msg) {
+      // 身份到手是最该被听见的一声 —— 整局就靠这一张底牌
+      SFX.play(msg.camp === 'wolf' ? 'yourTurn' : 'stepStart');
+      if (S.joinCount > 1) toast('你的身份：' + msg.roleName, 'ok', 4200);
+    }
+    renderSkinRole();
+  }
+
+  /** 身份卡 */
+  function renderSkinRole() {
+    var box = $('#skinRole');
+    if (!box) return;
+    var r = S.skinRole;
+    var g = S.game;
+    if (!r || !gameActive() || !isSkinMode()) { box.classList.add('hidden'); return; }
+    box.classList.remove('hidden');
+    box.classList.toggle('wolf', r.camp === 'wolf');
+    box.classList.toggle('dead', !r.alive);
+
+    $('#srBadge').textContent = r.roleName + (r.alive ? '' : '（已出局）');
+
+    var body = $('#srBody');
+    var html = '<div class="sr-line">阵营：<b>' + esc(r.campName) + '</b>'
+      + '<span class="sr-dead-tag hidden" id="srDeadTag">出局</span></div>';
+    if (r.desc) html += '<div class="sr-note">' + esc(r.desc) + '</div>';
+    // 狼的同伴名单：只有狼拿得到（预言家只知道阵营，不该拿到整张狼名单）
+    if (r.mates && r.mates.length) {
+      html += '<div class="sr-mates"><div class="sr-line">同伴：</div>';
+      r.mates.forEach(function (m) {
+        html += '<span class="sr-mate">' + esc(m.name) + '</span>';
+      });
+      html += '</div>';
+    } else if (r.camp === 'wolf') {
+      html += '<div class="sr-mates"><div class="sr-note">没有其他同伴了 —— 只剩你一个。</div></div>';
+    }
+    // 当前轮次的主题（画师要知道画什么，狼要知道该假装画什么）
+    if (g && g.word && (g.phase === 'skin_draw' || g.phase === 'skin_talk')) {
+      html += '<div class="sr-mates"><div class="sr-line">本轮主题：<b>' + esc(g.word) + '</b></div></div>';
+    }
+    body.innerHTML = html;
+    var dt = $('#srDeadTag');
+    if (dt && !r.alive) dt.classList.remove('hidden');
+  }
+
+  /** 匿名画廊 */
+  function renderSkinGallery() {
+    var box = $('#skinGallery');
+    if (!box) return;
+    var g = S.game;
+    // 只有展示 / 讨论 / 投票 / 结算阶段才摊开（作画阶段是私密的，绝不能显示）
+    var show = isSkinMode() && g && g.gallery && g.gallery.length &&
+      (g.phase === 'skin_talk' || g.phase === 'skin_vote' || g.phase === 'skin_vote_end' || g.phase === 'over');
+    box.classList.toggle('hidden', !show);
+    if (!show) {
+      var vm0 = $('#skinViewer'); if (vm0) vm0.remove();
+      return;
+    }
+
+    var title = $('#sgTitle');
+    if (title) title.textContent = '第 ' + g.round + ' 轮 · 匿名画墙';
+    var cnt = $('#sgCount');
+    if (cnt) cnt.textContent = g.galleryCount + ' 幅';
+
+    var grid = $('#sgGrid');
+    var html = '';
+    g.gallery.forEach(function (w, i) {
+      // ⚠ **画廊里没有作者信息** —— 服务端只发了 id 与 png。
+      // 前端也因此不可能「不小心」把作者露出来（比如按 userId 高亮自己的那张）。
+      html += '<div class="sg-cell' + (w.skipped ? ' blank' : '') + '" data-w="' + esc(w.id) + '">'
+        + '<span class="sg-no">' + (i + 1) + '</span>'
+        + (w.png ? '<img src="' + w.png + '" alt="匿名作品 ' + (i + 1) + '">' : '')
+        + '</div>';
+    });
+    grid.innerHTML = html;
+    // 点开大图（讨论时要能指着说「你看这一笔」）
+    Array.prototype.forEach.call(grid.querySelectorAll('.sg-cell'), function (cell) {
+      cell.addEventListener('click', function () {
+        var w = (S.game.gallery || []).filter(function (x) { return x.id === cell.getAttribute('data-w'); })[0];
+        if (w && w.png) openSkinViewer(w.png);
+      });
+    });
+
+    renderSkinVote();
+  }
+
+  function openSkinViewer(png) {
+    closeSkinViewer();
+    var el = document.createElement('div');
+    el.className = 'skin-viewer';
+    el.id = 'skinViewer';
+    var img = document.createElement('img');
+    img.src = png;
+    el.appendChild(img);
+    el.addEventListener('click', closeSkinViewer);
+    document.body.appendChild(el);
+    SFX.play('tap');
+  }
+
+  function closeSkinViewer() {
+    var el = $('#skinViewer');
+    if (el) el.remove();
+  }
+
+  /** 投票区（画廊底部） */
+  function renderSkinVote() {
+    var box = $('#sgVote');
+    if (!box) return;
+    var g = S.game;
+    var show = isSkinMode() && g && g.phase === 'skin_vote';
+    box.classList.toggle('hidden', !show);
+    if (!show) return;
+
+    var hint = $('#sgVoteHint');
+    if (hint) {
+      hint.textContent = g.canVote
+        ? '投票放逐你认为是伪装者的人（' + g.voteDone + '/' + g.voteTotal + ' 已投，可改票）'
+        : '你已经出局了，只能看着（' + g.voteDone + '/' + g.voteTotal + ' 已投）';
+    }
+    var list = $('#sgVoteList');
+    var html = '';
+    (g.players || []).forEach(function (p) {
+      var on = g.myVote === p.userId;
+      html += '<button class="sg-vote-btn' + (on ? ' on' : '') + (p.alive ? '' : ' dead') + '"'
+        + ' data-u="' + esc(p.userId) + '"' + (p.alive && g.canVote ? '' : ' disabled') + '>'
+        + esc(p.name) + (on ? ' ✓' : '') + '</button>';
+    });
+    list.innerHTML = html;
+    Array.prototype.forEach.call(list.querySelectorAll('.sg-vote-btn'), function (b) {
+      b.addEventListener('click', function () {
+        if (b.disabled) return;
+        sendSkinAction('vote', b.getAttribute('data-u'));
+      });
+    });
+    var skip = $('#sgVoteSkip');
+    if (skip) {
+      skip.disabled = !g.canVote;
+      skip.textContent = g.myVote ? '撤销这一票' : '弃票';
+    }
+  }
+
+  /** 夜里动作面板（预言家验人 / 狼人刀人 / 女巫用药） */
+  function renderSkinNight() {
+    var mask = $('#skinNightMask');
+    if (!mask) return;
+    var g = S.game;
+    var r = S.skinRole;
+    var show = isSkinMode() && g && g.phase === 'skin_night' && r && r.alive &&
+      (r.role === 'seer' || r.role === 'wolf' || r.role === 'witch');
+    mask.classList.toggle('hidden', !show);
+    if (!show) return;
+
+    var title = $('#snTitle');
+    var hint = $('#snHint');
+    var res = $('#snResult');
+    if (res) { res.className = 'hint hidden'; res.textContent = ''; }
+
+    // 已经做完的事就不要再催了：预言家验完 / 狼投完，面板改成「等别人」
+    if (r.role === 'seer' && S.skinNight && S.skinNight.kind === 'check') {
+      if (title) title.textContent = '预言家 · 已验人';
+      if (hint) hint.textContent = '等其他人行动（天亮就会公布结果）';
+      var list0 = $('#snList'); if (list0) list0.innerHTML = '';
+      showSkinCheckResult();
+      return;
+    }
+
+    if (title) title.textContent = r.role === 'seer' ? '预言家 · 验一个人'
+      : r.role === 'wolf' ? '伪装者 · 今晚刀谁' : '女巫 · 要不要用药';
+
+    // 女巫的面板与另外两个不一样：**她不能随便点人**，只能救今晚那个刀口
+    //（服务端会拦「药只能用在今晚被刀的人身上」）。
+    // 狼还没把刀定下来时她也没得选 —— 这时候只显示「等狼定刀」。
+    if (r.role === 'witch') {
+      renderSkinWitchPanel();
+      return;
+    }
+
+    if (hint) {
+      hint.textContent = r.role === 'seer'
+        ? '你会知道他是不是伪装者（不知道具体身份）'
+        : '和同伴商量，多数决；平票时服务端随机取一个';
+    }
+
+    var list = $('#snList');
+    var html = '';
+    (g.players || []).forEach(function (p) {
+      if (!p.alive) return;
+      // 狼不能刀同伴；预言家可以验任何人（验到好人也是信息）
+      var dis = (r.role === 'wolf' && S.skinRole && (S.skinRole.mates || [])
+        .some(function (m) { return m.userId === p.userId; }));
+      var isMe = p.userId === S.me.userId;
+      if (r.role === 'seer' && isMe) dis = true;    // 验自己没意义
+      html += '<button class="sn-btn" data-u="' + esc(p.userId) + '"' + (dis ? ' disabled' : '') + '>'
+        + esc(p.name) + (isMe ? '（我）' : '')
+        + '<span class="sn-sub">' + (p.alive ? '' : '已出局') + '</span></button>';
+    });
+    list.innerHTML = html;
+    Array.prototype.forEach.call(list.querySelectorAll('.sn-btn'), function (b) {
+      b.addEventListener('click', function () {
+        if (b.disabled) return;
+        var kind = r.role === 'seer' ? 'check' : 'kill';
+        sendSkinAction(kind, b.getAttribute('data-u'));
+      });
+    });
+  }
+
+  /**
+   * 女巫那一支：她看到的不是「所有人列表」，而是**今晚的刀口**。
+   * 狼还没定刀 → 提示等待；定下来了 → 一个「用药救人」/「不用药」的二选一。
+   * 已经用过药或已经救了 → 只显示结果，不再给按钮。
+   */
+  function renderSkinWitchPanel() {
+    var title = $('#snTitle');
+    var hint = $('#snHint');
+    var list = $('#snList');
+    var n = S.skinNight;
+    var isWitchInfo = n && n.kind === 'witch' && !n.resolved;
+
+    if (!isWitchInfo) {
+      if (title) title.textContent = '女巫 · 等狼定刀';
+      if (hint) hint.textContent = '今晚刀口还没定下来（伪装者正在选人），定下来你就能决定救不救';
+      if (list) list.innerHTML = '';
+      return;
+    }
+    if (title) title.textContent = '女巫 · 要不要救';
+    if (n.saveUsed) {
+      if (hint) hint.textContent = '你的解药已经用过了 —— 今晚只能看着';
+      if (list) list.innerHTML = '<div class="sn-result good">' + esc(n.targetName) + ' 今晚有危险，但你已无药可用</div>';
+      return;
+    }
+    if (n.alreadySaved) {
+      if (hint) hint.textContent = '你已经把药用在他身上了';
+      if (list) list.innerHTML = '<div class="sn-result good">已用药救下 ' + esc(n.targetName) + '</div>';
+      return;
+    }
+    if (hint) hint.textContent = '今晚被刀的是下面这个人 —— 救他（解药只有一瓶）或者留着';
+    if (list) {
+      list.innerHTML = '<button class="sn-btn" data-u="' + esc(n.target) + '">'
+        + '用药救 ' + esc(n.targetName) + '<span class="sn-sub">解药 · 只有一瓶</span></button>'
+        + '<button class="sn-btn" data-u="">不用药<span class="sn-sub">留着以后用</span></button>';
+      Array.prototype.forEach.call(list.querySelectorAll('.sn-btn'), function (b) {
+        b.addEventListener('click', function () {
+          var u = b.getAttribute('data-u');
+          if (!u) { renderSkinNight(); return; }   // 「不用药」= 什么都不做，面板留在原地
+          sendSkinAction('save', u);
+        });
+      });
+    }
+  }
+
+  /** 预言家验完人之后，把结果就地显示出来（他不用等天亮） */
+  function showSkinCheckResult() {
+    var res = $('#snResult');
+    if (!res) return;
+    var n = S.skinNight;
+    if (!n || n.kind !== 'check') return;
+    res.className = 'sn-result ' + (n.isWolf ? 'wolf' : 'good');
+    res.textContent = n.targetName + ' 是 ' + (n.isWolf ? '伪装者！' : '画师（好人）');
+  }
+
+  /** 天亮公告（公开信息 + 发给我的私有裁定） */
+  function renderSkinDawn() {
+    var mask = $('#skinDawnMask');
+    if (!mask) return;
+    var g = S.game;
+    var show = isSkinMode() && g && (g.phase === 'skin_dawn' || g.phase === 'skin_talk') && g.lastNight;
+    mask.classList.toggle('hidden', !show);
+    if (!show) return;
+
+    var t = $('#sdTitle');
+    if (t) t.textContent = '第 ' + g.lastNight.round + ' 天 · 天亮了';
+    var txt = $('#sdText');
+    if (txt) txt.textContent = g.lastNight.text || '';
+
+    // 私有裁定：预言家的验人结果 / 我是不是昨晚被刀的
+    var pv = $('#sdPrivate');
+    if (pv) {
+      var n = S.skinNight;
+      if (n && n.kind === 'check') {
+        pv.className = 'sd-private ' + (n.isWolf ? 'wolf' : 'good');
+        pv.textContent = '你的验人结果：' + n.targetName + ' 是 '
+          + (n.isWolf ? '伪装者！' : '画师（好人）');
+      } else if (n && n.kind === 'dead') {
+        pv.className = 'sd-private wolf';
+        pv.textContent = n.saved
+          ? '昨晚你被刀了，但被女巫救了回来 —— 捡回一条命。'
+          : '昨晚你被刀了，已经出局。虽然不能投票了，但还可以继续发言搅局。';
+      } else if (n && n.kind === 'witch') {
+        // 女巫：天亮后她要知道自己那瓶药到底用没用上。
+        // 服务端在天亮时会把 nightInfoFor 换成 kind='dead'（如果她是刀口）或 null，
+        // 所以这里能走到，说明她还活着 —— 那就只汇报用药结果。
+        pv.className = 'sd-private';
+        pv.textContent = n.saveUsed
+          ? (n.alreadySaved ? '你昨晚用药救下了 ' + n.targetName + '。' : '你昨晚用掉了那瓶解药。')
+          : '你昨晚没有用药，解药还留着。';
+      } else {
+        pv.className = 'sd-private hidden';
+        pv.textContent = '';
+      }
+    }
+  }
+
+  /** 结算面板：公开全部身份 */
+  function renderSkinOver() {
+    var mask = $('#skinOverMask');
+    if (!mask) return;
+    var g = S.game;
+    var show = isSkinMode() && g && g.phase === 'over';
+    mask.classList.toggle('hidden', !show);
+    if (!show) return;
+
+    var sum = $('#soSummary');
+    if (sum) {
+      var goodWin = g.winner === 'good';
+      sum.innerHTML = '<div class="rc-title" style="font-size:16px">' + (goodWin ? '画师阵营获胜' : '伪装者阵营获胜') + '</div>'
+        + '<div class="hint">' + esc(g.winReason || '') + '</div>';
+    }
+    var list = $('#soList');
+    if (list) {
+      var html = '';
+      (g.players || []).forEach(function (p) {
+        var r = S.skinRole && p.userId === S.me.userId ? S.skinRole : null;
+        var isWolf = p.cause === '' && false;   // 占位：真实阵营由服务端的真相表给（见 applySkinReveal）
+        html += '<div class="so-row' + (p.alive ? '' : ' out') + '" data-u="' + esc(p.userId) + '">'
+          + '<span class="so-name">' + esc(p.name) + (p.userId === S.me.userId ? '（我）' : '') + '</span>'
+          + (p.alive ? '' : '<span class="so-out">已出局</span>')
+          + '<span class="so-role" data-role="' + esc(p.userId) + '">…</span>'
+          + '</div>';
+      });
+      list.innerHTML = html;
+    }
+    applySkinReveal();
+  }
+
+  /**
+   * 结算时的「真相表」—— 由服务端 broadcast 一条 `<SKIN_ROLE>:all` 带过来。
+   * 为什么不在 GAME_STATE 里：身份类信息统一走身份通道，
+   * 免得「结算时能看到身份」这条规则被后人误当成「身份可以广播」而搬到快照里。
+   */
+  function applySkinReveal() {
+    var all = S.skinReveal;
+    if (!all || !all.length) return;
+    all.forEach(function (r) {
+      var el = document.querySelector('.so-role[data-role="' + r.userId + '"]');
+      if (!el) return;
+      el.textContent = r.roleName;
+      var row = el.closest('.so-row');
+      if (row && r.camp === 'wolf') row.classList.add('wolf');
+    });
+  }
+
+  function sendSkinAction(kind, target) {
+    if (!isSkinMode()) return;
+    net.send(P.C2S.SKIN_ACTION, { kind: kind, target: target || '' });
+    SFX.play('tap');
+  }
+
+  /** 交画：把画布导成 PNG 交给服务端（服务端只做哑存储） */
+  function submitSkinArt() {
+    var g = S.game;
+    if (!isSkinMode() || !g || g.phase !== 'skin_draw') return;
+    if (!g.canDraw) { toast('这一轮你不能画', 'warn', 2400); return; }
+    if (S.skinDrawnSubmitted) return;
+    var png;
+    try { png = engine.exportPNG(); } catch (e) { png = ''; }
+    if (!png) { SFX.play('error'); return toast('导出作品失败，再试一次', 'warn', 2600); }
+    S.skinDrawnSubmitted = true;
+    net.send(P.C2S.SKIN_ART, { png: png });
+    SFX.play('submit');
+    renderSkinDrawBar();
+    toast('作品已交给画墙（匿名展示，没人知道是你）', 'ok', 2800);
+  }
+
+  /** 作画阶段悬浮的「交稿」条 */
+  function renderSkinDrawBar() {
+    var bar = $('#skinDrawBar');
+    if (!bar) return;
+    var g = S.game;
+    var show = isSkinMode() && g && g.phase === 'skin_draw' && g.canDraw;
+    bar.classList.toggle('hidden', !show);
+    if (!show) return;
+    var b = $('#sdbSubmit');
+    if (b) {
+      b.disabled = S.skinDrawnSubmitted;
+      b.textContent = S.skinDrawnSubmitted ? '已交稿' : '交稿';
+    }
+    var s = $('#sdbState');
+    if (s) {
+      s.textContent = S.skinDrawnSubmitted
+        ? '等其他人交稿…（' + g.drawDone + '/' + g.drawTotal + '）'
+        : '主题：' + (g.word || '') + ' —— 画完点「交稿」';
+    }
+  }
+
+  /* ---- 画皮开局面板 ---- */
+
+  function renderSkinDialog() {
+    var g = S.game;
+    var st = $('#skinState');
+    if (st) {
+      if (g && g.mode === 'skin') st.textContent = '当前：' + (g.phaseLabel || '');
+      else st.textContent = '当前：自由绘画';
+    }
+    var pl = $('#skinPlayers');
+    if (pl && g && g.mode === 'skin') {
+      pl.textContent = '需要 ' + g.minPlayers + ' ~ ' + g.maxPlayers + ' 人（本局 ' + (g.players || []).length + ' 人）';
+    }
+    // 主题词库下拉：与经典 / 接龙共用同一份选择（themeChoice）
+    buildThemeSelect($('#skinTheme'));
+    var btn = $('#btnSkinStart');
+    if (btn) {
+      var online = (S.members || []).filter(function (m) { return !m.readonly; }).length;
+      var min = P.GAME.SKIN_MIN_PLAYERS, max = P.GAME.SKIN_MAX_PLAYERS;
+      btn.disabled = online < min || online > max;
+      btn.textContent = online < min ? ('还差 ' + (min - online) + ' 人') : '开始画皮';
+    }
+    var stop = $('#btnSkinStop');
+    if (stop) stop.classList.toggle('hidden', !S.me.isOwner || !(g && g.mode === 'skin' && gameActive()));
+  }
+
+  function startSkinGame() {
+    var rounds = Number($('#skinRounds').value) || P.GAME.SKIN_ROUNDS;
+    var theme = $('#skinTheme').value || 'default';
+    var drawSeconds = Number($('#skinDrawTime').value) || 0;
+    net.send(P.C2S.GAME_START, {
+      mode: 'skin', rounds: rounds, theme: theme, drawSeconds: drawSeconds
+    });
+    $('#skinMask').classList.add('hidden');
+  }
+
+  function openSkinDialog() {
+    if (!S.themes || !S.themes.length) probePublicUrl();
+    renderSkinDialog();
+    $('#skinMask').classList.remove('hidden');
+  }
+
+  function closeSkinUi() {
+    ['#skinMask', '#skinNightMask', '#skinDawnMask', '#skinOverMask',
+      '#skinRole', '#skinGallery', '#skinDrawBar'].forEach(function (id) {
+      var el = $(id); if (el) el.classList.add('hidden');
+    });
+    closeSkinViewer();
+    S.skinDrawnSubmitted = false;
+    S.skinVotePick = '';
+  }
+
+  /* ---- 画皮状态应用 ---- */
+
+  function applySkinState(g, prevPhase) {
+    var phase = g ? g.phase : 'off';
+
+    // 换了轮次 → 新一轮的画还没交（这个标记不能跨轮残留，否则第二轮交不了稿）
+    if (!g || g.round !== S.skinPrevRound) {
+      S.skinDrawnSubmitted = false;
+      // 夜里结算的私有裁定也要清掉（不然昨天的验人结果会挂到今天）
+      if (phase === 'skin_night') S.skinNight = null;
+    }
+
+    renderSkinRole();
+    renderSkinGallery();
+    renderSkinNight();
+    renderSkinDawn();
+    renderSkinOver();
+    renderSkinDrawBar();
+    renderSkinDialog();
+
+    // 阶段播报 + 音效
+    if (phase !== prevPhase) {
+      if (phase === 'lobby' && prevPhase === 'off') toast('画皮已就绪 —— 够 ' + g.minPlayers + ' 人就能开局', 'ok', 3200);
+      else if (phase === 'skin_night') toast('天黑请闭眼', 'ok', 2400);
+      else if (phase === 'skin_dawn') toast('天亮了', 'ok', 2400);
+      else if (phase === 'skin_draw') {
+        toast('本轮主题：' + (g.word || '') + ' —— 各自画，' + Math.round((g.phaseMs || 60000) / 1000) + ' 秒',
+          'ok', 4200);
+      } else if (phase === 'skin_talk') toast('画都摊开了 —— 谁是伪装者？', 'ok', 3600);
+      else if (phase === 'skin_vote') toast('投票放逐', 'ok', 2600);
+      else if (phase === 'off' && prevPhase !== 'off') toast('画皮结束，回到自由绘画', 'ok', 2600);
+
+      if (prevPhase === 'off' && phase === 'lobby') SFX.play('gameStart');
+      else if (phase === 'off') SFX.play('gameOver');
+      else if (phase === 'over' && prevPhase !== 'over') SFX.play('gameOver');
+      else if (phase === 'skin_draw' && prevPhase !== 'skin_draw') SFX.play('roundStart');
+      else if (phase === 'skin_vote' && prevPhase !== 'skin_vote') SFX.play('roundStart');
+      else if (phase === 'skin_dawn' && prevPhase !== 'skin_dawn') SFX.play('stepStart');
+    }
+    S.skinPrevPhase = phase;
+    S.skinPrevRound = g ? g.round : -1;
+
+    // 轮到我了提醒一声（「该你验人 / 该你出刀」这种，比看 HUD 直观）
+    if (phase === 'skin_draw' && g.canDraw && !S.skinDrawnSubmitted) {
+      var k = 'draw:' + g.round;
+      if (S.skinTaskToast !== k) { S.skinTaskToast = k; SFX.play('yourTurn'); }
     }
   }
 
@@ -8390,6 +9548,8 @@
     S.imported = loadImported();
     loadToolPrefs();
     applyPanelOrder();
+    // 折叠状态要在 applyPanelOrder 之后落 —— 小节可能被拖到右栏，得先搬完再定折叠
+    applySectionStates();
     bindUI();
     bindKeys();
     bindPaste();
@@ -8400,9 +9560,11 @@
     bindPanelDnD();
     bindColumnResizers();
     bindQuickBar();
+    bindLayoutSettings();
     bindRefWindow();
     loadDimPrefs();
     applyDimView();
+    loadUiScale();          // 恢复上次的界面缩放（以前只写不读，刷新必丢）
     // 侧栏收拉：把手 / 窄条 / F4（菜单里那项也走同一个函数）
     $('#btnSideCollapse').addEventListener('click', function () { setSideCollapsed(true); });
     $('#sideRail').addEventListener('click', function () { setSideCollapsed(false); });
@@ -8717,23 +9879,59 @@
            document.querySelector('#rightPanelScroll [data-section="' + id + '"]');
   }
 
+  var SECTION_KEY = 'chahu.sections';
+
+  /** 读小节折叠状态（{id: 0|1}）。1=展开、0=收起 */
+  function loadSectionStates() {
+    var st = {};
+    try { st = JSON.parse(localStorage.getItem(SECTION_KEY) || '{}') || {}; } catch (e) { st = {}; }
+    return st;
+  }
+
+  /**
+   * 把存下来的折叠状态落到 DOM 上。
+   * 为什么需要这个：`toggleSection` 一直在写 `chahu.sections`，但**从来没人读它** ——
+   * 于是用户收起的小节刷新一次全弹回来（观感像「设置不生效」）。
+   * 必须在 `applyPanelOrder()` **之后**调：小节会被搬到另一栏，得搬完再定折叠。
+   */
+  function applySectionStates() {
+    var st = loadSectionStates();
+    // 跨两个容器查（小节可能被拖到右栏）
+    document.querySelectorAll('#leftPanelScroll [data-section], #rightPanelScroll [data-section]')
+      .forEach(function (el) {
+        var id = el.getAttribute('data-section');
+        if (!id || !Object.prototype.hasOwnProperty.call(st, id)) return;
+        el.classList.toggle('hidden', !st[id]);
+      });
+  }
+
   function toggleSection(id) {
     var el = sectionEl(id);
     if (!el) return;
     var hidden = el.classList.toggle('hidden');
-    var st = {};
-    try { st = JSON.parse(localStorage.getItem('chahu.sections') || '{}') || {}; } catch (e) { st = {}; }
+    var st = loadSectionStates();
     st[id] = hidden ? 0 : 1;
-    try { localStorage.setItem('chahu.sections', JSON.stringify(st)); } catch (e) { /* ignore */ }
+    try { localStorage.setItem(SECTION_KEY, JSON.stringify(st)); } catch (e) { /* ignore */ }
     engine.resize();
+  }
+
+  /** 某个小节现在是不是收起的（给布局设置面板显示用） */
+  function isSectionHidden(id) {
+    var el = sectionEl(id);
+    return el ? el.classList.contains('hidden') : false;
   }
 
   function resetPanels() {
     try {
-      localStorage.removeItem('chahu.sections');
+      localStorage.removeItem(SECTION_KEY);
       localStorage.removeItem('chahu.panelOrder');
       localStorage.removeItem('chahu.panelSides');
+      // 栏宽也一并还原 —— 以前不清，点了「恢复默认」栏宽还是歪的
+      localStorage.removeItem('chahu.colW');
     } catch (e) { /* ignore */ }
+    // 栏宽复位到 CSS 里的默认值（清掉 inline 覆盖即可）
+    document.documentElement.style.removeProperty('--left-w');
+    document.documentElement.style.removeProperty('--right-w');
     // 把所有小节搬回左栏（默认布局），再清掉隐藏状态。
     var left = $('#leftPanelScroll');
     if (left) {
@@ -9043,14 +10241,38 @@
 
   /* ---------------- 窗口 ---------------- */
 
-  function setUiScale(f) {
+  /**
+   * 界面缩放。用 `zoom` 作用在**两侧面板**的滚动容器上（顶栏/菜单栏/画布不缩，
+   * 否则画面会被非整数缩放糊掉、画布坐标换算也要跟着改）。
+   *
+   * 以前只 zoom 了左栏，而且 `chahu.uiscale` 只写不读 —— 刷新就回 100%，
+   * 观感像「缩放不生效」。现在两侧都缩，并且启动时由 `applyUiScale()` 恢复。
+   */
+  function applyUiScale(f) {
+    var z = Math.abs(f - 1) < 1e-6 ? '' : String(f);
+    ['#leftPanelScroll', '#rightPanelScroll'].forEach(function (sel) {
+      var el = document.querySelector(sel);
+      if (el) el.style.zoom = z;
+    });
+  }
+
+  function setUiScale(f, opts) {
     S.uiScale = f;
     document.documentElement.style.setProperty('--ui-scale', String(f));
-    try { localStorage.setItem('chahu.uiscale', String(f)); } catch (e) { /* ignore */ }
-    var l = document.querySelector('#leftPanelScroll');
-    if (l) l.style.zoom = f === 1 ? '' : String(f);
+    if (!(opts && opts.silent)) {
+      try { localStorage.setItem('chahu.uiscale', String(f)); } catch (e) { /* ignore */ }
+    }
+    applyUiScale(f);
     engine.resize();
-    toast('界面缩放：' + Math.round(f * 100) + '%');
+    if (!(opts && opts.silent)) toast('界面缩放：' + Math.round(f * 100) + '%');
+  }
+
+  /** 开机恢复界面缩放（存在 chahu.uiscale 里） */
+  function loadUiScale() {
+    var raw = lsGet('chahu.uiscale', '');
+    var f = parseFloat(raw);
+    if (!isFinite(f) || f <= 0) return;
+    setUiScale(Math.max(0.5, Math.min(2, f)), { silent: true });
   }
 
   function setCursorMode(mode) {
@@ -9127,8 +10349,13 @@
     }
   }
 
+  /**
+   * 「设置」。以前这里直接 openKeyDialog() —— 于是「设置」打开的是快捷键对话框，
+   * 布局相关的开关反倒散在「窗口」菜单各处。现在设置打开布局设置面板；
+   * 快捷键对话框仍有自己的入口（编辑 → 快捷键设置 / 其他 → 快捷键设置）。
+   */
   function openSettings() {
-    global.ChaMenu.openKeyDialog();
+    openLayoutSettings();
   }
 
   /* ================================================================
@@ -9351,6 +10578,257 @@
     if (vm && !vm.dataset.busy) vm.value = engine.flipX ? 'flipH' : 'normal';
     var s = $('#qbSteadierText');
     if (s) s.textContent = String(Math.round(Number(S.brush.steadier) || 0));
+  }
+
+  /* ================================================================
+   * 布局设置面板
+   *
+   * 为什么要有这个：布局相关的开关原先散在四处 ——
+   *   面板显隐在「窗口 → 显示操作面板」的子菜单里、界面缩放在「窗口」另一项、
+   *   栏宽只能靠拖那条 7px 的窄边、区块归属更是只能靠拖小节标题。
+   * 结果就是「想调布局得先知道去哪儿调」。这里把它们集中成一张表，
+   * 每项都实时生效 + 自动记住。
+   *
+   * 全部存 localStorage（仅本机）—— 布局是「这块屏幕」的事，
+   * 同步到房间会和「各人屏幕尺寸不同」直接冲突，所以不碰协议。
+   * ================================================================ */
+
+  var UI_SCALE_STEPS = [0.85, 1, 1.15, 1.3, 1.5];
+
+  function openLayoutSettings() {
+    renderLayoutSettings();
+    var m = $('#layoutMask');
+    if (m) m.classList.remove('hidden');
+  }
+  function closeLayoutSettings() {
+    var m = $('#layoutMask');
+    if (m) m.classList.add('hidden');
+  }
+
+  /** 面板里的一行：左边标题 + 说明，右边塞控件 */
+  function lsRow(title, desc, ctrl, isSub) {
+    var row = document.createElement('div');
+    row.className = 'ls-row' + (isSub ? ' sub' : '');
+    var left = document.createElement('div');
+    left.className = 'ls-text';
+    var t = document.createElement('div');
+    t.className = 'ls-title';
+    t.textContent = title;
+    left.appendChild(t);
+    if (desc) {
+      var d = document.createElement('div');
+      d.className = 'ls-desc';
+      d.textContent = desc;
+      left.appendChild(d);
+    }
+    row.appendChild(left);
+    if (ctrl) {
+      var box = document.createElement('div');
+      box.className = 'ls-ctrl';
+      box.appendChild(ctrl);
+      row.appendChild(box);
+    }
+    return row;
+  }
+
+  function lsGroup(title) {
+    var g = document.createElement('div');
+    g.className = 'ls-group';
+    var h = document.createElement('div');
+    h.className = 'ls-group-h';
+    h.textContent = title;
+    g.appendChild(h);
+    return g;
+  }
+
+  function lsCheck(checked, onChange) {
+    var chk = document.createElement('input');
+    chk.type = 'checkbox';
+    chk.checked = !!checked;
+    chk.addEventListener('change', function () { onChange(chk.checked); });
+    return chk;
+  }
+
+  /** 栏宽滑块：拖动实时改，松手才写 localStorage（写盘别放进 input 里） */
+  function lsWidthSlider(side) {
+    var wrap = document.createElement('div');
+    wrap.className = 'ls-slider';
+    var rng = document.createElement('input');
+    rng.type = 'range';
+    rng.min = String(COL_MIN);
+    rng.max = String(COL_MAX);
+    rng.step = '2';
+    var cur = parseInt(getComputedStyle(document.documentElement)
+      .getPropertyValue(side === 'left' ? '--left-w' : '--right-w'), 10);
+    if (!isFinite(cur) || cur <= 0) cur = side === 'left' ? 262 : 300;
+    rng.value = String(Math.max(COL_MIN, Math.min(COL_MAX, cur)));
+    var out = document.createElement('span');
+    out.className = 'ls-num';
+    out.textContent = rng.value + 'px';
+    rng.addEventListener('input', function () {
+      var w = setColW(side, Number(rng.value));
+      out.textContent = w + 'px';
+      engine.resize();
+    });
+    rng.addEventListener('change', function () {
+      // 松手才落盘：和拖动条 finish() 用同一个 key、同一套结构
+      var save = {};
+      try { save = JSON.parse(lsGet('chahu.colW', '{}')) || {}; } catch (e) { save = {}; }
+      save[side] = Number(rng.value);
+      lsSet('chahu.colW', JSON.stringify(save));
+    });
+    wrap.appendChild(rng);
+    wrap.appendChild(out);
+    return wrap;
+  }
+
+  /** 把小节搬到指定栏（复用拖拽那套「改真实 DOM」的做法，再存偏好） */
+  function moveSectionTo(id, side) {
+    var el = sectionEl(id);
+    if (!el) return;
+    var target = side === 'right' ? $('#rightPanelScroll') : $('#leftPanelScroll');
+    if (!target || el.parentNode === target) return;
+    target.appendChild(el);
+    if (side === 'right') el.classList.remove('hidden');   // 拖过去的小节别是收起的
+    if (typeof updateRightScroll === 'function') updateRightScroll();
+    savePanelOrder();
+    engine.resize();
+  }
+
+  function renderLayoutSettings() {
+    var box = $('#layoutSetBody');
+    if (!box) return;
+    box.innerHTML = '';
+
+    /* ---- 1. 整栏显隐 ---- */
+    var g1 = lsGroup('面板显隐');
+    g1.appendChild(lsRow('左侧面板', '工具栏 / 笔刷 / 图层那一列', lsCheck(S.leftPanelOpen, function (v) {
+      setLeftCollapsed(!v);
+    })));
+    g1.appendChild(lsRow('右侧面板', '右侧那一列（成员 / 聊天 / 拖过去的小节）', lsCheck(!S.sideCollapsed, function (v) {
+      setSideCollapsed(!v);
+    })));
+    g1.appendChild(lsRow('快捷栏', '画布上沿那一条', lsCheck(!isQuickBarCollapsed(), function (v) {
+      setQuickBarCollapsed(!v);
+    })));
+    box.appendChild(g1);
+
+    /* ---- 2. 栏宽 ---- */
+    var g2 = lsGroup('栏宽');
+    g2.appendChild(lsRow('左栏宽度', '也可以直接拖面板边缘那条窄边', lsWidthSlider('left')));
+    g2.appendChild(lsRow('右栏宽度', '', lsWidthSlider('right')));
+    box.appendChild(g2);
+
+    /* ---- 3. 界面缩放 ---- */
+    var g3 = lsGroup('界面缩放');
+    var sel = document.createElement('select');
+    UI_SCALE_STEPS.forEach(function (f) {
+      var o = document.createElement('option');
+      o.value = String(f);
+      o.textContent = Math.round(f * 100) + '%' + (Math.abs(f - 1) < 1e-6 ? '（默认）' : '');
+      sel.appendChild(o);
+    });
+    sel.value = String(S.uiScale || 1);
+    sel.addEventListener('change', function () { setUiScale(Number(sel.value)); });
+    // 菜单里的固定三档可能存进来别的值 —— 补一个动态项，免得 select 显示空白
+    if (!UI_SCALE_STEPS.some(function (f) { return Math.abs(f - Number(sel.value)) < 1e-6; })) {
+      var o2 = document.createElement('option');
+      o2.value = sel.value;
+      o2.textContent = Math.round(Number(sel.value) * 100) + '%';
+      sel.appendChild(o2);
+      sel.value = String(S.uiScale || 1);
+    }
+    g3.appendChild(lsRow('缩放比例', '只缩放两侧面板，画布与顶栏不动（免得画面被糊掉）', sel));
+    box.appendChild(g3);
+
+    /* ---- 4. 区块顺序与归属 ---- */
+    var g4 = lsGroup('区块（可拖标题跨栏，也可在这里指定）');
+    PANEL_DEFAULT_ORDER.forEach(function (id) {
+      var meta = SECTION_META[id] || {};
+      var el = sectionEl(id);
+      var side = el && el.parentNode === $('#rightPanelScroll') ? 'right' : 'left';
+
+      var ctrl = document.createElement('div');
+      ctrl.className = 'ls-inline';
+
+      // 归属：左 / 右
+      var sw = document.createElement('select');
+      [['left', '左侧'], ['right', '右侧']].forEach(function (p) {
+        var o = document.createElement('option');
+        o.value = p[0]; o.textContent = p[1];
+        sw.appendChild(o);
+      });
+      sw.value = side;
+      sw.addEventListener('change', function () { moveSectionTo(id, sw.value); });
+      ctrl.appendChild(sw);
+
+      // 显隐
+      var lbl = document.createElement('label');
+      lbl.className = 'ls-mini';
+      var chk = lsCheck(!isSectionHidden(id), function (v) {
+        var cur = isSectionHidden(id);
+        if (cur === !v) return;
+        toggleSection(id);          // 只在真的要变时点，免得把状态写反
+      });
+      lbl.appendChild(chk);
+      var sp = document.createElement('span');
+      sp.textContent = '显示';
+      lbl.appendChild(sp);
+      ctrl.appendChild(lbl);
+
+      g4.appendChild(lsRow(meta.name || id, meta.desc || '', ctrl, true));
+    });
+    box.appendChild(g4);
+  }
+
+  /** 区块的中文名与说明（菜单里那套名字，这里复用同一批词） */
+  var SECTION_META = {
+    nav:      { name: '导航器',   desc: '缩略图 + 视口取景框' },
+    tools:    { name: '工具栏',   desc: '选择 / 画笔 / 橡皮这些' },
+    brushes:  { name: '笔刷栏',   desc: '笔刷预设列表' },
+    brush:    { name: '画笔参数', desc: '大小 / 硬度 / 手抖修正等' },
+    fx:       { name: '效果',     desc: '纸张质感与特效' },
+    color:    { name: '颜色',     desc: '色轮 / 色板' },
+    layers:   { name: '图层',     desc: '图层列表与混合模式' }
+  };
+
+  /** 快捷栏现在是不是收起的（读 DOM class，和 setQuickBarCollapsed 一处为准） */
+  function isQuickBarCollapsed() {
+    var bar = $('#quickBar');
+    return !!(bar && bar.classList.contains('collapsed'));
+  }
+
+  function bindLayoutSettings() {
+    bindClick('#btnLayoutClose', closeLayoutSettings);
+    bindClick('#btnLayoutOk', closeLayoutSettings);
+    var m = $('#layoutMask');
+    if (m) m.addEventListener('click', function (e) { if (e.target === m) closeLayoutSettings(); });
+
+    // 只重置栏宽（不影响区块顺序）
+    bindClick('#btnLayoutResetWidth', function () {
+      try { localStorage.removeItem('chahu.colW'); } catch (e) { /* ignore */ }
+      document.documentElement.style.removeProperty('--left-w');
+      document.documentElement.style.removeProperty('--right-w');
+      engine.resize();
+      renderLayoutSettings();
+      toast('栏宽已重置', 'ok');
+    });
+    // 恢复默认布局 = 原有的 resetPanels（现已一并清栏宽）+ 缩放与折叠
+    bindClick('#btnLayoutReset', function () {
+      resetPanels();
+      setUiScale(1);
+      PANEL_DEFAULT_ORDER.forEach(function (id) {
+        var el = sectionEl(id);
+        if (el && el.classList.contains('hidden')) toggleSection(id);
+      });
+      renderLayoutSettings();
+    });
+  }
+
+  /** 极简的「有才绑」—— 这些按钮在 index.html 里都在，缺了也不该炸 */
+  function bindClick(sel, fn) {
+    var el = $(sel);
+    if (el) el.addEventListener('click', fn);
   }
 
   /* ================================================================
@@ -10592,9 +12070,43 @@
     /* ---- 接龙（chain）：给测试和控制台留的手柄 ---- */
     startChainGame: startChainGame, openChainDialog: openChainDialog,
     submitChainWord: submitChainWord, submitChainArt: submitChainArt,
-    doChainGuessSubmit: doChainGuessSubmit, voteChain: voteChain,
-    stepReplay: stepReplay, openTrophy: openTrophy, closeTrophy: closeTrophy,
+    doChainGuessSubmit: doChainGuessSubmit, voteKeep: voteKeep, sendFavVote: sendFavVote,
+    stepReplay: stepReplay, crPlay: crPlay, crStepItem: crStepItem,
+    openTrophy: openTrophy, closeTrophy: closeTrophy,
     setGameDialogMode: setGameDialogMode,
+
+    /* ---- 画皮（skin）：同样给测试和控制台留手柄 ----
+     * 特意把「夜里动作」和「投票」拆成两个入口（而不是直接暴露一个 sendSkinAction）：
+     * 测试要断言的是「点了验人按钮之后服务端收到了什么」，按语义命名更好读，
+     * 也免得以后改消息结构时要改一堆测试。 */
+    startSkinGame: startSkinGame, openSkinDialog: openSkinDialog,
+    submitSkinArt: submitSkinArt,
+    skinCheck: function (uid) { sendSkinAction('check', uid); },
+    skinKill: function (uid) { sendSkinAction('kill', uid); },
+    skinSave: function (uid) { sendSkinAction('save', uid); },
+    skinVote: function (uid) { sendSkinAction('vote', uid); },
+    skinShot: function (uid) { sendSkinAction('shot', uid); },
+    skinNext: function () { sendSkinAction('next', ''); },
+    isSkinMode: isSkinMode,
+    renderSkinRole: renderSkinRole, renderSkinGallery: renderSkinGallery,
+    renderSkinNight: renderSkinNight, renderSkinOver: renderSkinOver,
+    closeSkinViewer: closeSkinViewer,
+
+    /* ---- 压感自检（给测试用：把「上一支指针」的采样清掉，模拟换个设备重新插） ---- */
+    resetPenProbe: function () {
+      penProbe.id = null; penProbe.vals = []; penProbe.types = {};
+      S.penDetect = null;
+      renderPenHint();
+    },
+
+    /* ---- 布局设置面板（给测试与控制台留的手柄） ---- */
+    openLayoutSettings: openLayoutSettings,
+    closeLayoutSettings: closeLayoutSettings,
+    renderLayoutSettings: renderLayoutSettings,
+    applySectionStates: applySectionStates,
+    moveSectionTo: moveSectionTo,
+    isSectionHidden: isSectionHidden,
+    isQuickBarCollapsed: isQuickBarCollapsed,
 
     /* ---- 音效与自定义词库 ---- */
     sfx: SFX,

@@ -1,5 +1,7 @@
 'use strict';
 
+const P = require('./protocol');
+
 /**
  * 用户自定义主题词库 —— 运行时持久化，不需要改代码也不需要重启。
  *
@@ -72,8 +74,7 @@ function normalizeEntry(t) {
   for (const w of src) {
     const s = String(w || '').trim();
     if (!s) continue;
-    if (!/^[\u4e00-\u9fa5]{2,}$/.test(s)) continue;   // 不合格的直接丢掉（不炸启动）
-    if (s.length > 12) continue;
+    if (!P.isPlayableWord(s)) continue;   // 不合格的直接丢掉（不炸启动）
     if (seen.has(s)) continue;
     seen.add(s);
     words.push(s);
@@ -140,8 +141,7 @@ function parseWords(text) {
   const rejected = [];
   const seen = new Set();
   for (const p of parts) {
-    if (!/^[\u4e00-\u9fa5]{2,}$/.test(p)) { rejected.push(p); continue; }
-    if (p.length > 12) { rejected.push(p); continue; }
+    if (!P.isPlayableWord(p)) { rejected.push(p); continue; }
     if (seen.has(p)) continue;                          // 重复的静默去重（不算错）
     seen.add(p);
     words.push(p);

@@ -186,6 +186,7 @@
         <label class="check-row">
           <input type="checkbox" id="pressureChk" checked /><span>使用数位笔压感</span>
         </label>
+        <div class="pen-hint" id="penHint"></div>
         <button class="mini wide" id="btnBrushReset">复位当前笔刷参数</button>
       </section>
 
@@ -461,6 +462,8 @@
       <b class="gh-timer" id="ghTimer">--</b>
       <span class="gh-word" id="ghWord">—</span>
       <span class="gh-round" id="ghRound"></span>
+      <!-- 画皮专用：在场人数（全场最关心的那个数字） -->
+      <span class="gh-skin-state hidden" id="ghSkinState"></span>
       <button class="mini" id="ghScore" title="查看计分板">计分</button>
       <button class="mini" id="ghSound" title="游戏音效开关">🔊</button>
       <input type="range" class="gh-vol" id="ghVol" min="0" max="100" step="1" title="音效音量" />
@@ -486,7 +489,7 @@
       <div class="rc-next" id="rcNext"></div>
     </div>
 
-    <!-- 接龙：我这一步的题面。只有当事者看得到（词 / 别人的画）。
+    <!-- 接龙：我这一步的题面。只有当事者看得到（候选词 / 要画的词 / 上家的笔迹）。
          放在画布左下角，不挡着作画。 -->
     <div class="chain-task hidden" id="chainTask">
       <div class="ct-head">
@@ -497,7 +500,15 @@
       <div class="ct-body" id="ctBody"></div>
     </div>
 
-    <!-- 接龙：链条进度（每条链走到第几格，不含内容） -->
+    <!-- 接龙：大厅（准备 / 玩家就绪状态） -->
+    <div class="chain-lobby hidden" id="chainLobby">
+      <div class="cl-head">接龙大厅 · <span id="clCount">0 人</span></div>
+      <div class="cl-players" id="clPlayers"></div>
+      <button class="btn primary cl-ready" id="btnChainReady">准备</button>
+      <div class="cl-hint" id="clHint"></div>
+    </div>
+
+    <!-- 接龙：进度（第几手 / 几人交卷，不含内容） -->
     <div class="chain-progress hidden" id="chainProgress">
       <div class="cp-head">链条进度</div>
       <div class="cp-list" id="cpList"></div>
@@ -885,6 +896,26 @@
   </div>
 </div>
 
+<!-- ============ 布局设置 ============ -->
+<div class="modal-mask hidden" id="layoutMask">
+  <div class="modal layout-set">
+    <div class="modal-head">
+      <h3>布局设置</h3>
+      <button class="icon-btn" id="btnLayoutClose">×</button>
+    </div>
+    <div class="modal-body">
+      <p class="hint">改完立刻生效，并且自动记住。想全部退回原样，点最下面的「恢复默认布局」。</p>
+      <div class="layout-set-body" id="layoutSetBody"></div>
+      <div class="imp-actions">
+        <button class="btn tiny ghost" id="btnLayoutResetWidth">重置栏宽</button>
+        <button class="btn tiny ghost" id="btnLayoutReset">恢复默认布局</button>
+        <span class="spacer"></span>
+        <button class="btn tiny primary" id="btnLayoutOk">完成</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ============ 关于 / 用户准则 / 风险须知 / 更新检测 ============ -->
 <input type="file" id="refFileInput" accept="image/*" class="hidden-file" />
 <div class="modal-mask hidden" id="aboutMask">
@@ -1160,6 +1191,7 @@
         <div class="seg" id="gameModeSeg">
           <button class="seg-btn active" id="gmClassic" data-mode="classic">你画我猜</button>
           <button class="seg-btn" id="gmChain" data-mode="chain">接龙</button>
+          <button class="seg-btn" id="gmSkin" data-mode="skin">画皮</button>
         </div>
       </div>
       <p class="game-rule" id="gameRule">
@@ -1245,34 +1277,31 @@
   </div>
 </div>
 
-<!-- ============ 接龙 ============ -->
+<!-- ============ 接龙（v9 重制：多链并行 Whisper） ============ -->
 <div class="modal-mask hidden" id="chainMask">
   <div class="modal game">
     <div class="modal-head">
-      <h3>接龙（绘画版「拷贝不走样」）</h3>
+      <h3>接龙（Whisper · 传话绘画）</h3>
       <button class="icon-btn" id="btnChainClose">×</button>
     </div>
     <div class="modal-body">
       <p class="game-rule">
-        每人先给自己那条链写一个词 → 下一个人照着画 → 再下一个人看着画猜词 → 下下一个人照着新词再画……
-        绕圈传到每个人都做过一遍，然后把整条链摊开看：<b>一个「爱丽丝」是怎么变成「怪物卡车」的</b>。
-        最后大家投票判断每条链首尾是否还对得上，对得上的给起词的人一个奖杯。
+        每个人先给自己那条链写一个词 → 沿打乱的顺序传给下一个人<b>照着画</b> →
+        再下一个人<b>看着画猜词</b> → 再下一个人照新词再画……
+        所有人同时进行、互看不到别人的内容。传完后一起看回放：
+        <b>一个「爱丽丝」是怎么变成「怪物卡车」的</b>。
+        最后投票：每条链首尾是否还对得上 + 全场最喜欢的一张画。
       </p>
       <div class="form-row">
-        <label>圈数</label>
-        <select id="chainRounds">
-          <option value="3" selected>3 圈（写词 → 作画 → 猜词，推荐）</option>
-          <option value="4">4 圈（多一次作画）</option>
-          <option value="5">5 圈（多一次猜词）</option>
-          <option value="6">6 圈（最长的链条）</option>
-        </select>
-        <span class="hint" id="chainRoundsHint">圈数 = 每条链传几次；3 圈就能看到一次完整的「画→猜」</span>
+        <label>链长</label>
+        <select id="chainLength"></select>
+        <span class="hint" id="chainLengthHint">每条链传几手；默认 = 人数（每条链传遍全场）</span>
       </div>
       <div class="form-row">
         <label>主题词库</label>
         <select id="chainTheme"></select>
         <button class="mini" id="btnThemeManage" title="新建 / 编辑自定义词库">管理…</button>
-        <span class="hint" id="chainThemeHint">选词时会优先给这个主题的词</span>
+        <span class="hint" id="chainThemeHint">写初始词时会优先给这个主题的词</span>
       </div>
       <div class="form-row">
         <label>作画时间</label>
@@ -1284,7 +1313,7 @@
           <option value="120">2 分钟</option>
           <option value="180">3 分钟</option>
         </select>
-        <span class="hint">每一步「照词作画」的时限（写词 / 猜词另算）</span>
+        <span class="hint">每一手「照词作画」的时限（写词 / 猜词另算）</span>
       </div>
       <p class="game-state" id="chainState">当前：自由绘画</p>
       <p class="hint" id="chainPlayers">需要 4 ~ 16 人</p>
@@ -1293,7 +1322,7 @@
       <button class="btn danger hidden" id="btnChainStop">结束游戏</button>
       <span class="spacer"></span>
       <button class="btn" id="btnChainCancel">关闭</button>
-      <button class="btn primary" id="btnChainStart">开始接龙</button>
+      <button class="btn primary" id="btnChainStart">进入大厅</button>
     </div>
   </div>
 </div>
@@ -1316,7 +1345,7 @@
   </div>
 </div>
 
-<!-- 接龙：回放 + 投票（一条链一张卡片） -->
+<!-- 接龙：回放 + 投票（播放器：逐条链、逐格播放） -->
 <div class="modal-mask hidden" id="replayMask">
   <div class="modal replay">
     <div class="modal-head">
@@ -1326,20 +1355,35 @@
         <b id="rpIndex">1 / 1</b>
         <button class="mini" id="rpNext" title="下一条链">›</button>
       </span>
-      <span class="pick-timer" id="rpTimer">90</span>
+      <span class="pick-timer" id="rpTimer">--</span>
     </div>
     <div class="modal-body">
       <div class="rp-chain-head" id="rpChainHead"></div>
-      <div class="rp-strip" id="rpStrip"></div>
+      <!-- 舞台：当前格的内容（词 / 画 / 猜词），播放器在这里逐格演 -->
+      <div class="rp-stage" id="rpStage"></div>
+      <!-- 播放控制 -->
+      <div class="rp-controls">
+        <button class="mini" id="rpPlay" title="自动播放 / 暂停">▶ 播放</button>
+        <button class="mini" id="rpPrevItem" title="上一步">⏮</button>
+        <button class="mini" id="rpNextItem" title="下一步">⏭</button>
+        <select id="rpSpeed" title="播放速度">
+          <option value="0.5">0.5×</option>
+          <option value="1" selected>1×</option>
+          <option value="2">2×</option>
+          <option value="4">4×</option>
+        </select>
+        <span class="rp-pills" id="rpPills"></span>
+      </div>
       <div class="rp-verdict" id="rpVerdict"></div>
-      <div class="rp-vote" id="rpVote">
-        <span class="hint">这条链首尾对得上吗？（说不通就投「对不上」）</span>
-        <button class="btn ghost" id="rpVoteBad">对不上</button>
+      <div class="rp-vote hidden" id="rpVote">
+        <span class="hint" id="rpVoteHint">这条链首尾对得上吗？（说不通就投「跑偏了」）</span>
+        <button class="btn ghost" id="rpVoteBad">跑偏了</button>
         <button class="btn primary" id="rpVoteOk">对得上</button>
+        <span class="rp-fav-state" id="rpFavState"></span>
       </div>
     </div>
     <div class="modal-foot">
-      <button class="btn hidden" id="btnRpNext">立刻结算</button>
+      <button class="btn hidden" id="btnRpNext">进入投票</button>
       <span class="spacer"></span>
       <button class="btn" id="btnRpExit">收起（不影响别人）</button>
     </div>
@@ -1361,6 +1405,137 @@
       <button class="btn" id="btnTrophyStop">结束游戏</button>
       <span class="spacer"></span>
       <button class="btn primary" id="btnTrophyAgain">再来一局</button>
+    </div>
+  </div>
+</div>
+
+<!-- 画皮：开局面板 -->
+<div class="modal-mask hidden" id="skinMask">
+  <div class="modal game">
+    <div class="modal-head">
+      <h3>画皮（用「画」来发言的狼人杀）</h3>
+      <button class="icon-btn" id="btnSkinClose">×</button>
+    </div>
+    <div class="modal-body">
+      <p class="game-rule">
+        所有人都有身份。每轮天亮后<b>所有人画同一个主题</b>，限时各自画完匿名摊开 ——
+        看画猜作者想表达什么，讨论，然后投票放逐。<b>伪装者</b>混在画师里，
+        靠画风的破绽和言语的破绽被抓。
+        好人赢 = 放逐所有伪装者；伪装者赢 = 人数不少于画师。
+      </p>
+      <div class="form-row">
+        <label>轮数</label>
+        <select id="skinRounds">
+          <option value="4">4 轮</option>
+          <option value="6" selected>6 轮（推荐）</option>
+          <option value="8">8 轮</option>
+          <option value="12">12 轮</option>
+        </select>
+        <span class="hint">打满轮数还没分出胜负 → 判伪装者获胜</span>
+      </div>
+      <div class="form-row">
+        <label>主题词库</label>
+        <select id="skinTheme"></select>
+        <button class="mini" id="btnSkinThemeManage" title="新建 / 编辑自定义词库">管理…</button>
+        <span class="hint">每轮都从这套词库里取一个主题（一轮一个，不重复）</span>
+      </div>
+      <div class="form-row">
+        <label>作画时间</label>
+        <select id="skinDrawTime">
+          <option value="">默认（60 秒）</option>
+          <option value="30">30 秒</option>
+          <option value="60">1 分钟</option>
+          <option value="90">1 分半</option>
+          <option value="120">2 分钟</option>
+        </select>
+        <span class="hint">每轮天亮后的作画时限</span>
+      </div>
+      <p class="game-state" id="skinState">当前：自由绘画</p>
+      <p class="hint" id="skinPlayers">需要 6 ~ 12 人</p>
+    </div>
+    <div class="modal-foot">
+      <button class="btn danger hidden" id="btnSkinStop">结束游戏</button>
+      <span class="spacer"></span>
+      <button class="btn" id="btnSkinCancel">关闭</button>
+      <button class="btn primary" id="btnSkinStart">开始画皮</button>
+    </div>
+  </div>
+</div>
+
+<!-- 画皮：作画阶段的「交稿」条（画布上沿，只有能画的人看得见） -->
+<div class="skin-drawbar hidden" id="skinDrawBar">
+  <span class="sdb-state" id="sdbState">主题：…</span>
+  <button class="btn primary" id="sdbSubmit">交稿</button>
+</div>
+
+<!-- 画皮：我的身份卡（左下角常驻，只有本人看得见） -->
+<div class="skin-role hidden" id="skinRole">
+  <div class="sr-head">
+    <span class="sr-badge" id="srBadge">平民画师</span>
+    <span class="spacer"></span>
+    <button class="mini" id="srCollapse" title="收起 / 展开">–</button>
+  </div>
+  <div class="sr-body" id="srBody"></div>
+</div>
+
+<!-- 画皮：作画进度 / 匿名画廊（右侧浮层） -->
+<div class="skin-gallery hidden" id="skinGallery">
+  <div class="sg-head">
+    <span id="sgTitle">今晚的画</span>
+    <span class="sg-count" id="sgCount"></span>
+  </div>
+  <div class="sg-grid" id="sgGrid"></div>
+  <div class="sg-vote hidden" id="sgVote">
+    <p class="hint" id="sgVoteHint">投票放逐你认为是伪装者的人</p>
+    <div class="sg-vote-list" id="sgVoteList"></div>
+    <button class="btn ghost" id="sgVoteSkip">弃票</button>
+  </div>
+</div>
+
+<!-- 画皮：夜里动作面板（预言家验人 / 狼人刀人 / 女巫用药） -->
+<div class="modal-mask hidden" id="skinNightMask">
+  <div class="modal pick">
+    <div class="modal-head">
+      <h3 id="snTitle">天黑请闭眼</h3>
+      <span class="pick-timer" id="snTimer">40</span>
+    </div>
+    <div class="modal-body">
+      <p class="hint" id="snHint">选一个人</p>
+      <div class="pick-list" id="snList"></div>
+      <p class="hint hidden" id="snResult"></p>
+    </div>
+  </div>
+</div>
+
+<!-- 画皮：天亮公告 + 昨晚裁定 -->
+<div class="modal-mask hidden" id="skinDawnMask">
+  <div class="modal over">
+    <div class="modal-head">
+      <h3 id="sdTitle">天亮了</h3>
+      <span class="pick-timer" id="sdTimer">8</span>
+    </div>
+    <div class="modal-body">
+      <p class="sd-text" id="sdText"></p>
+      <div class="sd-private hidden" id="sdPrivate"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 画皮：结算（身份公开） -->
+<div class="modal-mask hidden" id="skinOverMask">
+  <div class="modal over">
+    <div class="modal-head">
+      <h3>画皮结算</h3>
+      <button class="icon-btn" id="btnSkinOverClose">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="tr-summary" id="soSummary"></div>
+      <div class="rank-list" id="soList"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" id="btnSkinOverStop">结束游戏</button>
+      <span class="spacer"></span>
+      <button class="btn primary" id="btnSkinOverAgain">再来一局</button>
     </div>
   </div>
 </div>

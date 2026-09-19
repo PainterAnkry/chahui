@@ -554,12 +554,40 @@ async function main() {
   /* ---------------- 单字答案不该被判「接近」 ---------------- */
   console.log('\n[13] 单字答案不再误报「很接近了」（纯协议函数）');
   // 单字答案的编辑距离恒为 1，以前猜任何字都会回一句「很接近了」——既谎报又泄题。
-  // 词库里也不该再有单字词（words.js 启动时自检会拦）。
+  // 注意：**单字词现在是允许进词库的**（用户要求「可英文和一个字」），
+  // 拦住误报的是 isNearGuess 里的 `w.length < 2 → false`，不是词库自检；
+  // 不给「露字提示」则由 GAME.HINT_MIN_LEN = 3 兜着。下面这条只保证内置词库的数据没退化。
   ok('单字答案不再被判「接近」', P.isNearGuess('狗', '猫') === false,
     '狗 vs 猫 = ' + P.isNearGuess('狗', '猫'));
   ok('两字答案的正常近似仍然生效', P.isNearGuess('猫咪', '猫喵') === true,
     '猫咪 vs 猫喵 = ' + P.isNearGuess('猫咪', '猫喵'));
-  ok('词库里没有单字词', require('../server/src/words.js').WORDS.every(w => w.length >= 2));
+  ok('内置通用词库里没有单字词（长词更好画，是数据取向不是硬规则）',
+    require('../server/src/words.js').WORDS.every(w => w.length >= 2));
+
+  /* ---------------- 词条规则：放开英文与单字 ---------------- */
+  console.log('\n[14] 词条规则（非空 / 不带空白 / 1~12 字符 / 至少一个实义字符）');
+  {
+    const R = [
+      ['小猫', true, '中文'],
+      ['猫', true, '单个汉字'],
+      ['cat', true, '英文'],
+      ['Cat', true, '英文大写'],
+      ['hello', true, '长一点的英文'],
+      ['A1', true, '字母 + 数字'],
+      ['词_c1', true, '带下划线（测试与机器人都这么造词）'],
+      ['一只猫！', true, '带标点也收 —— 判词时 normGuess 会去掉'],
+      ['', false, '空'],
+      ['   ', false, '全空格'],
+      ['hello world', false, '带空格（猜起来没有边界）'],
+      ['!!!', false, '只有标点，没有实义字符'],
+      ['a'.repeat(12), true, '12 个字符（正好到上限）'],
+      ['a'.repeat(13), false, '13 个字符（超上限）']
+    ];
+    R.forEach(([w, want, why]) => {
+      ok('isPlayableWord(' + JSON.stringify(w.length > 16 ? w.slice(0, 8) + '…' : w) + ') = ' + want
+        + '  —— ' + why, P.isPlayableWord(w) === want, '实际 ' + P.isPlayableWord(w));
+    });
+  }
 
   /* ---------------- 「换一组」不许跳词库（#2 回归） ---------------- */
   console.log('\n[15] 换一组 · 候选词必须留在本局的主题词池里');

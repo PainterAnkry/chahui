@@ -36,6 +36,29 @@
  *   - 自定义词库支持用户在界面上自建（HTTP /api/themes，不是实时协议），
  *     增删改后服务端广播 S2C.GAME_THEMES 让所有人的下拉框立刻更新
  *   - 音效是纯前端的（WebAudio 合成，见 client/renderer/sfx.js），协议不变
+ *
+ * v8 变更（画皮模式 —— 用「画」来发言的狼人杀）：
+ *   - 新增 game mode：'skin'。首版只做核心闭环：发身份 / 夜里验人与刀人 /
+ *     天亮同题限时作画 / 匿名看画讨论 / 投票放逐 / 判胜负。
+ *   - **身份是私有信息**：只走 S2C.SKIN_ROLE 单发给本人，绝不进 GAME_STATE 广播流，
+ *     否则一泄全泄（这一条与经典模式的 word 同一个道理）。
+ *   - 夜里的裁定结果（验人查到什么阵营 / 昨晚谁被带走）同样只单发给当事者，
+ *     见 S2C.SKIN_NIGHT。
+ *   - 天亮的作画是**各自私密画**（复用接龙那套 privateDrawOn），交稿后匿名展示。
+ *   - 放逐投票走 C2S.SKIN_ACTION（不是 GAME_VOTE —— 后者是接龙「链首尾对不对得上」的票，
+ *     语义完全不同，混用会让前端分不清该弹哪个界面）。
+ *
+ * v9 变更（接龙重制 —— Draw & Guess 式的多链并行 Whisper）：
+ *   - N 个玩家 = N 条并行的链：每条链以链主写的初始词为起点，沿打乱的玩家环传递，
+ *     每个阶段全场并行（每人都恰好有一格）。链长可设定（3 ~ 人数，默认 = 人数）。
+ *   - 数据结构 Round → Chains[] → Steps[]，每格 { playerId, type: WORD|DRAWING|GUESS,
+ *     content, timestamp }；DRAWING 的 content = **笔迹数据**（不再是 PNG）。
+ *   - 完整链条只在服务端；进回放阶段由 S2C.GAME_REVEAL **一次性**广播
+ *     （旧版把整份回放塞进 GAME_STATE 每秒重发，公网房会被自己的快照卡死）。
+ *   - 流程：大厅（全员准备，C2S.GAME_READY）→ 写词 → 画/猜交替 → 回放 →
+ *     投票（每条链「对得上吗」+ 全场「最喜欢的一张画」）→ 结算 → 回大厅。
+ *   - C2S.GAME_ART 删除：作画的收格由服务端从房间笔迹表按作者摘取，
+ *     客户端只需要发一个「画好了」的信号（C2S.GAME_SUBMIT 无参）。
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
@@ -43,7 +66,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var PROTOCOL_VERSION = 7;
+  var PROTOCOL_VERSION = 9;
 
   // 客户端 -> 服务端
   var C2S = {
@@ -106,17 +129,35 @@
     PING: 'ping',                   // { at }
 
     // ---- 你画我猜（mode='classic'）----
-    GAME_START: 'game:start',       // { rounds?, mode?, theme? } 房主开局
+    // 三个玩法共用这一条开局消息，字段按 mode 取用：
+    //   classic { mode?, rounds?, theme? }
+    //   chain   { mode:'chain', chainLength?, theme?, drawSeconds? }
+    //   skin    { mode:'skin', rounds?, theme? }
+    // chainLength 由服务端 clampInt 夹到 [CHAIN_LENGTH_MIN, min(人数, CHAIN_LENGTH_MAX)]，
+    // 而且大厅→开局时还会跟着当时的实际人数再夹一次（有人中途进出也不会越界）。
+    GAME_START: 'game:start',       // { mode?, rounds?, theme?, chainLength?, drawSeconds? } 房主开局
     GAME_STOP: 'game:stop',         // 房主结束本局（回到自由绘画）
     GAME_PICK: 'game:pick',         // { index } 画手从候选词里挑一个
     GAME_REPICK: 'game:repick',     // 画手换一组候选词（每回合限次，见 GAME.REPICK_LIMIT）
 
-    // ---- 接龙（mode='chain'）----
-    // 一轮 = 每人各做一步（画或猜），链条逐步往前走。所有裁定都在服务端。
-    GAME_SUBMIT: 'game:submit',     // { text, index? } 写词（带 index 表示选了第几个候选）/ 猜词
-    GAME_ART: 'game:art',           // { png } 作画那一步的成品（客户端渲染好回传，服务端只存）
-    GAME_VOTE: 'game:vote',         // { chainId, agree } 这条链首尾对得上吗（票匿名）
-    GAME_NEXT: 'game:next'          // 房主提前推进：跳过没交的人 / 立刻结算投票
+    // ---- 接龙（mode='chain'，v9 重制：多链并行 Whisper）----
+    // 一局 = N 条并行链沿玩家环传递；所有裁定都在服务端。
+    GAME_READY: 'game:ready',       // { ready } 大厅准备 / 取消准备（全员就绪自动开局）
+    GAME_SUBMIT: 'game:submit',     // WORD/GUESS: { text, index? }；DRAWING: {} 交画信号
+                                    // （笔迹已在房间笔迹表里，服务端收格时按作者摘取）
+    GAME_VOTE: 'game:vote',         // { kind:'keep', chainId, agree } 这条链首尾对得上吗
+                                    // | { kind:'fav', chainId, step }  最喜欢的一张画（一人一票）
+    GAME_NEXT: 'game:next',         // 房主推进：大厅强制开局 / 跳过没交的人 / 回放→投票 / 结算
+
+    // ---- 画皮（mode='skin'）----
+    // 一个动作通道走完全部「玩家有主见」的操作：夜里验人 / 刀人，白天放逐投票。
+    // 做成一条消息而不是三条：它们互斥（同一时刻只会有一个 phase 有动作可做），
+    // 分三条只会多出两个「前端接了个永远不触发的 handler」的坑。
+    // kind: 'check'（预言家验人）| 'kill'（狼人刀人）| 'save'（女巫用解药）
+    //       | 'vote'（放逐投票）| 'shot'（猎人开枪带人）| 'next'（房主推进）
+    SKIN_ACTION: 'game:skin_action',
+    // 天亮交画（客户端把画布导成 PNG 回传，服务端只做哑存储）
+    SKIN_ART: 'game:skin_art'
   };
 
   // 服务端 -> 客户端
@@ -159,10 +200,27 @@
     GAME_GUESS: 'game:guess',           // { kind: 'wrong'|'near' } 这条猜测没中
 
     // ---- 接龙 ----
-    // 接龙的快照同样按收件人裁剪：你在猜的时候只能看到「上家那幅画」，
-    // 绝不能看到词；结束前也拿不到别人的图（否则把后面几步的答案都看完了）。
-    GAME_TASK: 'game:task',             // { task } 只发给我：这一步要我做什么（词 / 别人的画）
-    GAME_THEMES: 'game:themes'          // { themes } 主题菜单变了（有人建/改/删了自定义词库）
+    // 接龙的快照同样按收件人裁剪：你在猜的时候只能拿到「上家那幅画的笔迹」，
+    // 绝不能看到词；结束前也拿不到任何人的内容（否则把后面几步的答案都看完了）。
+    GAME_TASK: 'game:task',             // { task } 只发给我：这一步要我做什么（候选词 / 要画的词 / 上家的笔迹）
+    GAME_REVEAL: 'game:reveal',         // { version, chains } 回放数据：进回放阶段广播一次，迟到者由服务端补发
+    GAME_THEMES: 'game:themes',         // { themes } 主题菜单变了（有人建/改/删了自定义词库）
+
+    // ---- 画皮 ----
+    // 身份与夜里的裁定**只单发给本人**，不进 GAME_STATE（那是广播流的快照）。
+    // 反复重发是安全的：同一个人重连 / 中途 sync 都会再收到一份，前端幂等覆盖即可。
+    SKIN_ROLE: 'game:skin_role',        // { role, roleName, camp, campName, mates?, word } 我的身份
+    // 夜里的裁定（都只发给当事人）：
+    //   { kind:'check', target, targetName, camp, campName, isWolf }  预言家验人结果
+    //   { kind:'dead',  victim, victimName, saved }                   被刀的人自己知道
+    //   { kind:'witch', target, targetName, saveUsed, alreadySaved }  女巫看到今晚的刀口
+    // 女巫这条是必需的：她该不该用解药取决于「今晚刀的是谁」，
+    // 而那要等狼投完票才定得下来（见 GAME.SKIN_WITCH_GRACE_MS 那个决策窗口）。
+    SKIN_NIGHT: 'game:skin_night'
+    // 天亮交上来的画**不单独发一条消息** —— 它搭 GAME_STATE 的 gallery 字段走。
+    // 理由：画廊是「每个人都该看到的同一份东西」，本来就要跟着阶段切换一起更新；
+    // 单开一条消息只会多出一处「快照说该显示了，图还没到」的时序坑。
+    // 匿名性靠服务端裁剪保证（只发 id + png，绝不带 userId）。
   };
 
   var HISTORY_CHUNK_SIZE = 400;
@@ -197,27 +255,70 @@
     HINT_RATIO: 0.5,
     HINT_MIN_LEN: 3,
     REPICK_LIMIT: 1,         // 选词阶段画手可以「换一组」几次
+    // 词条长度上限（写词 / 词库自检共用）。1 个字也允许 —— 见 isPlayableWord 的注释
+    WORD_MAX_LEN: 12,
     // 作画时长可以按房自定义（开局设置），单位秒 —— 环境变量压的是全局默认，
     // 这个是「这一局」的覆盖值。限个范围，免得 3 秒一回合或者挂机三小时
     DRAW_SECONDS_DEFAULT: 80,   // = ROUND_MS / 1000
     DRAW_SECONDS_MIN: 30,
     DRAW_SECONDS_MAX: 300,
 
-    /* ---- 接龙模式（mode = 'chain'）----
-     * 链条：每人起一个词 → 下一人照画猜词 → 再下一人照词作画…… 绕圈推进。
-     * 一圈 = 每人都做过一步；走完 ROUNDS_PER_CHAIN 圈后进回放与投票。
+    /* ---- 接龙模式（mode = 'chain'）---- v9 重制：多链并行 Whisper
+     * N 玩家 = N 条并行链，沿打乱的玩家环传递：链主写初始词 → 下家照词作画 →
+     * 再下家看画猜词 → 再下家照猜出的词作画…… 每个阶段全场并行，每链恰好传遍全场。
      */
     CHAIN_MIN_PLAYERS: 4,    // 少于 4 人链条太短，玩不出「越传越离谱」的效果
     CHAIN_MAX_PLAYERS: 16,
-    CHAIN_ROUNDS: 3,         // 每条链走几圈。3 圈 = 词→画→词，正好是一轮完整的「起词 / 作画 / 猜词」，
-                             // 也是最能看出「越传越离谱」的最短长度（2 圈只有词→画，还没人猜过）
-    CHAIN_MAX_ROUNDS: 6,
-    CHAIN_PICK_CHOICES: 3,   // 开局给每个起词的人几个候选
-    CHAIN_WRITE_MS: 60000,   // 起词 / 猜词一步的时限（打字不用那么久）
-    CHAIN_DRAW_MS: 120000,   // 作画一步的时限（比经典模式宽松，因为只有一幅参考图）
-    CHAIN_REPLAY_MS: 90000,  // 回放 + 投票的总时限
+    CHAIN_LENGTH_MIN: 3,     // 每条链至少传 3 手（写词 → 作画 → 猜词）
+    CHAIN_LENGTH_MAX: 16,    // 上限（开局时再被人数夹一次：链长 ≤ 人数，避免传回自己）
+    CHAIN_PICK_CHOICES: 3,   // 写初始词时给几个候选
+    CHAIN_INIT_MS: 4000,     // 开场鼓点时长
+    CHAIN_WRITE_MS: 60000,   // 写初始词的时限
+    CHAIN_DRAW_MS: 90000,    // 作画一步的时限（房主可在开局设置里覆盖）
+    CHAIN_GUESS_MS: 60000,   // 猜词一步的时限
+    CHAIN_REVEAL_MS: 150000, // 回放阶段的时限（播放器可暂停 / 翻页，房主可提前推进）
+    CHAIN_VOTE_MS: 60000,    // 投票时限
+    CHAIN_SCORE_MS: 20000,   // 结算展示时长（自动回大厅，分数保留）
+    CHAIN_GRACE_MS: 1500,    // 收格宽限：倒计时到点后，客户端自动提交的包还在路上
     CHAIN_MAX_GUESS_LEN: 20, // 单步猜词长度上限
-    CHAIN_TROPHY_AGREE: 1    // 首尾「对得上」时，起词的人拿几个奖杯
+    CHAIN_TROPHY_AGREE: 1,   // 首尾「对得上」且投票不反对时，链主拿几分
+    CHAIN_FAV_POINTS: 3,     // 「最喜欢的一张画」独家最高票的作者拿几分
+    CHAIN_FAV_TIE_POINTS: 1, // 平票时每位作者拿几分
+
+    /* ---- 画皮模式（mode = 'skin'）----
+     * 一句话：**把「发言」换成「限时作画」的狼人杀**。
+     * 天亮后所有人画同一个主题 → 匿名摊开 → 大家看画猜作者想说什么 → 讨论 → 投票放逐。
+     *
+     * 首版只做核心闭环。以下两项**明确不做**（留了位置，不是在写占位代码）：
+     *   - 狼人夜里「搞脏」别人的画布（毛边 / 糊一块）：需要一套「按用户隔离的像素篡改」，
+     *     与现有「一条笔迹一个作者」的模型冲突，改动面太大
+     *   - 女巫的两瓶药：与预言家的验人信息叠加后夜里要判定的东西太多，
+     *     首版先把「验人 + 刀人」这条最主干的路走通
+     * 配比里仍然保留了女巫（拿到的是「只有一瓶解药」的简化版）与猎人（被放逐时能带人走），
+     * 因为这两个角色的实现成本很低，少了它们阵营会过于单薄。
+     */
+    SKIN_MIN_PLAYERS: 6,     // **开局**下限：少于 6 人凑不出「2 狼 + 有技能的若干人 + 平民」
+    // **局中继续**的下限 —— 故意比开局下限低得多。
+    // 这两个数必须分开：开局要 6 人才配得出阵营，但局中人数只会一路减少，
+    // 拿 6 去卡「还能不能继续」的话，6 人局踢掉一个人（甚至被刀一个）当场就散局，
+    // 永远走不到胜利结算。局中真正的终止条件是 checkWin()（两阵营没得打），
+    // 这里只兜一个「人少到连投票都没意义」的地板。详见 TRAPS.md「画皮」一节。
+    SKIN_MIN_ALIVE: 2,
+    SKIN_MAX_PLAYERS: 12,    // 超过 12 人房间里的聊天会糊成一片，狼也藏不住
+    SKIN_ROUNDS: 6,          // 打到第几轮天亮还没分胜负就按「僵局」判好人没完成画作
+    SKIN_MAX_ROUNDS: 12,
+    SKIN_NIGHT_MS: 40000,    // 夜里做事的时间（预言家验谁 / 狼人刀谁）
+    // 狼定完刀之后、天亮之前，专门留给**女巫**的决策窗口。
+    // 女巫该不该用解药取决于「今晚刀的是谁」，而那要等狼投完才知道 ——
+    // 所以狼收齐后不能立刻天亮，得给她这几秒。她不动就是不用药。
+    SKIN_WITCH_GRACE_MS: 10000,
+    SKIN_DAWN_MS: 8000,      // 天亮公告：谁走了 / 我验到了什么
+    SKIN_DRAW_MS: 60000,     // 作画时限 —— 用户点名的「限时 60 秒」
+    SKIN_TALK_MS: 90000,     // 看画 + 讨论
+    SKIN_VOTE_MS: 45000,     // 放逐投票
+    SKIN_VOTE_END_MS: 8000,  // 投票结算展示
+    SKIN_ART_MAX: 900000,    // 单幅作品 PNG 的 base64 长度上限（~675KB，画布导出的典型量级）
+    SKIN_TALK_TEXT_MAX: 120  // 讨论阶段单条发言长度（比普通聊天宽松，要能讲清一句分析）
   };
 
   // 用户配色（新成员按顺序取色）
@@ -495,8 +596,41 @@
     return editDistance(g, w) <= GAME.NEAR_DISTANCE;
   }
 
+  /* ------------------------------------------------------------ 词条规则
+   *
+   * 什么样的词算「能玩」——**词库自检、写词校验、主题管理前端全都认这一份**。
+   *
+   * 以前只收「2 字以上纯中文」。出发点是对的（单字答案猜手无从下手，
+   * 而且任何字与它的编辑距离都是 1），但太紧了：英文词、一个字的梗全被挡在外面。
+   * 现在放开到「非空、不含空白、1 ~ WORD_MAX_LEN 个字符、至少含一个实义字符」：
+   *
+   *   · **一个字**的答案照样能出，只是不参与「露字提示」——
+   *     露一个就等于把答案整个念出来了。这一点已经由 GAME.HINT_MIN_LEN = 3 兜住
+   *     （1 个字和 2 个字都不给提示），不用在词库这一层再拦。
+   *   · 「很接近了」的误报也已经由 isNearGuess 里的 `w.length < 2 → false` 挡掉了。
+   *   · **英文 / 数字随便用**，大小写不敏感（normGuess 会 toLowerCase，
+   *     出题写 Cat、猜 cat 也能中）。
+   *   · **只拦空白**：带空格的词猜起来没有边界（"hello world" 算几个字？），
+   *     字数提示也没法显示。标点不拦 —— 判词时 normGuess 本来就会把它们去掉，
+   *     拦了只会让「一只猫！」这种手滑输不进去。但也要求至少有一个实义字符，
+   *     免得「!!!」这种进来占一个候选位。
+   */
+  var WORD_RE = /^[^\s]+$/;
+  var WORD_MEANING_RE = /[A-Za-z0-9\u4e00-\u9fa5]/;
+
+  function isPlayableWord(s, maxLen) {
+    if (typeof s !== 'string') return false;
+    var t = s.trim();
+    if (!t) return false;
+    if (t.length > (maxLen || GAME.WORD_MAX_LEN)) return false;
+    if (!WORD_RE.test(t)) return false;
+    return WORD_MEANING_RE.test(t);
+  }
+
   return {
     PROTOCOL_VERSION: PROTOCOL_VERSION,
+    isPlayableWord: isPlayableWord,
+    WORD_RE: WORD_RE,
     C2S: C2S,
     S2C: S2C,
     DEFAULTS: DEFAULTS,

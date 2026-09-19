@@ -43,8 +43,20 @@ const HELPERS = () => {
     let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 30) n++;
     return n;
   };
+  // ⚠ 「墨量」用 **alpha 总和**，不能用「alpha > 30 的像素个数」。
+  //   蒙版是非破坏的**半透明**遮罩：黑笔按笔迹覆盖率把蒙版 alpha 抹到 64~104
+  //   （不是抹成 0），合成后的像素 alpha 仍有 60+，稳稳越过 30 这条线 ——
+  //   于是「数像素」这个指标对部分遮挡完全瞎，看起来像「蒙版没生效」。
+  //   求和能如实反映「画面整体变淡了多少」，对全遮 / 半遮都灵敏。
+  const inkSumOf = (canvas) => {
+    const d = canvas.getContext('2d').getImageData(0, 0, E.width, E.height).data;
+    let s = 0; for (let i = 3; i < d.length; i += 4) s += d[i];
+    return s;
+  };
   // 合成后的画面（导出用的那份，等于用户眼里的成品）
   window.__ink = () => inkOf(E.renderDocument({ transparentBackground: true }).canvas);
+  // 合成画面的**墨量**（alpha 总和）—— 判断「变淡了 / 回来了」看这个
+  window.__inkSum = () => inkSumOf(E.renderDocument({ transparentBackground: true }).canvas);
   // 图层**自身**像素 —— 不含蒙版、不含浓度混合。蒙版绝不该动它
   window.__layerInk = (id) => {
     const c = E.renderLayerRaw(id);
@@ -185,50 +197,57 @@ const setColor = (p, c) => p.evaluate(v => { window.ChaApp.state.color = v; }, c
     JSON.stringify(await metaOf(B, lid)));
   await sleep(400);
   const ink1 = await A.evaluate(() => window.__ink());
+  const sum0 = await A.evaluate(() => window.__inkSum());
   ok('刚加上的蒙版是全白 —— 画面一点没变', Math.abs(ink1 - ink0) <= 2, ink0 + ' → ' + ink1);
+  ok('刚加上的蒙版是全白 —— 墨量也一点没变', (await A.evaluate(() => window.__inkSum())) === sum0, '墨量 ' + sum0);
   ok('蒙版里没有被遮住的像素', (await A.evaluate(i => window.__maskHoles(i), lid)) <= 2,
     'holes=' + (await A.evaluate(i => window.__maskHoles(i), lid)));
   ok('自动进入了蒙版编辑模式', (await A.evaluate(() => window.ChaApp.state.maskEdit)) === lid);
 
   /* ================= 3) 黑笔涂抹：遮住，但图层像素不能动 ================= */
   console.log('\n=== 3) 黑笔涂掉左半边 ===');
+  // ⚠ 蒙版笔必须**压在底稿墨迹上**：底稿在 y=300 画的，所以这里也走 y=300。
+  //   以前这里走 y=280，40px 的笔只擦到墨迹上沿一点点 —— 「合成图该少多少」
+  //   本来就只有个位数像素，却拿 500 当阈值，永远不可能通过（假红）。
   await setColor(A, '#000000');
-  await stroke(A, 150, 280, 300, 280);
+  await stroke(A, 150, 300, 300, 300);
+  const s0 = await A.evaluate(() => window.__inkSum());
   const ink2 = await A.evaluate(() => window.__ink());
   const lay2 = await A.evaluate(() => window.__layerInk(window.__active()));
-  ok('合成画面变小了（被遮住）', ink2 < ink0 - 500, ink0 + ' → ' + ink2);
+  ok('合成画面变淡了（被遮住）', s0 < sum0 * 0.9, '墨量 ' + sum0 + ' → ' + s0);
   ok('★ 图层自身像素**一个都没少**（蒙版是非破坏的）', lay2 === lay0, 'layerInk ' + lay0 + ' → ' + lay2);
   ok('蒙版上确实出现了被遮住的区域', (await A.evaluate(i => window.__maskHoles(i), lid)) > 500,
     'holes=' + (await A.evaluate(i => window.__maskHoles(i), lid)));
 
   /* ================= 4) 跨端一致 ================= */
   console.log('\n=== 4) 另一端看到的一样吗 ===');
-  await waitFor(B, k => Math.abs(window.__ink() - k) < 400, ink2, 6000);
-  const inkB = await B.evaluate(() => window.__ink());
-  ok('乙的合成结果和甲一致', Math.abs(inkB - ink2) < 400, '甲=' + ink2 + ' 乙=' + inkB);
+  await sleep(400);   // 等乙那边把这笔同步过来
+  const sumB = await B.evaluate(() => window.__inkSum());
+  ok('乙的合成结果和甲一致（墨量）', Math.abs(sumB - s0) / Math.max(1, s0) < 0.03, '甲墨量=' + s0 + ' 乙墨量=' + sumB);
   const layB1 = await B.evaluate(i => window.__layerInk(i), lid);
   ok('乙那边图层自身像素也没变（跟乙自己的基线比）', Math.abs(layB1 - layB0) <= 2,
     '乙 layerInk ' + layB0 + ' → ' + layB1);
   ok('乙那边蒙版确实生效了', (await B.evaluate(i => window.__maskHoles(i), lid)) > 500,
     'holes=' + (await B.evaluate(i => window.__maskHoles(i), lid)));
+  const inkB = await A.evaluate(() => window.__ink());   // 后面几步的对照用
 
   /* ================= 5) 白笔涂回来 ================= */
   console.log('\n=== 5) 白笔把刚才那块涂回来 ===');
   await setColor(A, '#ffffff');
-  await stroke(A, 150, 280, 300, 280);
-  const ink3 = await A.evaluate(() => window.__ink());
-  ok('显示范围回来了', ink3 > ink2 + 500, ink2 + ' → ' + ink3);
+  await stroke(A, 150, 300, 300, 300);
+  const s1 = await A.evaluate(() => window.__inkSum());
+  ok('显示范围回来了（墨量回到遮之前）', s1 > s0 + sum0 * 0.05, '墨量 ' + s0 + ' → ' + s1);
   ok('图层像素依旧没动', (await A.evaluate(() => window.__layerInk(window.__active()))) === lay0);
 
   /* ================= 6) 撤销：蒙版按历史重建 ================= */
   console.log('\n=== 6) 撤销刚才那一笔（白笔）===');
   await setColor(A, '#000000');
-  await stroke(A, 150, 280, 300, 280);      // 再画一笔黑的，然后撤销它
-  const ink4 = await A.evaluate(() => window.__ink());
+  await stroke(A, 150, 300, 300, 300);      // 再画一笔黑的，然后撤销它
+  const s2 = await A.evaluate(() => window.__inkSum());
   await A.keyboard.press('Control+z');
   await sleep(700);
-  const ink5 = await A.evaluate(() => window.__ink());
-  ok('撤销之后那一笔的遮挡消失了', ink5 > ink4 + 300, ink4 + ' → ' + ink5);
+  const s3 = await A.evaluate(() => window.__inkSum());
+  ok('撤销之后那一笔的遮挡消失了', s3 > s2 + sum0 * 0.03, '墨量 ' + s2 + ' → ' + s3);
   ok('撤销没有波及图层像素', (await A.evaluate(() => window.__layerInk(window.__active()))) === lay0);
 
   /* ================= 7) 关掉 / 删掉蒙版 ================= */

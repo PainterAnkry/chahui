@@ -225,6 +225,207 @@ function check(name, ok, extra) {
   });
   check('.sut：SQLite 但没图 → 明确说「配置型」', /配置型/.test(sutCfg), sutCfg);
 
+  /* ---------- 5a-2) 空白缩略图不能当笔尖（「画出来是半个圆」的真凶） ---------- */
+  //
+  //  真实案例：「方头纯度上色.sut」。CSP 的素材 tar 里带 thumbnail/thumbnail.png，
+  //  那只是素材库列表里的预览图 —— 实测那张是 90000 像素里 89700 个纯白，
+  //  剩 300 个浅灰角标（极差 65，所以「看极差」的判定会被骗过去）。
+  //  老代码把它当笔尖收下 → 导入一支 300px 的大白方块 → 画出来一团白、
+  //  落在画布上就是不相连的「半个圆」。现在必须明确拒绝。
+  console.log('\n=== .sut（空白预览缩略图不许当笔尖） ===');
+  const blankThumb = await page.evaluate(async () => {
+    // 造一张「白底 + 极淡角标」的 300×300 PNG，模拟 CSP 的预览缩略图
+    const c = document.createElement('canvas');
+    c.width = c.height = 300;
+    const cx = c.getContext('2d');
+    cx.fillStyle = 'rgb(255,255,255)'; cx.fillRect(0, 0, 300, 300);
+    cx.fillStyle = 'rgb(190,190,190)'; cx.fillRect(0, 0, 6, 50);   // 极淡的角标
+    const png = Uint8Array.from(atob(c.toDataURL('image/png').split(',')[1]), ch => ch.charCodeAt(0));
+
+    // 包成 tar 成员，路径写 thumbnail/thumbnail.png（跟真实文件一样）
+    const tar = new Uint8Array(512 + Math.ceil(png.length / 512) * 512);
+    const nm = 'thumbnail/thumbnail.png';
+    for (let i = 0; i < nm.length; i++) tar[i] = nm.charCodeAt(i);
+    const sizeStr = png.length.toString(8).padStart(11, '0');
+    for (let i = 0; i < 11; i++) tar[124 + i] = sizeStr.charCodeAt(i);
+    'ustar'.split('').forEach((ch, i) => { tar[257 + i] = ch.charCodeAt(0); });
+    tar.set(png, 512);
+
+    const head = new Uint8Array(64);
+    const magic = 'SQLite format 3\0';
+    for (let i = 0; i < magic.length; i++) head[i] = magic.charCodeAt(i);
+    const all = new Uint8Array(head.length + tar.length);
+    all.set(head, 0); all.set(tar, head.length);
+    try { window.ChaBrushImport.parse('blank.sut', all); return 'no-error'; }
+    catch (e) { return e.message; }
+  });
+  check('.sut：只有空白缩略图时明确报错（不再偷偷交付白块笔）',
+    /私有容器|空白/.test(blankThumb), blankThumb);
+
+  /* ---------- 5a-3) 尺寸 / 间距必须读库里真值，不能硬编码 ---------- */
+  //
+  //  老代码 spacing 写死 0.1、diameter 用「图片像素尺寸」顶，
+  //  于是一张 1000px 的素材图直接变成 1000px 的笔刷。
+  //  真值在 Node.NodeVariantID → Variant.VariantID 那一行的 BrushSize / BrushInterval。
+  //  这里造一个真 SQLite 库（含 Node / Variant / MaterialFile 三张表）来验。
+  console.log('\n=== .sut（BrushSize / BrushInterval 读真值） ===');
+  const sutParams = await page.evaluate(async () => {
+    /* --- 造图：一张有形状的 32×32 笔尖（不能是空白，否则会被新的空白判定拒掉） --- */
+    const c = document.createElement('canvas');
+    c.width = c.height = 32;
+    const cx = c.getContext('2d');
+    cx.fillStyle = '#000'; cx.fillRect(4, 4, 24, 24);
+    const png = Uint8Array.from(atob(c.toDataURL('image/png').split(',')[1]), ch => ch.charCodeAt(0));
+
+    /* --- 把 PNG 包进 tar，再当 MaterialFile.FileData --- */
+    const tar = new Uint8Array(512 + Math.ceil(png.length / 512) * 512);
+    const nm = 'data/material_0.png';
+    for (let i = 0; i < nm.length; i++) tar[i] = nm.charCodeAt(i);
+    const sizeStr = png.length.toString(8).padStart(11, '0');
+    for (let i = 0; i < 11; i++) tar[124 + i] = sizeStr.charCodeAt(i);
+    'ustar'.split('').forEach((ch, i) => { tar[257 + i] = ch.charCodeAt(0); });
+    tar.set(png, 512);
+
+    /* --- 写一个最小 SQLite 库：页 1 放 sqlite_master，其余表各一页 ---
+     *
+     *  ⚠ 这个夹具踩过三个坑，改的时候别再犯：
+     *    ① 页 1 的 b-tree 头从**第 100 字节**开始（前 100 是文件头），其余页从 0 开始。
+     *    ② 必须先拷页、**最后**写 100 字节文件头 —— 反过来写的话页 1 前 100 字节的零会把文件头抹掉。
+     *    ③ 记录头的长度字段 = 它自己 + 所有 serial type 的 **varint 宽度**之和，
+     *       有 ≥128 的 type（文本/BLOB 必然有）时就不能写「1 + type 个数」。
+     *    另外 cell 指针数组要按 rowid 顺序排，而 cell 数据是从页尾往前放的，两者不要边写边 push。
+     */
+    const PAGE = 4096;
+    const mk = () => new Uint8Array(PAGE);
+    const pages = { 1: mk() };            // 页 1 = sqlite_master
+    // 表规划：root 2=Node, 3=Variant, 4=MaterialFile
+
+    /** SQLite 变长整数：每字节低 7 位是数据，最高位表示「后面还有」 */
+    function varintBytes(v) {
+      const out = [];
+      if (v === 0) return new Uint8Array([0]);
+      while (v > 0) { out.unshift(v & 0x7f); v = Math.floor(v / 128); }
+      for (let i = 0; i < out.length - 1; i++) out[i] |= 0x80;
+      return new Uint8Array(out);
+    }
+
+    // 记录编码（serial types）：简化用「text / int / blob」三种够用
+    function encRecord(vals) {
+      // vals: [{t:'int',v}, {t:'text',v}, {t:'blob',v}]
+      const ser = [], data = [];
+      for (const it of vals) {
+        if (it === null) { ser.push(0); continue; }
+        if (it.t === 'int') {
+          if (it.v === 0) { ser.push(8); continue; }
+          if (it.v === 1) { ser.push(9); continue; }
+          if (it.v >= -128 && it.v <= 127) { ser.push(1); data.push(it.v & 255); continue; }
+          if (it.v >= -32768 && it.v <= 32767) { ser.push(2); data.push(it.v >> 8 & 255, it.v & 255); continue; }
+          ser.push(4); data.push(it.v >>> 24 & 255, it.v >> 16 & 255, it.v >> 8 & 255, it.v & 255);
+        } else if (it.t === 'text') {
+          const b = [];
+          for (let i = 0; i < it.v.length; i++) b.push(it.v.charCodeAt(i) & 255);
+          ser.push(13 + b.length * 2);
+          for (const x of b) data.push(x);
+        } else {
+          ser.push(12 + it.v.length * 2);
+          for (const x of it.v) data.push(x);
+        }
+      }
+      // 每个 serial type 按 varint 展开
+      const typeBytes = [];
+      for (const s of ser) {
+        if (s < 128) typeBytes.push([s]);
+        else typeBytes.push([0x80 | ((s >> 7) & 0x7f), s & 0x7f]);
+      }
+      let typeLen = 0;
+      for (const tb of typeBytes) typeLen += tb.length;
+      let hdrLen = 1 + typeLen;
+      if (hdrLen >= 128) hdrLen += 1;                       // 长度字段自己变宽
+      const hdr = [];
+      if (hdrLen < 128) hdr.push(hdrLen);
+      else hdr.push(0x80 | ((hdrLen >> 7) & 0x7f), hdrLen & 0x7f);
+      for (const tb of typeBytes) hdr.push.apply(hdr, tb);
+      return new Uint8Array([].concat(hdr, data));
+    }
+
+    function writeLeaf(pgNo, records) {
+      const p = pages[pgNo] || (pages[pgNo] = mk());
+      const base = pgNo === 1 ? 100 : 0;                    // ← 坑 ①
+      p[base] = 13;
+      p[base + 3] = records.length >> 8 & 255;
+      p[base + 4] = records.length & 255;
+      const offs = [];
+      let cursor = PAGE;
+      for (const rec of records) {
+        // ⚠ cell 的 payload 长度和 rowid 都是 **varint**，≥128 时要占 2 字节。
+        //   曾经写成 `cell[0] = len & 0x7f` —— 长 DDL（Variant / MaterialFile 那种）
+        //   一超过 127 字节长度就被截断，整行读成乱码，表现是「库里没有这张表」。
+        const lenV = varintBytes(rec.body.length);
+        const ridV = varintBytes(rec.rowid);
+        const cell = new Uint8Array(lenV.length + ridV.length + rec.body.length);
+        cell.set(lenV, 0);
+        cell.set(ridV, lenV.length);
+        cell.set(rec.body, lenV.length + ridV.length);
+        cursor -= cell.length;
+        p.set(cell, cursor);
+        offs.push(cursor);
+      }
+      p[base + 5] = cursor >> 8 & 255; p[base + 6] = cursor & 255;
+      for (let i = 0; i < offs.length; i++) {               // ← 指针按 rowid 顺序
+        p[base + 8 + i * 2] = offs[i] >> 8 & 255;
+        p[base + 8 + i * 2 + 1] = offs[i] & 255;
+      }
+    }
+
+    // sqlite_master 记录: type, name, tbl_name, rootpage, sql
+    const masterRecs = [
+      { rowid: 1, body: encRecord([{ t: 'text', v: 'table' }, { t: 'text', v: 'Node' }, { t: 'text', v: 'Node' }, { t: 'int', v: 2 }, { t: 'text', v: 'CREATE TABLE Node(NodeName TEXT, NodeVariantID INTEGER)' }]) },
+      { rowid: 2, body: encRecord([{ t: 'text', v: 'table' }, { t: 'text', v: 'Variant' }, { t: 'text', v: 'Variant' }, { t: 'int', v: 3 }, { t: 'text', v: 'CREATE TABLE Variant(VariantID INTEGER, BrushSize INTEGER, BrushInterval INTEGER, BrushHardness INTEGER)' }]) },
+      { rowid: 3, body: encRecord([{ t: 'text', v: 'table' }, { t: 'text', v: 'MaterialFile' }, { t: 'text', v: 'MaterialFile' }, { t: 'int', v: 4 }, { t: 'text', v: 'CREATE TABLE MaterialFile(FileData BLOB)' }]) }
+    ];
+    writeLeaf(1, masterRecs);
+
+    writeLeaf(2, [{ rowid: 1, body: encRecord([{ t: 'text', v: 'TestCSP' }, { t: 'int', v: 7001 }]) }]);
+    writeLeaf(3, [{ rowid: 1, body: encRecord([{ t: 'int', v: 7001 }, { t: 'int', v: 20 }, { t: 'int', v: 40 }, { t: 'int', v: 100 }]) }]);
+    writeLeaf(4, [{ rowid: 1, body: encRecord([{ t: 'blob', v: tar }]) }]);
+
+    // 拼成文件
+    // ⚠ 坑 ②：先拷各页，**最后**写 100 字节文件头 —— 顺序反了页 1 的零会把文件头抹掉
+    const maxPage = Math.max.apply(null, Object.keys(pages).map(Number));
+    const out = new Uint8Array(maxPage * PAGE);
+    for (const k of Object.keys(pages)) out.set(pages[k], (Number(k) - 1) * PAGE);
+    out.set(new TextEncoder().encode('SQLite format 3\0'), 0);
+    out[16] = PAGE >> 8 & 255; out[17] = PAGE & 255;
+    out[18] = 1; out[19] = 1;                  // 文件格式版本
+    out[20] = 0;                               // reserved
+    out[21] = 64; out[22] = 32; out[23] = 32;  // payload 分数
+    out[28] = maxPage >>> 24 & 255; out[29] = maxPage >> 16 & 255;
+    out[30] = maxPage >> 8 & 255; out[31] = maxPage & 255;
+
+    const r = window.ChaBrushImport.parse('params.sut', out.buffer);
+    const b = r.brushes[0] || {};
+    // 顺带断言底层读取没坏：库里三张表都要读得出来
+    // （夹具手搓 SQLite 最容易在这里翻车，所以直接把结果带出来给 check 用）
+    const rows = {};
+    ['Node', 'Variant', 'MaterialFile'].forEach(t => {
+      try { rows[t] = window.ChaBrushImport.sqliteTableRows(out, t).length; }
+      catch (e) { rows[t] = e.message; }
+    });
+    return { n: r.brushes.length, name: b.name, dia: b.diameter, spacing: b.spacing,
+      hard: b.hardness, rows: rows };
+  });
+  console.log('  解析:', JSON.stringify(sutParams));
+  check('.sut：三张表都读得出来（Node / Variant / MaterialFile）',
+    sutParams.rows.Node === 1 && sutParams.rows.Variant === 1 && sutParams.rows.MaterialFile === 1,
+    JSON.stringify(sutParams.rows));
+  check('.sut：读到了真笔名（Node.NodeName）', sutParams.name === 'TestCSP', String(sutParams.name));
+  check('.sut：diameter 用 Variant.BrushSize（20），不是图片尺寸（32）',
+    sutParams.dia === 20, String(sutParams.dia));
+  check('.sut：spacing 用 Variant.BrushInterval（40 → 0.4）',
+    Math.abs(sutParams.spacing - 0.4) < 1e-6, String(sutParams.spacing));
+  check('.sut：hardness 用 Variant.BrushHardness（100 → 1）',
+    Math.abs(sutParams.hard - 1) < 1e-6, String(sutParams.hard));
+
   /* ---------- 5b) .sut：SQLite 跨溢出页（真实 CSP 里 blob 都是被切碎存的） ---------- */
   console.log('\n=== .sut（SQLite 跨溢出页：blob 被切碎也要按链拼回来） ===');
   const sqliteSut = await page.evaluate(() => {

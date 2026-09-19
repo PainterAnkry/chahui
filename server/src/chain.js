@@ -1,20 +1,24 @@
 'use strict';
 
 /**
- * 接龙模式（chain / 绘画版「拷贝不走样」）—— 服务端权威状态机。
+ * 接龙模式（chain / Whisper）—— 服务端权威状态机。【v2 重制版】
  *
- * 玩法一句话：**每人起一个词 → 传给下一个人照画 → 再传给下一个人照画猜词……**
- * 绕圈走几轮之后，把整条链从头到尾摊开看 —— 一个「爱丽丝」是怎么变成「怪物卡车」的。
+ * 玩法一句话：**N 个玩家 = N 条并行的链**。每条链以「链主写的初始词」为起点，
+ * 沿打乱过的玩家环一圈一圈传下去 —— 拿到词的人画，拿到画的人猜，
+ * 拿到猜出的词再画…… 全部传完后一起看回放：一个词是怎么一步步跑偏的。
  *
- * 与经典模式（你画我猜）的关键差异：
- *   1. **阶段不是「回合」而是「步」**。一轮（round）= 每人都做了恰好一步。
- *      所以 phase 描述的是「这一步让大家做什么」：写词 / 作画 / 猜词 / 回放 / 投票。
- *   2. **产物在链条上流转**。每个人做完自己的那一步，产物就交给下一个人。
- *      传递规则固定：写下的词 → 下家作图 → 再下家看不懂就猜个词 → 再下家照猜出来的词作图……
- *      所以「词的作者」和「画的人」交替出现，「看图猜词」和「看词作画」交替进行。
- *   3. **每一步的输入只能给当事者**。看图猜词的人只能看到上一幅画，绝看不到词；
- *      看词作画的人只能看到词本身，绝看不到再往前的画。
- *      这是这游戏唯一的死穴 —— 泄一次，后面几步全废。见 taskFor()。
+ * 与 v1（旧 chain.js）的关键差异 —— 这一版是按 Draw & Guess 的 Whisper 玩法重写的：
+ *   1. **链长 = 环上人数**（可设定 3 ~ 人数）。每条链恰好传遍全场，
+ *      每个阶段每个人都恰好有自己的一格要做 —— 不再有「掉线顶替把格子派重复」的错乱。
+ *   2. **产物是笔迹数据，不是 PNG**。DRAWING 格的 content = 作者的笔迹数组
+ *      （points / color / size / tool……），猜词的人拿到笔迹在本地渲染，
+ *      回放时也能按真实笔序重新演一遍。
+ *   3. **信息隔离是死穴**：每人只拿自己这一格的输入 ——
+ *      WORD 格拿候选词、DRAWING 格拿要画的词、GUESS 格拿上家的笔迹。
+ *      完整链条只在服务端；进 REVEAL 阶段才一次性公开（走独立的 GAME_REVEAL 消息，
+ *      绝不搭 GAME_STATE 的广播快照 —— 那条每秒都在重发，塞几 MB 笔迹进去会卡死公网房）。
+ *   4. **流程**：大厅（全员准备）→ 开场 → 写词 → 画/猜交替 → 回放 → 投票 → 结算 → 回大厅。
+ *      投票有两票：每条链「首尾是否还对得上」+ 全场「最喜欢的一张画」。
  *
  * 时间与计分全部在服务端裁定：客户端只拿 deadline 做倒计时显示。
  */
@@ -23,31 +27,37 @@ const P = require('./protocol');
 const WORDS = require('./words');
 const THEMES = require('./themes');
 
-/** 接龙的阶段（与经典模式共用 'off' / 'lobby' / 'over' 三个终态） */
+/** 接龙的阶段 */
 const CHAIN_PHASE = {
   OFF: 'off',
-  LOBBY: 'lobby',
-  WRITE: 'chain_write',       // 第一步：每人给自己的链写一个主题词
-  DRAW: 'chain_draw',         // 这一步：手上是词，把它画出来
-  GUESS: 'chain_guess',       // 这一步：手上是画，猜它是什么
-  REPLAY: 'chain_replay',     // 回放：整条链一条条摊开
-  VOTE: 'chain_vote',         // 投票：这条链首尾对得上吗
-  OVER: 'over'
+  LOBBY: 'lobby',           // 大厅：玩家准备，全员就绪自动开局
+  INIT: 'chain_init',       // 开场鼓点：链已排好，画布已清空，马上写词
+  WRITE: 'chain_write',     // 每人给自己的链写初始词（type=WORD）
+  DRAW: 'chain_draw',       // 并行作画（type=DRAWING）：拿到词，画出来
+  GUESS: 'chain_guess',     // 并行猜词（type=GUESS）：拿到笔迹，猜词
+  REVEAL: 'chain_reveal',   // 回放：完整链条公开，播放器逐条看
+  VOTE: 'chain_vote',       // 投票：每条链「对得上吗」+ 全场「最喜欢的画」
+  SCORE: 'chain_score'      // 结算：得分与榜单 → 回大厅（分数保留，可再来一局）
 };
 
 const CHAIN_PHASE_LABEL = {
   off: '自由绘画',
-  lobby: '等待开始',
-  chain_write: '写词中',
+  lobby: '接龙大厅',
+  chain_init: '马上开始',
+  chain_write: '写初始词',
   chain_draw: '作画中',
   chain_guess: '猜词中',
-  chain_replay: '回放中',
+  chain_reveal: '回放',
   chain_vote: '投票中',
-  over: '本局结束'
+  chain_score: '结算'
 };
 
-/** 每一步的类型：写词 / 画 / 猜 */
-const STEP = { WRITE: 'write', DRAW: 'draw', GUESS: 'guess' };
+/** 每一格的类型（与协议约定一致）：初始词 / 画 / 猜词 */
+const STEP = { WORD: 'WORD', DRAWING: 'DRAWING', GUESS: 'GUESS' };
+
+/** 单幅画笔迹的硬上限（防恶意刷爆内存 / 回放包；正常绘画远够不到） */
+const MAX_STROKES_PER_ART = 400;
+const MAX_POINTS_PER_ART = 80000;
 
 function clampInt(v, d, a, b) {
   const n = Math.floor(Number(v));
@@ -61,9 +71,15 @@ function envMs(key, dflt) {
 }
 
 const CFG = {
+  INIT_MS: envMs('GAME_CHAIN_INIT_MS', P.GAME.CHAIN_INIT_MS),
   WRITE_MS: envMs('GAME_CHAIN_WRITE_MS', P.GAME.CHAIN_WRITE_MS),
   DRAW_MS: envMs('GAME_CHAIN_DRAW_MS', P.GAME.CHAIN_DRAW_MS),
-  REPLAY_MS: envMs('GAME_CHAIN_REPLAY_MS', P.GAME.CHAIN_REPLAY_MS)
+  GUESS_MS: envMs('GAME_CHAIN_GUESS_MS', P.GAME.CHAIN_GUESS_MS),
+  REVEAL_MS: envMs('GAME_CHAIN_REVEAL_MS', P.GAME.CHAIN_REVEAL_MS),
+  VOTE_MS: envMs('GAME_CHAIN_VOTE_MS', P.GAME.CHAIN_VOTE_MS),
+  SCORE_MS: envMs('GAME_CHAIN_SCORE_MS', P.GAME.CHAIN_SCORE_MS),
+  // 收格宽限：客户端倒计时到点后自动提交的包还在路上，多等这一小会儿再收格
+  GRACE_MS: envMs('GAME_CHAIN_GRACE_MS', P.GAME.CHAIN_GRACE_MS)
 };
 
 function shuffle(arr) {
@@ -88,23 +104,18 @@ function pickWords(pool, n, used) {
   return out;
 }
 
-/**
- * 一个「格子」= 链条上的一个位置：链 idx、第几步。
- * 每个人在每一圈都恰好占一个格子，所以 总格子数 = 链数 × 圈数。
- */
-
 class ChainGame {
   /**
    * @param {Room} room
-   * @param {{sync:Function, systemChat:Function, resetCanvas:Function}} api
-   *   - sync()         把（按人裁剪过的）状态推给全场
-   *   - systemChat()   系统播报
-   *   - resetCanvas()  清空画布（只由 DRAW 步的首尾调用）
+   * @param {{sync:Function, systemChat:Function, resetCanvas:Function, revealAll:Function}} api
+   *   - sync()        把（按人裁剪过的）快照推给全场
+   *   - systemChat()  系统播报
+   *   - resetCanvas() 清空画布（INIT 与作画阶段的首尾调用）
+   *   - revealAll()   回放数据的一次性广播（GAME_REVEAL）
    *
-   * ⚠ 作画的产物**不由服务端抓**：客户端把画布导成 PNG，走 C2S.GAME_ART 回传，
-   *   服务端只做哑存储（submitArt）。服务端从头到尾不碰像素 —— 这与图层像素同一套分工。
-   *   早期版本这里还写着 captureStep / applyStepArt 两个回调，但实现里从没用过
-   *   （画面靠 GAME_TASK 里的 image 字段下发，不落进画布），已删除以免误导。
+   * ⚠ 作画的产物**不由服务端抓像素**：客户端照常在画布上落笔（笔迹走 STROKE_* 照旧
+   *   进房间笔迹表，私密作画期间不广播），收格时服务端从笔迹表里把**作者的**笔迹
+   *   原样摘出来存进链条 —— 像素渲染仍在客户端，服务端只存数据。
    */
   constructor(room, api) {
     this.room = room;
@@ -112,32 +123,40 @@ class ChainGame {
     this.mode = 'chain';
     this.phase = CHAIN_PHASE.OFF;
 
-    this.rounds = P.GAME.CHAIN_ROUNDS;   // 每条链走几圈
-    this.round = 0;                      // 当前第几圈（1 起）
+    this.roundNo = 0;          // 第几局（大厅→开局 算一局）
     this.theme = 'default';
-    this.drawMs = 0;                     // 「照词作画」一步的时长覆盖值（0 = 用全局默认）
+    this.drawMs = 0;           // 作画一步的时长覆盖值（0 = 用全局默认）
+    this.chainLength = 0;      // 每条链传几手（含初始词格）；开局时定死
 
-    this.chains = [];        // [{ id, ownerId, ownerName, cells: [cell...] }]
-    this.order = [];         // 传递顺序（开局时打乱一次，整局固定）
-    this.names = new Map();  // userId -> name（人走了榜单也要显示）
-    this.scores = new Map(); // userId -> 奖杯数
-    // 中途进房的人：**本局只能旁边看**。链和传递顺序在开局那一刻就冻结了，
-    // 中途插人会改变「谁接谁的」，把已经走完的格子和还没走的全部弄拧，
-    // 所以这里不做「下一圈转正」，只承诺「房主开下一局时入局」（start 里清空）。
+    this.ring = [];            // 传递顺序（开局时打乱一次，一局内固定）
+    this.chains = [];          // [{ chainId, ownerPlayerId, ownerName, currentStep, steps[], status }]
+    this.names = new Map();    // userId -> name（人走了榜单也要显示）
+    this.scores = new Map();   // userId -> 分数（跨局累计）
+    // 局中进房的人：本局只能旁边看（链在开局那一刻冻结了）。
+    // 下一局开局时清空 —— 那时他们就是正式玩家。
     this.spectators = new Set();
-    this.usedWords = [];
+
+    // 大厅（LOBBY 阶段）
+    this.ready = new Set();    // 已准备的玩家
+
+    // 当前这一格的临时状态
+    this.stepIndex = 0;        // 当前是每条链的第几格（0 起）
+    this.submitted = new Set();// 本格已提交的人
+    this.pendingText = new Map(); // userId -> 已提交的词（WORD/GUESS）
+    this.stepChoices = new Map(); // userId -> 候选词（WORD 格）
+
+    // 投票（VOTE 阶段）
+    this.votesKeep = new Map();// userId -> Map(chainId -> bool) 每条链「对得上吗」
+    this.votesFav = new Map(); // userId -> { chainId, step } 最喜欢的一张画
+
+    // 回放（REVEAL 起）
+    this.revealData = null;    // 完整链条（内容公开）
+    this.revealVersion = 0;    // 每次重建 +1；index.js 靠它判断谁还没收到回放包
+    this.taskVersion = 0;      // 每次换格 +1；GAME_TASK 只在换格后重发（笔迹包不小）
+    this.voteResult = null;    // 结算快照（SCORE 阶段下发）
 
     this.deadline = 0;
     this.startedAt = 0;
-
-    // 本步的临时状态
-    this.assign = new Map(); // userId -> cell（这一步该谁做什么）
-    this.submitted = new Set(); // 本步已提交的人
-    this.replay = null;      // 回放数据（逐链逐一格）
-    this.votes = new Map();  // userId -> Set(chainId)（投了「对不上」的）
-    this.voted = new Map();  // userId -> Set(chainId)（投过的，不分方向）
-    this.replayIndex = 0;    // 回放到第几条链
-    this.voteResult = null;  // 投票结算快照
   }
 
   /* ------------------------------------------------------------ 查询 */
@@ -153,197 +172,23 @@ class ChainGame {
 
   isDrawingPhase() { return this.phase === CHAIN_PHASE.DRAW; }
 
-  /* ------------------------------------------------------------ 快照 */
-
-  /**
-   * 按收件人裁剪的状态。**这是答案泄漏的唯一防线**。
-   *
-   * 裁掉的：
-   *   - 每一步的产物（词 / 画）在轮到它之前、以及回放开始之前，一律不下发
-   *   - 回放数据只在 REPLAY / VOTE / OVER 阶段下发
-   * 保留的：
-   *   - 链条的「进度骨架」（第几条链走到了第几步、谁做过）——这只是进度条，不含内容
-   */
-  snapshotFor(userId) {
-    const me = userId || '';
-    const cell = this.assign.get(me) || null;
-    const revealed = this.phase === CHAIN_PHASE.REPLAY ||
-      this.phase === CHAIN_PHASE.VOTE ||
-      this.phase === CHAIN_PHASE.OVER;
-
-    return {
-      mode: 'chain',
-      phase: this.phase,
-      phaseLabel: CHAIN_PHASE_LABEL[this.phase] || this.phase,
-      theme: this.theme,
-      themeName: (THEMES.THEMES[this.theme] && THEMES.THEMES[this.theme].name) || '',
-      rounds: this.rounds,
-      round: this.round,
-      deadline: this.deadline,
-      serverNow: Date.now(),
-
-      // 我这一步要做什么（只有当事者拿得到实体）
-      // 'write' / 'draw' / 'guess' / '' （这一步没我的事 → 我是观众）
-      myStep: cell ? cell.step : '',
-      myDone: this.submitted.has(me),
-      // 观众视角：这一步一共有几件事在并行，做完了几件
-      stepTotal: this.assign.size,
-      stepDone: this.submitted.size,
-
-      // 进度骨架：每条链走到第几步了。**不含内容**，只是「第 2 条链第 3 步」
-      progress: this.chains.map(c => ({
-        id: c.id,
-        ownerId: c.ownerId,
-        ownerName: c.ownerName,
-        step: c.cells.length,          // 已填了几格
-        total: this.rounds
-      })),
-      chainCount: this.chains.length,
-
-      locked: this.lockedFor(me),
-      canStart: this.phase === CHAIN_PHASE.LOBBY || this.phase === CHAIN_PHASE.OVER,
-      isOwner: !!(this.room.ownerId && this.room.ownerId === me),
-
-      // 奖杯榜
-      scores: this.scoreList(),
-
-      // 回放与投票
-      replay: revealed ? this.replayFor(me) : null,
-      replayCount: revealed && this.replay ? this.replay.length : 0,
-      replayIndex: this.replayIndex,
-      myVotes: revealed ? this.votesFor(me) : [],
-      myVoted: revealed ? this.votedChainsFor(me) : [],
-      voteResult: this.phase === CHAIN_PHASE.OVER ? this.voteResult : null,
-
-      // 中途进房、本局只能看：前端据此显示提示条
-      spectating: this.spectators.has(me),
-      minPlayers: P.GAME.CHAIN_MIN_PLAYERS,
-      maxPlayers: P.GAME.CHAIN_MAX_PLAYERS,
-      maxRounds: P.GAME.CHAIN_MAX_ROUNDS,
-      themes: THEMES.themeList(),
-      stepMs: this.stepMs()
-    };
-  }
-
-  /** 这一步的时长（按步骤类型给不同的值） */
-  stepMs() {
-    if (this.phase === CHAIN_PHASE.WRITE) return CFG.WRITE_MS;
-    if (this.phase === CHAIN_PHASE.DRAW) return this.drawMs || CFG.DRAW_MS;
-    if (this.phase === CHAIN_PHASE.GUESS) return CFG.WRITE_MS;
-    if (this.phase === CHAIN_PHASE.REPLAY || this.phase === CHAIN_PHASE.VOTE) return CFG.REPLAY_MS;
-    return 0;
-  }
-
-  /**
-   * 我这一步的「题面」——只能给自己看的那一份。
-   *
-   *   write : 候选词（挑一个，或自己写）
-   *   draw  : 要画的词（来自上家的猜词结果，或链条起点）
-   *   guess : 上家那幅画（PNG）
-   * 返回 null 表示这一步没我的事（观众）。
-   */
-  taskFor(userId) {
-    if (!this.isPlaying()) return null;
-    const cell = this.assign.get(userId);
-    if (!cell) return null;
-    const chain = this.chains[cell.chainIdx];
-    if (!chain) return null;
-
-    if (cell.step === STEP.WRITE) {
-      return { step: 'write', choices: cell.choices || [], deadline: this.deadline };
-    }
-    if (cell.step === STEP.DRAW) {
-      return { step: 'draw', word: cell.word || '', deadline: this.deadline };
-    }
-    if (cell.step === STEP.GUESS) {
-      return {
-        step: 'guess',
-        // ⚠️ 只给「上一格的那幅画」。绝不带词、绝不带链上更早的任何东西。
-        image: cell.prevImage || '',
-        wordLen: 0,
-        deadline: this.deadline
-      };
-    }
-    return null;
-  }
-
-  /**
-   * 回放数据（按收件人裁剪）。
-   *
-   * 回放开始后内容本来就全公开了（这是玩法的一部分 —— 大家要一起看「怎么跑偏的」），
-   * 所以这里不再逐格裁剪。唯一的例外是**投票阶段前不显示最后一格**？
-   * 不 —— 投票要判「首尾是否一致」，起词的人和最后那个词必须都看得见，否则没法投。
-   * 因此回放一并全给，只把「谁投了哪一票」藏起来（那才是会影响别人的东西）。
-   */
-  replayFor(userId) {
-    if (!this.replay) return null;
-    return this.replay.map(chain => ({
-      id: chain.id,
-      ownerId: chain.ownerId,
-      ownerName: chain.ownerName,
-      firstWord: chain.firstWord,
-      lastWord: chain.lastWord,
-      matched: chain.matched,          // 首尾是否一致（服务端算的初判，投票可以推翻）
-      cells: chain.cells.map(c => ({
-        step: c.step,
-        userId: c.userId,
-        name: this.names.get(c.userId) || '某人',
-        word: c.word || '',
-        image: c.image || ''
-      }))
-    }));
-  }
-
-  /** 我投了「对不上」的那些链（票是匿名的，只回给本人） */
-  votesFor(userId) {
-    const s = this.votes.get(userId);
-    return s ? Array.from(s) : [];
-  }
-
-  /**
-   * 我「已经表过态」的链（不管投的是对得上还是对不上）。
-   *
-   * 为什么要单独一份：票的意思里「对得上」是默认值 —— vote() 里 agree=true 只是
-   * 把这个人从「对不上」名单里摘掉，并不留痕。所以光看 votesFor() 分不出
-   * 「我投了对得上」和「我还没投」，前端就没法把按钮标成「已投」。
-   * 这份名单不回给任何人别人 —— 它只说明「谁投过了」，不含投的方向。
-   */
-  votedChainsFor(userId) {
-    const s = this.voted.get(userId);
-    return s ? Array.from(s) : [];
-  }
-
-  /** 排行榜：接龙里分数就是奖杯数 */
-  scoreList() {
-    const rows = [];
-    for (const [userId, score] of this.scores) {
-      rows.push({
-        userId,
-        name: this.names.get(userId) || '某人',
-        online: !!this.memberOf(userId),
-        score
-      });
-    }
-    rows.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
-    rows.forEach((r, i) => { r.rank = i + 1; });
-    return rows;
-  }
-
-  /**
-   * 只读观众不进池子 —— 跟 game.js 的 playerList 一个道理：
-   * 他画不了，轮到他那一步整条链就卡住了。
-   */
-  /** 这一局已经开了、还没完吗（大厅 / 整局结束之外都算） */
+  /** 一局已经开了、还没回到大厅吗 */
   midGame() {
-    return this.phase !== CHAIN_PHASE.LOBBY && this.phase !== CHAIN_PHASE.OVER &&
-      this.phase !== CHAIN_PHASE.OFF;
+    return this.phase !== CHAIN_PHASE.LOBBY && this.phase !== CHAIN_PHASE.OFF &&
+      this.phase !== CHAIN_PHASE.SCORE;
   }
 
+  /** 第 k 格（0 起）的类型：0=WORD，奇数=DRAWING，偶数(>0)=GUESS */
+  stepTypeOf(k) {
+    if (k === 0) return STEP.WORD;
+    return (k % 2 === 1) ? STEP.DRAWING : STEP.GUESS;
+  }
+
+  /** 玩家名单：非只读、非看客的在场成员（大厅准备与开局人数都以它为准） */
   playerList() {
     const out = [];
     for (const m of this.room.members.values()) {
       if (m.readonly) continue;
-      // 本局的看客也不算玩家（投票法定人数、最少人数都由这个池子决定）
       if (this.spectators.has(m.userId)) continue;
       out.push({ userId: m.userId, name: m.name, color: m.color });
       this.names.set(m.userId, m.name);
@@ -356,538 +201,701 @@ class ChainGame {
     return null;
   }
 
+  isOwner(userId) { return !!(this.room.ownerId && this.room.ownerId === userId); }
+
   /**
-   * 该用户此刻能不能改画布。
-   *   写词 / 猜词：谁都别画（画布上放着的是「上家的画」当参考，画上去会污染）
-   *   作画：只有这一步轮到他画的人能动笔（而且画布是空的，从零开始画）
-   *   回放 / 投票：**画布是空的**（每步作画结束都清了），让人乱画会污染回放背景 → 锁死
-   *   大厅 / 结束：自由
+   * 第 k 格该谁做：链主往后数 k 个人（ring 是打乱过的玩家环）。
+   * 链 ring[i] 的第 k 格由 ring[(i+k) % n] 做 —— 所以「我」在第 k 格负责的链
+   * 就是 ring[(myIdx - k) mod n] 那个人开的链。人数=链长时这是个一一映射：
+   * 同一阶段里每个人都恰好有一格，绝不会被派两次（v1 的覆盖错乱在这里根治）。
    */
+  cellOf(userId, k) {
+    const n = this.ring.length;
+    if (!n) return null;
+    const myIdx = this.ring.indexOf(userId);
+    if (myIdx < 0) return null;              // 看客 / 不在本局的环里
+    const ownerIdx = ((myIdx - k) % n + n) % n;
+    const chain = this.chains.find(c => c.ownerPlayerId === this.ring[ownerIdx]);
+    return chain || null;
+  }
+
+  /** 该用户此刻能不能改画布 */
   lockedFor(userId) {
-    if (this.phase === CHAIN_PHASE.WRITE || this.phase === CHAIN_PHASE.GUESS) return true;
-    if (this.phase === CHAIN_PHASE.REPLAY || this.phase === CHAIN_PHASE.VOTE) return true;
+    if (this.phase === CHAIN_PHASE.OFF || this.phase === CHAIN_PHASE.LOBBY) return false;
     if (this.phase === CHAIN_PHASE.DRAW) {
-      const cell = this.assign.get(userId);
-      return !(cell && cell.step === STEP.DRAW);
+      // 作画：环里的人都能动笔（每人都有一格）；交过了就锁笔；看客锁笔
+      const chain = this.cellOf(userId, this.stepIndex);
+      if (!chain) return true;
+      return this.submitted.has(userId);
     }
-    return false;
+    return true;   // INIT / WRITE / GUESS / REVEAL / VOTE / SCORE 一律不动笔
   }
 
   blocksWrite(userId) { return this.lockedFor(userId); }
 
   /**
    * 这个人此刻手里攥着「别人还没看到的答案」吗？
-   *
-   * 经典模式里答案只有一个，泄漏它的人只有画手和已猜对的人；
-   * 接龙是**并行多条链**，所以判定完全不同：
-   *   - 正在看图猜词的人：他猜出来的词就是下一位要画的东西 → 说出来等于剧透
-   *   - 正在照词作画的人：他手上那个词是上家的成果 → 说出来后面全废
-   * 「写词」的人不用管 —— 那是他自己的链的起点，下一个人本来就会拿到。
-   * 回放 / 投票阶段一切都公开了，不再拦。
+   * 本格还没交的人一律闭嘴（写词的知道词、画画和猜的知道题面）；
+   * 交了之后内容已经只传给下家，恢复说话。
    */
   chatLeaks(userId) {
     if (!this.isPlaying()) return false;
-    const cell = this.assign.get(userId);
-    if (!cell) return false;
-    return cell.step === STEP.GUESS || cell.step === STEP.DRAW;
+    if (!this.cellOf(userId, this.stepIndex)) return false;
+    return !this.submitted.has(userId);
   }
 
-  /** 榜单上标一下「这一步在做什么」 */
-  stepOf(userId) {
-    const c = this.assign.get(userId);
-    return c ? c.step : '';
+  /** 这一步的时长（客户端只拿来显示倒计时） */
+  stepMs() {
+    if (this.phase === CHAIN_PHASE.INIT) return CFG.INIT_MS;
+    if (this.phase === CHAIN_PHASE.WRITE) return CFG.WRITE_MS;
+    if (this.phase === CHAIN_PHASE.DRAW) return this.drawMs || CFG.DRAW_MS;
+    if (this.phase === CHAIN_PHASE.GUESS) return CFG.GUESS_MS;
+    if (this.phase === CHAIN_PHASE.REVEAL) return CFG.REVEAL_MS;
+    if (this.phase === CHAIN_PHASE.VOTE) return CFG.VOTE_MS;
+    if (this.phase === CHAIN_PHASE.SCORE) return CFG.SCORE_MS;
+    return 0;
   }
 
-  /* ------------------------------------------------------------ 开局 */
+  /* ------------------------------------------------------------ 快照 */
 
+  /**
+   * 按收件人裁剪的状态。**这是答案泄漏的唯一防线**。
+   *
+   * 这里**绝不携带任何链条内容**（词 / 笔迹）—— 内容只走两条私有通道：
+   *   - GAME_TASK：当前格当事者的题面（换格时才重发）
+   *   - GAME_REVEAL：回放数据（进 REVEAL 阶段才广播，此后由 index.js 补发迟到者）
+   */
+  snapshotFor(userId) {
+    const me = userId || '';
+    const cell = this.isPlaying() ? this.cellOf(me, this.stepIndex) : null;
+    const myFav = this.votesFav.get(me) || null;
+    const keepMap = this.votesKeep.get(me);
+    const myKeep = {};
+    if (keepMap) for (const [cid, agree] of keepMap) myKeep[cid] = !!agree;
+
+    return {
+      mode: 'chain',
+      phase: this.phase,
+      phaseLabel: CHAIN_PHASE_LABEL[this.phase] || this.phase,
+      theme: this.theme,
+      themeName: (THEMES.THEMES[this.theme] && THEMES.THEMES[this.theme].name) || '',
+      serverNow: Date.now(),
+      deadline: this.deadline,
+      stepMs: this.stepMs(),
+
+      round: this.roundNo,
+      chainLength: this.chainLength,
+      // 进度骨架：第几格、这条格一共几件事、交了几件 —— 不含任何内容
+      stepIndex: this.isPlaying() || this.phase === CHAIN_PHASE.INIT ? this.stepIndex : 0,
+      stepTotal: this.chains.length,
+      stepDone: this.submitted.size,
+
+      // 大厅 / 榜单（ready 只有大厅阶段有意义，其余阶段一律 false）
+      players: this.playerStates(),
+      myReady: this.ready.has(me),
+      readyCount: this.ready.size,
+
+      // 我这一格：'' = 这一步没我的事（看客）；WORD / DRAWING / GUESS
+      myStep: cell ? cellStepType(this, this.stepIndex) : '',
+      myDone: this.submitted.has(me),
+      hasReveal: !!this.revealData,
+
+      locked: this.lockedFor(me),
+      canStart: this.phase === CHAIN_PHASE.LOBBY || this.phase === CHAIN_PHASE.SCORE,
+      isOwner: this.isOwner(me),
+
+      scores: this.scoreList(),
+
+      // 我的投票（票是匿名的，只回给本人）
+      myKeep: myKeep,
+      myFav: myFav,
+      favVotedCount: this.votesFav.size,
+
+      // 结算只在 SCORE 阶段下发
+      voteResult: this.phase === CHAIN_PHASE.SCORE ? this.voteResult : null,
+
+      // 中途进房、本局只能看：前端据此显示提示条
+      spectating: this.spectators.has(me),
+      minPlayers: P.GAME.CHAIN_MIN_PLAYERS,
+      maxPlayers: P.GAME.CHAIN_MAX_PLAYERS,
+      maxLength: P.GAME.CHAIN_LENGTH_MAX,
+      minLength: P.GAME.CHAIN_LENGTH_MIN,
+      themes: THEMES.themeList()
+    };
+  }
+
+  /** 大厅与榜单共用的玩家状态表（不含任何链条内容） */
+  playerStates() {
+    const rows = [];
+    const seen = new Set();
+    for (const m of this.room.members.values()) {
+      if (seen.has(m.userId)) continue;
+      seen.add(m.userId);
+      rows.push({
+        userId: m.userId,
+        name: m.name,
+        color: m.color,
+        online: true,
+        spectating: this.spectators.has(m.userId),
+        ready: this.ready.has(m.userId),
+        score: this.scores.get(m.userId) || 0
+      });
+      this.names.set(m.userId, m.name);
+    }
+    // 已离场但还有分数的人：榜单上保留（灰名）
+    for (const [uid, score] of this.scores) {
+      if (seen.has(uid)) continue;
+      rows.push({ userId: uid, name: this.names.get(uid) || '某人', color: '#9aa0a8', online: false, spectating: false, ready: false, score });
+    }
+    rows.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+    return rows;
+  }
+
+  /** 排行榜 */
+  scoreList() {
+    const rows = this.playerStates().map(r => ({
+      userId: r.userId, name: r.name, online: r.online, score: r.score
+    }));
+    rows.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+    rows.forEach((r, i) => { r.rank = i + 1; });
+    return rows;
+  }
+
+  /**
+   * 我这一格的「题面」——只能给自己看的那一份（GAME_TASK 私发）。
+   *
+   *   WORD    : 候选词（挑一个，或自己写）
+   *   DRAWING : 要画的词（链主的初始词，或上家猜出来的词）
+   *   GUESS   : 上家的笔迹（数组，客户端本地渲染成图）
+   * 返回 null 表示这一步没我的事（看客）。
+   */
+  taskFor(userId) {
+    if (!this.isPlaying()) return null;
+    const chain = this.cellOf(userId, this.stepIndex);
+    if (!chain) return null;
+    const k = this.stepIndex;
+    const type = this.stepTypeOf(k);
+
+    if (type === STEP.WORD) {
+      return { step: STEP.WORD, chainId: chain.chainId, choices: this.stepChoices.get(userId) || [], deadline: this.deadline };
+    }
+    if (type === STEP.DRAWING) {
+      // ⚠️ 只给「上一格的词」。绝不带更早的任何东西。
+      const prev = chain.steps[k - 1];
+      return { step: STEP.DRAWING, chainId: chain.chainId, word: (prev && prev.content) || '', deadline: this.deadline };
+    }
+    // GUESS：只给「上一格的笔迹」。绝不带词、绝不带链上更早的任何东西。
+    const prev = chain.steps[k - 1];
+    const strokes = (prev && Array.isArray(prev.content)) ? prev.content : [];
+    return { step: STEP.GUESS, chainId: chain.chainId, strokes, deadline: this.deadline };
+  }
+
+  /* ------------------------------------------------------------ 大厅 */
+
+  /**
+   * 房主开局（GAME_START）：**不直接开打**，先进大厅等人准备。
+   * 已在大厅 / 结算阶段时允许改设置；局中（写词/画/猜/回放/投票）不允许。
+   */
   start(opts) {
+    if (this.isPlaying() || this.phase === CHAIN_PHASE.INIT ||
+      this.phase === CHAIN_PHASE.REVEAL || this.phase === CHAIN_PHASE.VOTE) {
+      return { ok: false, code: 'game_busy', message: '这一局还在进行中，先点「结束游戏」' };
+    }
     const players = this.playerList();
     const min = P.GAME.CHAIN_MIN_PLAYERS;
+    const max = P.GAME.CHAIN_MAX_PLAYERS;
     if (players.length < min) {
       return { ok: false, code: 'too_few', message: '接龙至少要 ' + min + ' 个人才能玩（链条太短没意思）' };
     }
-    const max = P.GAME.CHAIN_MAX_PLAYERS;
     if (players.length > max) {
       return { ok: false, code: 'too_many', message: '接龙最多 ' + max + ' 个人' };
     }
 
-    this.spectators.clear();          // 开新局：房间里的人都算玩家
-    this.rounds = clampInt(opts && opts.rounds, P.GAME.CHAIN_ROUNDS, 1, P.GAME.CHAIN_MAX_ROUNDS);
     this.theme = (opts && THEMES.hasTheme(opts.theme)) ? opts.theme : 'default';
     const dsec = Math.floor(Number(opts && opts.drawSeconds));
     this.drawMs = (isFinite(dsec) && dsec > 0)
       ? clampInt(dsec, P.GAME.DRAW_SECONDS_DEFAULT, P.GAME.DRAW_SECONDS_MIN, P.GAME.DRAW_SECONDS_MAX) * 1000
       : 0;
-    this.round = 0;
-    this.usedWords = [];
+    // 链长：默认 = 人数（每条链恰好传遍全场）；可设定，夹在 [3, 人数] 里
+    const wantLen = Math.floor(Number(opts && opts.chainLength)) || players.length;
+    this.chainLength = clampInt(wantLen, players.length,
+      P.GAME.CHAIN_LENGTH_MIN, Math.min(players.length, P.GAME.CHAIN_LENGTH_MAX));
+
+    this.chains = [];
+    this.ring = [];
+    this.stepIndex = 0;
+    this.submitted = new Set();
+    this.pendingText = new Map();
+    this.stepChoices = new Map();
+    this.votesKeep = new Map();
+    this.votesFav = new Map();
+    this.revealData = null;
     this.voteResult = null;
-    this.replay = null;
-    this.replayIndex = 0;
-    this.votes = new Map();
-    this.voted = new Map();
-    this.startedAt = Date.now();
-    this.scores = new Map();
-    players.forEach(p => this.scores.set(p.userId, 0));
-
-    // 每人起一条链。链的「主人」就是起词的人 —— 最后发奖杯也是发给他。
-    this.chains = players.map((p, i) => ({
-      id: 'c' + (i + 1),
-      ownerId: p.userId,
-      ownerName: p.name,
-      cells: []
-    }));
-    // 传递顺序：开局时打乱一次，整局固定。
-    // 它是「谁接下家」的唯一依据 —— 每次洗会让人搞不清自己该收到谁的画。
-    this.order = shuffle(players.map(p => p.userId));
-
+    this.ready.clear();
     this.phase = CHAIN_PHASE.LOBBY;
-    // 开局后要立刻把状态推出去：前端靠 phase 从 'off' 变成 'lobby' 才知道「接龙开了」。
-    // 不 sync 的话房主点完开局全场毫无反应。
+    this.deadline = 0;
+    players.forEach(p => { if (!this.scores.has(p.userId)) this.scores.set(p.userId, 0); });
     this.api.sync();
-    this.api.systemChat('接龙开始了！共 ' + this.chains.length + ' 条链，每条走 ' + this.rounds + ' 圈'
-      + '（主题：' + ((THEMES.THEMES[this.theme] && THEMES.THEMES[this.theme].name) || '通用') + '）');
-    this.beginRound();
+    this.api.systemChat('接龙大厅已就绪（' + players.length + ' 人）—— 大家点「准备」，全员就绪自动开始');
     return { ok: true };
   }
 
-  /**
-   * 开始第一圈的第 0 步：每个人都给自己的链写一个词。
-   * 接龙的「起点」并不是公平的 —— 链条走下来每个人都会画、也会猜，
-   * 所以不必像经典模式那样轮流当画手。
-   */
-  beginRound() {
-    const online = this.playerList();
+  /** 大厅里 toggle 准备。全员就绪 → 自动开局 */
+  toggleReady(userId, want) {
+    if (this.phase !== CHAIN_PHASE.LOBBY) return { ok: false, message: '现在不在大厅' };
+    if (this.spectators.has(userId)) return { ok: false, message: '你本局是观战，下一局再一起玩' };
+    if (want === false) this.ready.delete(userId);
+    else this.ready.add(userId);
+    this.api.sync();
+    this.checkAllReady();
+    return { ok: true };
+  }
+
+  checkAllReady() {
+    if (this.phase !== CHAIN_PHASE.LOBBY) return false;
+    const players = this.playerList();
+    if (players.length < P.GAME.CHAIN_MIN_PLAYERS) return false;
+    const allReady = players.every(p => this.ready.has(p.userId));
+    if (allReady) { this.beginGame(); return true; }
+    return false;
+  }
+
+  /** 正式开局：冻结名单与环序 → 开场鼓点（INIT）→ 第 0 格（写词） */
+  beginGame() {
+    const players = this.playerList();
     const min = P.GAME.CHAIN_MIN_PLAYERS;
-    if (online.length < min) return this.toLobby('人数不足 ' + min + ' 人，接龙已暂停');
+    if (players.length < min) {
+      this.api.systemChat('人数不足 ' + min + ' 人，开不了局 —— 继续等待');
+      return false;
+    }
+    // 链长跟着这一局的实际人数再夹一次（有人刚离开时设置值可能越界）
+    this.chainLength = clampInt(this.chainLength || players.length, players.length,
+      P.GAME.CHAIN_LENGTH_MIN, Math.min(players.length, P.GAME.CHAIN_LENGTH_MAX));
 
-    this.round += 1;
+    this.spectators.clear();          // 开新局：房间里的人都算玩家
+    this.roundNo += 1;
+    this.ring = shuffle(players.map(p => p.userId));
+    players.forEach(p => this.names.set(p.userId, p.name));
+    players.forEach(p => { if (!this.scores.has(p.userId)) this.scores.set(p.userId, 0); });
+
+    // 每人一条链。链的「主人」就是写初始词的人。
+    this.chains = players.map((p, i) => ({
+      chainId: 'c' + (i + 1),
+      ownerPlayerId: p.userId,
+      ownerName: p.name,
+      currentStep: 0,
+      steps: [],
+      status: 'active'
+    }));
+
+    this.revealData = null;
+    this.voteResult = null;
+    this.votesKeep = new Map();
+    this.votesFav = new Map();
+    this.startedAt = Date.now();
+    this.stepIndex = 0;
     this.submitted = new Set();
-    this.assign = new Map();
+    this.pendingText = new Map();
+    this.stepChoices = new Map();
 
-    // 这一圈的安排：每条链把「该做的第 k 格」派出去，走的是 composeStep() 里
-    // 「自己起词 → 下一个人接着做」的固定传递规则。
-    const onlineIds = online.map(p => p.userId);
-    for (const c of this.chains) {
-      const idx = this.chains.indexOf(c);
-      const step = this.composeStep(c);
-      if (!step) continue;
-      let who = step.userId;
-      // 掉线补偿：轮到的那个人已经不在线（或者这一圈已经接了别的活），
-      // 就顺着传递顺序往后找第一个「在线 + 这一圈还没安排」的人顶上。
-      // 不补的话这一步压根没人做，全场干等到时限走完（60 ~ 120 秒）才跳过。
-      if (onlineIds.indexOf(who) < 0 || this.assign.has(who)) {
-        const standIn = this.pickStandIn(c, step.userId, onlineIds);
-        if (standIn) who = standIn;
+    this.phase = CHAIN_PHASE.INIT;
+    this.deadline = Date.now() + CFG.INIT_MS;
+    this.api.resetCanvas();           // 游戏画布：从干净的一张开始
+    this.api.sync();
+    this.api.systemChat('第 ' + this.roundNo + ' 局开始！共 ' + this.chains.length + ' 条链，'
+      + '每条传 ' + this.chainLength + ' 手 · 主题：'
+      + ((THEMES.THEMES[this.theme] && THEMES.THEMES[this.theme].name) || '通用'));
+    return true;
+  }
+
+  /* ------------------------------------------------------------ 格与阶段推进 */
+
+  /** 进入「第 k 格」：全场的格型一致（0=写词，奇数=作画，偶数=猜词） */
+  enterStep(k) {
+    this.stepIndex = k;
+    this.submitted = new Set();
+    this.pendingText = new Map();
+    this.stepChoices = new Map();
+    const type = this.stepTypeOf(k);
+    this.phase = type === STEP.WORD ? CHAIN_PHASE.WRITE
+      : type === STEP.DRAWING ? CHAIN_PHASE.DRAW : CHAIN_PHASE.GUESS;
+
+    if (type === STEP.DRAWING) this.api.resetCanvas();   // 作画从空白开始
+
+    // 写词格：给每人发一组候选词（本轮用过的词不再出现）
+    if (type === STEP.WORD) {
+      const pool = WORDS.poolForTheme(this.theme);
+      const used = [];
+      for (const c of this.chains) {
+        const w = c.steps[0] && c.steps[0].content;
+        if (typeof w === 'string' && w) used.push(w);
       }
-      // 该用户这一步要做的事挂到他名下（一个用户在一圈里只会被安排一次）
-      this.assign.set(who, Object.assign({ chainIdx: idx }, step));
+      for (const p of this.playerList()) {
+        this.stepChoices.set(p.userId, pickWords(pool, P.GAME.CHAIN_PICK_CHOICES, used));
+      }
     }
-
-    if (this.assign.size === 0) return this.toLobby('没有可安排的步骤');
-
-    // 有「写词」这一步的人要拿候选词
-    const pool = WORDS.poolForTheme(this.theme);
-    for (const cell of this.assign.values()) {
-      if (cell.step !== STEP.WRITE) continue;
-      cell.choices = pickWords(pool, P.GAME.CHAIN_PICK_CHOICES, this.usedWords);
-    }
-
-    this.enterPhaseForCurrentSteps();
-  }
-
-  /**
-   * 给一格找顶替的人：从「名义上的那个人」沿传递顺序往后走，取第一个
-   * **在线、且这一圈还没接到活、也不是这条链主人**的人。找不到返回 ''。
-   *
-   * 三个条件都不能少：
-   *   - 在线     —— 不在线的人接不了活，接了就是全场等他超时
-   *   - 没接过活 —— 一圈里每人只做一步（beginRound 的派法保证不会重复安排），
-   *                 一个人接两步会让他在同一时刻收到两份互相冲突的题面
-   *   - 不是主人 —— 与 composeStep 同一条规矩：谁都不该接到自己那条链
-   */
-  pickStandIn(chain, fromUserId, onlineIds) {
-    const order = this.order || [];
-    const n = order.length;
-    if (!n) return '';
-    const from = order.indexOf(fromUserId);
-    if (from < 0) return '';
-    for (let i = 1; i <= n; i++) {
-      const id = order[(from + i) % n];
-      if (id === chain.ownerId) continue;
-      if (onlineIds.indexOf(id) < 0) continue;
-      if (this.assign.has(id)) continue;
-      return id;
-    }
-    return '';
-  }
-
-  /**
-   * 算出「链 c 的第 round 步该谁做、做什么」。
-   *
-   * 传递规则（一条链上第 k 步）：
-   *   k = 0            → 链主人自己写一个词
-   *   k >= 1 且 k 奇数  → 链主人的「下家」照上一步的词作画（下一人 = 环上下一位）
-   *   k >= 1 且 k 偶数  → 再下一位照上一步的画猜词
-   *
-   * 也就是说：词 → 画 → 词 → 画 …… 交替进行，每步换一个人，
-   * 顺着开局时打乱过的玩家顺序往前推。这样任何一个人都不会接到自己的东西。
-   */
-  composeStep(chain) {
-    const k = this.round - 1;                  // 本圈做这条链的第几格（0 起）
-    if (k >= this.rounds) return null;
-
-    const order = this.order || [];
-    const n = order.length;
-    if (!n) return null;
-    const ownerIdx = order.indexOf(chain.ownerId);
-    if (ownerIdx < 0) return null;             // 链主人退出了，这条链本圈跳过
-
-    if (k === 0) return { step: STEP.WRITE, userId: chain.ownerId };
-
-    const prev = chain.cells[k - 1];
-    if (!prev) return null;                    // 上一格缺了（有人掉线），这一步没法安排
-
-    // 第 k 格由「链主人往后数 k 个人」来做，**数的时候要跳过链主人自己**：
-    // 直接 `(ownerIdx + k) % n` 在 k = n 时会绕回链主人身上 —— 而圈数可以选到 6、
-    // 人数最少只有 4，那时他会接到自己那条链递下来的东西（自问自答）。
-    // 按「除自己以外的那一圈」取，圈数再大也只是在别人之间循环。
-    const others = [];
-    for (let i = 1; i < n; i++) others.push(order[(ownerIdx + i) % n]);
-    const who = others[(k - 1) % others.length];
-
-    if (prev.step === STEP.WRITE || prev.step === STEP.GUESS) {
-      // 上一步的产物是「词」→ 这一步作画
-      return { step: STEP.DRAW, userId: who, word: prev.word };
-    }
-    // 上一步的产物是「画」→ 这一步猜词
-    return { step: STEP.GUESS, userId: who, prevImage: prev.image, prevCellIdx: k - 1 };
-  }
-
-  /** 进入当前这些步骤对应的阶段（全是同一种步骤，否则就是设计错了） */
-  enterPhaseForCurrentSteps() {
-    const kinds = new Set();
-    for (const cell of this.assign.values()) kinds.add(cell.step);
-    // 极端情况：这一步既有作画又有猜词（前一步有人掉线导致链条错位）。
-    // 不做花哨的分裂，统一按「先作画后猜词」处理 —— 猜词那批这一步先当观众。
-    const hasDraw = kinds.has(STEP.DRAW);
-    const hasWrite = kinds.has(STEP.WRITE);
-
-    if (hasWrite) this.phase = CHAIN_PHASE.WRITE;
-    else if (hasDraw) this.phase = CHAIN_PHASE.DRAW;
-    else this.phase = CHAIN_PHASE.GUESS;
-
-    if (!hasWrite && !hasDraw && kinds.has(STEP.GUESS)) this.phase = CHAIN_PHASE.GUESS;
 
     this.deadline = Date.now() + this.stepMs();
-
-    // 作画这一步：把画布清空，让当事人从零开始画
-    if (this.phase === CHAIN_PHASE.DRAW) this.api.resetCanvas();
-
+    this.taskVersion += 1;
     this.api.sync();
     this.announceStep();
   }
 
   announceStep() {
-    const who = [];
-    for (const [uid, cell] of this.assign) {
-      if (cell.step !== this.phaseStep()) continue;
-      who.push(this.names.get(uid) || '某人');
-    }
     const label = CHAIN_PHASE_LABEL[this.phase] || '';
     const secs = Math.round(this.stepMs() / 1000);
-    if (who.length) {
-      this.api.systemChat('第 ' + this.round + ' / ' + this.rounds + ' 圈 · '
-        + label + '：' + who.join('、') + '（' + secs + ' 秒）');
+    const n = this.chains.length;
+    const type = this.stepTypeOf(this.stepIndex);
+    const what = type === STEP.WORD ? '写初始词' : type === STEP.DRAWING ? '照词作画' : '看画猜词';
+    this.api.systemChat('第 ' + (this.stepIndex + 1) + ' / ' + this.chainLength
+      + ' 手 · ' + what + '（' + n + ' 人并行，' + secs + ' 秒）—— ' + label);
+  }
+
+  /** 交格子。WORD/GUESS 带文本；DRAWING 只是「画好了」的信号（笔迹收格时从笔迹表抓） */
+  submit(userId, payload) {
+    if (!this.isPlaying()) return { ok: false, message: '现在没有要交的东西' };
+    const chain = this.cellOf(userId, this.stepIndex);
+    if (!chain) return { ok: false, message: '这一步没有你的事' };
+    if (this.submitted.has(userId)) return { ok: false, message: '你已经提交过了' };
+    const type = this.stepTypeOf(this.stepIndex);
+
+    if (type === STEP.WORD || type === STEP.GUESS) {
+      const word = String((payload && payload.text) || '').trim();
+      const chk = validateWord(word, type === STEP.WORD ? 12 : P.GAME.CHAIN_MAX_GUESS_LEN,
+        { strict: type === STEP.WORD });
+      if (!chk.ok) return chk;
+      this.pendingText.set(userId, word);
     } else {
-      this.api.systemChat('第 ' + this.round + ' / ' + this.rounds + ' 圈 · 等待中');
+      // DRAWING：笔迹已在房间里（STROKE_* 照常走），这里只记「这人交了」
+      this.pendingText.delete(userId);
     }
-  }
-
-  /** 当前阶段对应的 step 类型 */
-  phaseStep() {
-    if (this.phase === CHAIN_PHASE.WRITE) return STEP.WRITE;
-    if (this.phase === CHAIN_PHASE.DRAW) return STEP.DRAW;
-    if (this.phase === CHAIN_PHASE.GUESS) return STEP.GUESS;
-    return '';
-  }
-
-  /* ------------------------------------------------------------ 提交 */
-
-  /** 写词：挑一个候选，或自己写一个 */
-  submitWord(userId, text, index) {
-    if (this.phase !== CHAIN_PHASE.WRITE) return { ok: false, message: '现在不是写词阶段' };
-    const cell = this.assign.get(userId);
-    if (!cell || cell.step !== STEP.WRITE) return { ok: false, message: '这一步没有你要写的东西' };
-    if (this.submitted.has(userId)) return { ok: false, message: '你已经提交过了' };
-
-    let word = '';
-    if (typeof index === 'number' && cell.choices && cell.choices[index]) {
-      word = cell.choices[index];
-    } else {
-      word = String(text || '').trim();
-    }
-    const chk = this.validateWord(word);
-    if (!chk.ok) return chk;
-
-    cell.word = word;
-    if (this.usedWords.indexOf(word) < 0) this.usedWords.push(word);
-    this.finishStep(userId, cell, { word });
-    return { ok: true };
-  }
-
-  /** 猜词：给他看的那幅画，他猜是什么 */
-  submitGuess(userId, text) {
-    if (this.phase !== CHAIN_PHASE.GUESS) return { ok: false, message: '现在不是猜词阶段' };
-    const cell = this.assign.get(userId);
-    if (!cell || cell.step !== STEP.GUESS) return { ok: false, message: '这一步没有你要猜的东西' };
-    if (this.submitted.has(userId)) return { ok: false, message: '你已经提交过了' };
-
-    const word = String(text || '').trim();
-    const chk = this.validateWord(word, P.GAME.CHAIN_MAX_GUESS_LEN);
-    if (!chk.ok) return chk;
-
-    this.finishStep(userId, cell, { word });
-    return { ok: true };
-  }
-
-  /**
-   * 作画的产物。画是客户端画完后由 index.js 抓成 PNG 回传的
-   * （服务端只做哑存储，和图层像素同一套分工）。
-   */
-  submitArt(userId, png) {
-    if (this.phase !== CHAIN_PHASE.DRAW) return { ok: false, message: '现在不是作画阶段' };
-    const cell = this.assign.get(userId);
-    if (!cell || cell.step !== STEP.DRAW) return { ok: false, message: '这一步不是你在画' };
-    if (this.submitted.has(userId)) return { ok: false, message: '你已经提交过了' };
-    if (!png || typeof png !== 'string' || png.indexOf('data:image/') !== 0) {
-      return { ok: false, message: '作品数据不对' };
-    }
-
-    this.finishStep(userId, cell, { image: png });
-    return { ok: true };
-  }
-
-  /** 词的基本校验（写词与猜词共用） */
-  validateWord(word, maxLen) {
-    if (!word) return { ok: false, message: '得写点什么' };
-    const limit = maxLen || 12;
-    if (word.length > limit) return { ok: false, message: '太长了（最多 ' + limit + ' 个字）' };
-    // 必须含中文 —— 接龙里全是中文词，混进一串字母会让下家无从下笔
-    if (!/[\u4e00-\u9fa5]/.test(word)) return { ok: false, message: '请用中文写' };
-    return { ok: true };
-  }
-
-  /**
-   * 一次提交的收尾：把产物写进链上的格子 → 全场交齐就推进。
-   *
-   * 格子号就是「本圈做的是第几格」= round - 1。
-   * 作画那一步的 PNG 由 submitArt 一起带进来（服务端只做哑存储）。
-   */
-  finishStep(userId, cell, patch) {
     this.submitted.add(userId);
-    const chain = this.chains[cell.chainIdx];
-    if (chain) {
-      const k = this.round - 1;
-      chain.cells[k] = Object.assign({
-        step: cell.step,
-        userId,
-        word: '',
-        image: ''
-      }, patch);
-    }
     this.api.sync();
-    if (this.submitted.size >= this.assign.size) this.advance();
+    // 全场交齐 → 立刻收格（不等 deadline）
+    if (this.submitted.size >= this.ring.length) this.finalizeStep();
+    return { ok: true };
   }
 
-  /* ------------------------------------------------------------ 阶段推进 */
+  /**
+   * 收格：把每条链的第 k 格写进去 → 进入下一格 / 回放。
+   *
+   * DRAWING 的 content = 作者此刻在房间笔迹表里的全部笔迹
+   * （私密作画期间笔迹不广播但都进表；作画阶段画布是独占的，
+   *   表里这阶段的笔迹只可能出自当格作者 —— 按作者过滤只是双保险）。
+   */
+  finalizeStep() {
+    if (!this.isPlaying()) return;
+    const k = this.stepIndex;
+    const type = this.stepTypeOf(k);
+    const now = Date.now();
 
-  /** 本步全部交齐（或超时）→ 进入下一步 / 下一圈 / 回放 */
-  advance() {
-    // 清掉「本步作画」的画布，避免带进下一步
+    for (const chain of this.chains) {
+      const n = this.ring.length;
+      const ownerIdx = this.ring.indexOf(chain.ownerPlayerId);
+      const who = ownerIdx >= 0 ? this.ring[(ownerIdx + k) % n] : '';
+      const did = this.submitted.has(who);
+      let content;
+      if (type === STEP.DRAWING) content = did ? this.captureStrokes(who) : [];
+      else content = this.pendingText.get(who) || '';
+      // 「这一手没交成」= 没交，**或者交了但是空的** ——
+      // 离场者会被 onLeave 标记成「已交」以放行收格，但内容是空的；
+      // 画手点了交却一笔没画同理。回放与首尾判定都把空格当「没交」看。
+      const empty = (type === STEP.DRAWING) ? !content.length : !content;
+      chain.steps[k] = {
+        playerId: who,
+        type: type,
+        content: content,
+        timestamp: now,
+        skipped: !did || empty
+      };
+      chain.currentStep = k + 1;
+    }
+
+    const skipped = [];
+    for (const uid of this.ring) {
+      if (!this.submitted.has(uid)) skipped.push(this.names.get(uid) || '某人');
+    }
+    if (skipped.length) {
+      this.api.systemChat('超时：' + skipped.join('、') + ' 这一手没交，按空格处理');
+    }
+
+    this.submitted = new Set();
+    this.pendingText = new Map();
+    this.stepChoices = new Map();
+
+    // 作画结束：把画布清干净（笔迹已经收进链条，不再留在共享画布上）
     if (this.phase === CHAIN_PHASE.DRAW) this.api.resetCanvas();
 
-    if (this.round >= this.rounds) return this.beginReplay();
-    this.beginRound();
+    if (k + 1 >= this.chainLength) return this.enterReveal();
+    this.enterStep(k + 1);
   }
 
-  /** 超时：没交的格子按「空」处理，别让全场干等 */
-  timeoutStep() {
-    if (!this.isPlaying()) return;
-    const pending = [];
-    for (const [uid, cell] of this.assign) {
-      if (this.submitted.has(uid)) continue;
-      pending.push(this.names.get(uid) || '某人');
-      const k = this.round - 1;
-      const chain = this.chains[cell.chainIdx];
-      if (!chain || !chain.cells) continue;
-      // 没交就填一个占位格：作画留空图，写词/猜词留空串。
-      // 后续 composeStep 遇到空串仍然可以往下走（下家会看到一张空白 / 一个空格子）。
-      if (cell.step === STEP.DRAW) {
-        chain.cells[k] = { step: STEP.DRAW, userId: uid, word: '', image: '', skipped: true };
-      } else {
-        chain.cells[k] = { step: cell.step, userId: uid, word: '', image: '', skipped: true };
+  /** 从房间笔迹表里摘出某人的笔迹（带上限），作为 DRAWING 格的 content */
+  captureStrokes(userId) {
+    const src = (this.room.strokes || []).filter(s => s && s.userId === userId);
+    const out = [];
+    let pts = 0;
+    for (const s of src) {
+      if (out.length >= MAX_STROKES_PER_ART) break;
+      const stroke = {
+        id: s.id, layerId: s.layerId, tool: s.tool || 'brush',
+        target: s.target === 'mask' ? 'mask' : 'layer',
+        color: s.color || '#000000', size: s.size || 6,
+        opacity: s.opacity == null ? 1 : s.opacity,
+        hardness: s.hardness, minSize: s.minSize, pressSize: s.pressSize,
+        pressOpacity: s.pressOpacity, edge: s.edge, scatter: s.scatter,
+        grain: s.grain, grainScale: s.grainScale, paper: s.paper, fx: s.fx,
+        points: (s.points || []).slice(),
+        ts: s.ts || 0, te: s.te || 0
+      };
+      pts += stroke.points.length;
+      if (pts > MAX_POINTS_PER_ART) {
+        const allow = Math.max(0, MAX_POINTS_PER_ART - (pts - stroke.points.length));
+        stroke.points = stroke.points.slice(0, allow);
+        out.push(stroke);
+        break;
       }
+      out.push(stroke);
     }
-    if (pending.length) {
-      this.api.systemChat('超时：' + pending.join('、') + ' 这一步没交，链条跳过');
-    }
-    this.advance();
+    return out;
   }
 
   /* ------------------------------------------------------------ 回放与投票 */
 
-  beginReplay() {
-    if (this.phase === CHAIN_PHASE.DRAW) this.api.resetCanvas();
-
-    // 组装回放：每条链把格子摊平
-    this.replay = this.chains.map(c => {
-      const cells = c.cells.filter(Boolean);
-      const first = cells.filter(x => x.step === STEP.WRITE)[0];
-      const words = cells.filter(x => x.step === STEP.GUESS);
-      const lastGuess = words[words.length - 1];
-      const firstWord = first ? first.word : '';
-      const lastWord = lastGuess ? lastGuess.word : (cells[cells.length - 1] || {}).word || '';
+  /** 全部格子收完 → 组装回放数据并广播（内容从此公开） */
+  enterReveal() {
+    this.stepIndex = this.chainLength;
+    for (const c of this.chains) {
+      c.status = 'complete';
+      c.currentStep = c.steps.length;
+    }
+    this.revealData = this.chains.map(c => {
+      const firstWord = (c.steps[0] && typeof c.steps[0].content === 'string') ? c.steps[0].content : '';
+      let lastWord = '';
+      for (let i = c.steps.length - 1; i >= 1; i--) {
+        if (c.steps[i] && c.steps[i].type === STEP.GUESS) { lastWord = c.steps[i].content || ''; break; }
+      }
       return {
-        id: c.id,
-        ownerId: c.ownerId,
-        ownerName: this.names.get(c.ownerId) || c.ownerName,
-        firstWord,
-        lastWord,
-        // 服务端先给一个初判（宽松匹配，见 answerMatch），投票可以改这个结论
+        chainId: c.chainId,
+        ownerPlayerId: c.ownerPlayerId,
+        ownerName: this.names.get(c.ownerPlayerId) || c.ownerName,
+        firstWord: firstWord,
+        lastWord: lastWord,
+        // 服务端先给一个初判（宽松匹配），最终由玩家投票裁定
         matched: answerMatch(firstWord, lastWord),
-        cells: cells.map(x => ({
-          step: x.step,
-          userId: x.userId,
-          word: x.word || '',
-          image: x.image || ''
+        steps: c.steps.map(s => ({
+          playerId: s.playerId,
+          playerName: this.names.get(s.playerId) || '某人',
+          type: s.type,
+          content: s.content,
+          timestamp: s.timestamp,
+          skipped: !!s.skipped
         }))
       };
     });
-
-    this.votes = new Map();
-    this.voted = new Map();
-    this.replayIndex = 0;
-    this.phase = CHAIN_PHASE.VOTE;      // 直接进投票（回放本身是可翻页的，不需要单独一段等待）
-    this.deadline = Date.now() + CFG.REPLAY_MS;
+    this.revealVersion += 1;
+    this.votesKeep = new Map();
+    this.votesFav = new Map();
+    this.phase = CHAIN_PHASE.REVEAL;
+    this.deadline = Date.now() + CFG.REVEAL_MS;
     this.api.sync();
-    this.api.systemChat('全部传递完成！来看看这一局「跑偏」成了什么样 —— 每条链都可以投「对不上」');
+    this.api.revealAll(this.revealData, this.revealVersion);
+    this.api.systemChat('全部传完了！回放开始 —— 看看每条链是怎么跑偏的');
   }
 
-  /** 投票：这条链的首尾对得上吗 */
-  vote(userId, chainId, agree) {
+  /** 投「这条链首尾还对得上吗」 */
+  keepVote(userId, chainId, agree) {
     if (this.phase !== CHAIN_PHASE.VOTE) return { ok: false, message: '现在不是投票阶段' };
-    const chain = this.replay.filter(c => c.id === chainId)[0];
+    const chain = this.chains.find(c => c.chainId === chainId);
     if (!chain) return { ok: false, message: '没有这条链' };
-    let set = this.votes.get(userId);
-    if (!set) { set = new Set(); this.votes.set(userId, set); }
-    if (agree) set.delete(chainId);      // 同意 = 不记票（默认就是「对得上」）
-    else set.add(chainId);
-    // 另记一份「投过了」—— agree 那条路径在上面的 set 里是不留痕的
-    let voted = this.voted.get(userId);
-    if (!voted) { voted = new Set(); this.voted.set(userId, voted); }
-    voted.add(chainId);
+    let m = this.votesKeep.get(userId);
+    if (!m) { m = new Map(); this.votesKeep.set(userId, m); }
+    m.set(chainId, !!agree);
     this.api.sync();
     return { ok: true };
   }
 
-  /** 投票阶段结束 → 结算奖杯 */
-  finishVoting() {
-    const players = this.playerList();
-    const totalPlayers = Math.max(1, players.length);
-    // **只算现在还是玩家的人投的票**：中途进房的看客不算玩家（他不进分母），
-    // 但他的票如果照样计进去，一两个看客就能把某条链掀翻 —— 分母和分子必须同一批人。
-    const isPlayer = new Set(players.map(p => p.userId));
-    const result = [];
+  /** 投「最喜欢的一张画」（一人一票，可改） */
+  favVote(userId, chainId, stepIdx) {
+    if (this.phase !== CHAIN_PHASE.VOTE) return { ok: false, message: '现在不是投票阶段' };
+    const chain = this.chains.find(c => c.chainId === chainId);
+    if (!chain) return { ok: false, message: '没有这条链' };
+    const k = Math.floor(Number(stepIdx));
+    const st = chain.steps[k];
+    if (!st || st.type !== STEP.DRAWING) return { ok: false, message: '那一格不是一幅画' };
+    if (!Array.isArray(st.content) || !st.content.length) return { ok: false, message: '那是一张空画' };
+    this.votesFav.set(userId, { chainId: chain.chainId, step: k });
+    this.api.sync();
+    return { ok: true };
+  }
 
-    for (const chain of this.replay) {
-      // 多少人认为「对不上」
+  /** 投票阶段结束 → 结算分数 */
+  finishVote() {
+    const players = this.playerList();
+    // **只算本局环里的人投的票**：看客与离场者不进分母，也不该掀翻任何一条链
+    const ringSet = new Set(this.ring);
+    const totalPlayers = Math.max(1, this.ring.length);
+
+    const chainRows = this.chains.map(c => {
+      const firstWord = (c.steps[0] && typeof c.steps[0].content === 'string') ? c.steps[0].content : '';
+      let lastWord = '';
+      for (let i = c.steps.length - 1; i >= 1; i--) {
+        if (c.steps[i] && c.steps[i].type === STEP.GUESS) { lastWord = c.steps[i].content || ''; break; }
+      }
       let against = 0;
-      for (const [uid, set] of this.votes) {
-        if (!isPlayer.has(uid)) continue;
-        if (set.has(chain.id)) against += 1;
+      for (const [uid, m] of this.votesKeep) {
+        if (!ringSet.has(uid)) continue;
+        if (m.get(c.chainId) === false) against += 1;
       }
-      // 服务端初判「一致」+ 多数人不反对 → 起词的人拿奖杯
-      const ok = chain.matched && against * 2 < totalPlayers;
-      if (ok && chain.ownerId) {
+      const matched = answerMatch(firstWord, lastWord);
+      const ok = matched && against * 2 < totalPlayers;
+      if (ok && c.ownerPlayerId) {
         const pts = P.GAME.CHAIN_TROPHY_AGREE;
-        this.scores.set(chain.ownerId, (this.scores.get(chain.ownerId) || 0) + pts);
+        this.scores.set(c.ownerPlayerId, (this.scores.get(c.ownerPlayerId) || 0) + pts);
       }
-      result.push({
-        id: chain.id,
-        ownerId: chain.ownerId,
-        ownerName: chain.ownerName,
-        firstWord: chain.firstWord,
-        lastWord: chain.lastWord,
-        matched: chain.matched,
-        against,
-        won: ok
-      });
+      return {
+        chainId: c.chainId,
+        ownerPlayerId: c.ownerPlayerId,
+        ownerName: this.names.get(c.ownerPlayerId) || c.ownerName,
+        firstWord, lastWord, matched, against, won: ok
+      };
+    });
+
+    // 最喜欢的一张画：票最高的 DRAWING 格（平票各拿安慰分）
+    const tally = new Map(); // 'chainId:step' -> count
+    for (const [uid, fav] of this.votesFav) {
+      if (!ringSet.has(uid) || !fav) continue;
+      const key = fav.chainId + ':' + fav.step;
+      tally.set(key, (tally.get(key) || 0) + 1);
+    }
+    let top = 0;
+    for (const n of tally.values()) if (n > top) top = n;
+    const winners = [];
+    if (top > 0) {
+      for (const [key, n] of tally) {
+        if (n !== top) continue;
+        const ci = key.indexOf(':');
+        const chainId = key.slice(0, ci), k = Number(key.slice(ci + 1));
+        const chain = this.chains.find(c => c.chainId === chainId);
+        const st = chain && chain.steps[k];
+        if (!st || st.type !== STEP.DRAWING) continue;
+        const name = this.names.get(st.playerId) || '某人';
+        winners.push({ chainId, step: k, playerId: st.playerId, playerName: name, votes: n });
+        this.scores.set(st.playerId,
+          (this.scores.get(st.playerId) || 0) +
+          (winners.length === 1 ? P.GAME.CHAIN_FAV_POINTS : P.GAME.CHAIN_FAV_TIE_POINTS));
+      }
     }
 
-    this.voteResult = result;
-    this.phase = CHAIN_PHASE.OVER;
-    this.deadline = 0;
+    this.voteResult = { chains: chainRows, fav: winners, favTie: winners.length > 1 };
+    this.phase = CHAIN_PHASE.SCORE;
+    this.deadline = Date.now() + CFG.SCORE_MS;
     this.api.sync();
 
-    const winners = result.filter(r => r.won);
-    if (winners.length) {
-      this.api.systemChat('首尾对上的链有 ' + winners.length + ' 条：'
-        + winners.map(w => w.ownerName + '（' + w.firstWord + '）').join('、'));
+    const kept = chainRows.filter(r => r.won);
+    if (kept.length) {
+      this.api.systemChat('首尾对上的链有 ' + kept.length + ' 条：'
+        + kept.map(w => w.ownerName + '（' + w.firstWord + '）').join('、'));
     } else {
       this.api.systemChat('这一局全军覆没 —— 没有一条链安全到达终点');
     }
-    const top = this.scoreList()[0];
-    if (top && top.score > 0) {
-      this.api.systemChat('本局结束！奖杯最多的是 ' + top.name + '（' + top.score + ' 个）');
-    } else {
-      this.api.systemChat('本局结束！这一轮谁也没拿到奖杯');
+    if (winners.length === 1) {
+      this.api.systemChat('最受欢迎的画出自 ' + winners[0].playerName + '（'
+        + winners[0].votes + ' 票）');
+    } else if (winners.length > 1) {
+      this.api.systemChat('最受欢迎的画平票：' + winners.map(w => w.playerName).join('、'));
     }
   }
 
+  /** 回放阶段结束 → 进投票 */
+  enterVote() {
+    this.phase = CHAIN_PHASE.VOTE;
+    this.deadline = Date.now() + CFG.VOTE_MS;
+    this.api.sync();
+    this.api.systemChat('投票开始：每条链「首尾还对得上吗」+ 选出你最喜欢的一张画');
+  }
+
+  /** 结算阶段结束 → 回大厅（分数保留，可再来一局） */
+  toLobby() {
+    this.phase = CHAIN_PHASE.LOBBY;
+    this.deadline = 0;
+    this.stepIndex = 0;
+    this.chains = [];
+    this.ring = [];
+    this.submitted = new Set();
+    this.pendingText = new Map();
+    this.stepChoices = new Map();
+    this.revealData = null;
+    this.votesKeep = new Map();
+    this.votesFav = new Map();
+    this.voteResult = null;
+    this.ready.clear();
+    this.api.sync();
+    this.api.systemChat('回到接龙大厅 —— 点「准备」再来一局（分数保留）');
+  }
+
   /**
-   * 房主按「立刻结算」：
-   *   写词 / 画 / 猜 —— 不等超时，把没交的按「跳过」处理并推进（替等待的人按下加速键）
-   *   投票          —— 立刻结算奖杯
+   * 房主按「立刻推进」：
+   *   大厅   —— 全员视为已准备，直接开局
+   *   写/画/猜 —— 不等超时，把没交的按「空」处理并收格
+   *   回放   —— 进入投票
+   *   投票   —— 立刻结算
+   *   结算   —— 回大厅
    * 返回 { ok, message }
    */
   next(userId) {
     if (!this.isOwner(userId)) return { ok: false, message: '只有房主可以推进' };
-    if (this.isPlaying()) { this.timeoutStep(); return { ok: true }; }
-    if (this.phase === CHAIN_PHASE.VOTE) { this.finishVoting(); return { ok: true }; }
+    if (this.phase === CHAIN_PHASE.LOBBY) {
+      const players = this.playerList();
+      if (players.length < P.GAME.CHAIN_MIN_PLAYERS) {
+        return { ok: false, message: '人数不足，开不了局' };
+      }
+      players.forEach(p => this.ready.add(p.userId));
+      this.beginGame();
+      return { ok: true };
+    }
+    if (this.isPlaying()) { this.finalizeStep(); return { ok: true }; }
+    if (this.phase === CHAIN_PHASE.INIT) {
+      this.enterStep(0);
+      return { ok: true };
+    }
+    if (this.phase === CHAIN_PHASE.REVEAL) { this.enterVote(); return { ok: true }; }
+    if (this.phase === CHAIN_PHASE.VOTE) { this.finishVote(); return { ok: true }; }
+    if (this.phase === CHAIN_PHASE.SCORE) { this.toLobby(); return { ok: true }; }
     return { ok: false, message: '现在没什么可推进的' };
   }
-
-  isOwner(userId) { return !!(this.room.ownerId && this.room.ownerId === userId); }
 
   /* ------------------------------------------------------------ 时钟与收尾 */
 
   tick(nowMs) {
     if (!this.active || !this.deadline) return;
     if (nowMs < this.deadline) return;
-    if (this.isPlaying()) return this.timeoutStep();
-    if (this.phase === CHAIN_PHASE.VOTE) return this.finishVoting();
-  }
-
-  toLobby(reason) {
-    this.phase = CHAIN_PHASE.LOBBY;
-    this.deadline = 0;
-    this.assign = new Map();
-    this.submitted = new Set();
-    this.api.sync();
-    if (reason) this.api.systemChat(reason);
+    // 写/画/猜：deadline 之后留一小段宽限再收格（客户端的自动提交还在路上）
+    if (this.isPlaying()) {
+      if (nowMs < this.deadline + CFG.GRACE_MS) return;
+      return this.finalizeStep();
+    }
+    if (this.phase === CHAIN_PHASE.INIT) return this.enterStep(0);
+    if (this.phase === CHAIN_PHASE.REVEAL) return this.enterVote();
+    if (this.phase === CHAIN_PHASE.VOTE) return this.finishVote();
+    if (this.phase === CHAIN_PHASE.SCORE) return this.toLobby();
   }
 
   stop() {
     this.spectators.clear();
     this.phase = CHAIN_PHASE.OFF;
     this.deadline = 0;
+    this.ring = [];
     this.chains = [];
-    this.assign = new Map();
+    this.stepIndex = 0;
     this.submitted = new Set();
-    this.replay = null;
-    this.votes = new Map();
-    this.voted = new Map();
+    this.pendingText = new Map();
+    this.stepChoices = new Map();
+    this.revealData = null;
+    this.votesKeep = new Map();
+    this.votesFav = new Map();
     this.voteResult = null;
+    this.ready.clear();
     this.api.sync();
   }
 
@@ -896,57 +904,61 @@ class ChainGame {
   onJoin(member) {
     if (!this.active) return;
     if (!this.names.has(member.userId)) this.names.set(member.userId, member.name);
-    // 局中进房：本局只能旁边看（链已经冻结），也不进奖杯榜、不算投票人数
+    if (!this.scores.has(member.userId)) this.scores.set(member.userId, 0);
+    // 局中（含回放/投票）进房：本局只能旁边看 —— 链已经冻结，插人会弄拧每一格
     if (this.midGame()) {
       this.spectators.add(member.userId);
-      this.api.systemChat(member.name + ' 加入了，本局接龙进行中，先观战 —— 房主开下一局就能一起玩');
+      this.api.systemChat(member.name + ' 加入了，本局接龙进行中，先观战 —— 下一局自动入伙');
       this.api.sync();
       return;
     }
-    if (!this.scores.has(member.userId)) this.scores.set(member.userId, 0);
     this.api.sync();
   }
 
   onLeave(member) {
     if (!this.active) return;
-    // 看客走了：摘掉即可，不影响链条与人数判断
     if (this.spectators.has(member.userId)) {
       this.spectators.delete(member.userId);
       this.api.sync();
       return;
     }
-    // 走的是一条链的主人：composeStep 从此会一直跳过这条链（找不到主人了），
-    // 得说一声 —— 不然大家只能看见「进度条上有一条链永远停在第一格」，完全不知道为什么。
-    const owned = this.chains.filter(c => c.ownerId === member.userId);
-    if (owned.length) {
-      this.api.systemChat(member.name + ' 离开了，TA 起的那 ' + owned.length
-        + ' 条链接不下去（主人不在就没人接），回放里会少掉');
-    }
-    const min = P.GAME.CHAIN_MIN_PLAYERS;
-    if (this.playerList().length < min) {
-      if (this.phase === CHAIN_PHASE.LOBBY || this.phase === CHAIN_PHASE.OVER) return;
-      // 只剩不到 4 人就没法继续接龙了 —— 链条传递要求「不会轮到自己」
-      this.toLobby(member.name + ' 离开了，接龙至少要 ' + min + ' 人，游戏已暂停');
+    if (this.phase === CHAIN_PHASE.LOBBY) {
+      this.ready.delete(member.userId);
+      this.api.sync();
+      // 他一走剩下的可能刚好全准备完了 → 自动开局
+      this.checkAllReady();
       return;
     }
-    if (this.isPlaying()) {
-      // 走的人手里可能有活：直接把他这步当「没交」处理，别让全场卡住
-      const cell = this.assign.get(member.userId);
-      if (cell && !this.submitted.has(member.userId)) {
-        this.api.systemChat(member.name + ' 离开了，这一步跳过');
+    if (this.isPlaying() || this.phase === CHAIN_PHASE.INIT) {
+      // 走的人手里可能有活：按「没交」处理，收格时按空格写进链条
+      if (!this.submitted.has(member.userId)) {
         this.submitted.add(member.userId);
-        const k = this.round - 1;
-        const chain = this.chains[cell.chainIdx];
-        if (chain && chain.cells) {
-          chain.cells[k] = {
-            step: cell.step, userId: member.userId, word: '', image: '', skipped: true
-          };
+        this.api.systemChat(this.names.get(member.userId) || member.name + ' 离开了，TA 这一格按空处理');
+        if (this.ring.length && this.submitted.size >= this.ring.length) {
+          this.finalizeStep();
+          return;
         }
-        if (this.submitted.size >= this.assign.size) return this.advance();
       }
     }
     this.api.sync();
   }
+}
+
+/** 当前格的类型（snapshotFor 用的小工具） */
+function cellStepType(g, k) { return g.stepTypeOf(k); }
+
+/** 词的基本校验（写词与猜词共用） */
+function validateWord(word, maxLen, opts) {
+  if (!word) return { ok: false, message: '得写点什么' };
+  const limit = maxLen || 12;
+  if (word.length > limit) return { ok: false, message: '太长了（最多 ' + limit + ' 个字）' };
+  // 出题（写初始词）走「能玩的词」那套：中文 / 英文 / 数字都行，**一个字也行**
+  //（以前这里要求必须含中文，英文词和一个字的梗全被挡在外面）。
+  // 猜词是自由输入，不套这条 —— 别因为用户多打了一个标点就把人挡回去。
+  if (opts && opts.strict && !P.isPlayableWord(word, limit)) {
+    return { ok: false, message: '别带空格写，最多 ' + limit + ' 个字符' };
+  }
+  return { ok: true };
 }
 
 function norm(s) {
@@ -961,7 +973,7 @@ function norm(s) {
  *   - 一方包含另一方（「长颈鹿」vs「一只长颈鹿」）
  *   - 去掉常见量词 / 助词后相同（「一只猫」vs「小猫」→ 都归一成「猫」）
  *   - 编辑距离 ≤ 1 的短词（「奶茶」vs「奶菜」这种一字之差，不该判死刑）
- * 最终裁定权仍在玩家投票（见 finishVoting）。
+ * 最终裁定权仍在玩家投票（见 finishVote）。
  */
 const STOPWORDS = ['一只', '一个', '一条', '一头', '一匹', '一栋', '一辆', '一架', '一朵', '一棵',
   '的', '了', '个', '只', '条', '头', '匹', '辆', '架', '朵', '棵', '们', '是', '在'];
@@ -969,7 +981,6 @@ const STOPWORDS = ['一只', '一个', '一条', '一头', '一匹', '一栋', '
 /**
  * 常见的「词尾修饰字」：小猫 / 猫咪 / 老猫 指的是同一只猫。
  * 归一化时逐个剥掉，让「猫咪」「小猫」「猫」都落回「猫」。
- *   小 / 大 / 老（大小老幼）· 子 / 儿 / 咪 / 阿 / 呀（口语词尾）· baby 的「宝」
  * 只在**长度 ≥ 3** 时才敢剥，否则「小」这种单字词会被剥成空串。
  */
 const MORPH = ['小', '大', '老', '子', '儿', '咪', '阿'];
@@ -977,8 +988,6 @@ const MORPH = ['小', '大', '老', '子', '儿', '咪', '阿'];
 /** 剥掉词首词尾的修饰字（一直剥到不能再剥） */
 function stripMorph(s) {
   let t = s;
-  // 允许一直剥到只剩 1 个字：「猫咪」「小猫」都该落回「猫」。
-  // 所以门槛是 t.length > 1 —— 剥到剩 1 个字就停（再剥就空了，没有意义）。
   for (;;) {
     if (t.length <= 1) break;
     const head = t.charAt(0), tail = t.charAt(t.length - 1);

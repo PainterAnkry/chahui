@@ -230,17 +230,24 @@ async function openChainDialog(page) {
     await host.evaluate(() => document.querySelector('#btnThemeDelete').classList.contains('hidden')));
 
   await host.fill('#tmName', '我们公司');
-  // 故意混进一个英文词和一个单字 —— 它们必须被丢掉并**明确告诉用户**
-  await host.fill('#tmWords', '摸鱼, 加班, 开会, 咖啡, 团建, 年终奖, hello, 卷');
+  // ⚠ 新规则（用户要求「减少词库限制」）：**英文词和单个汉字都收**，
+  //    所以「不合格」的样本换成真正不合规的两种 —— 只有标点的、超过 12 个字符的。
+  //    （输入框按空白切词，所以「带空格」当不了这里的反例，它会被切成两个词。）
+  const LONG_BAD = '非常非常非常非常非常长的词';       // 13 个字符 > 12
+  await host.fill('#tmWords', '摸鱼, 加班, 开会, 咖啡, 团建, 年终奖, hello, 卷, !!!, ' + LONG_BAD);
   await sleep(300);
 
   const statsTxt = await host.textContent('#tmStats');
-  ok('本地统计说 6 个合格（8 个里去掉 2 个）', /6 个合格/.test(statsTxt), '实际「' + statsTxt + '」');
+  ok('本地统计说 8 个合格（10 个里去掉 2 个）', /8 个合格/.test(statsTxt), '实际「' + statsTxt + '」');
   ok('本地统计点明有 2 个会被丢掉', /2 个会被丢掉/.test(statsTxt), '实际「' + statsTxt + '」');
   const warnVisible = await host.evaluate(() => !document.querySelector('#tmWarn').classList.contains('hidden'));
   ok('不合格的词在保存前就警告出来了', warnVisible);
   const warnTxt = await host.textContent('#tmWarn');
-  ok('警告里点名了具体哪两个词', /hello/.test(warnTxt) && /卷/.test(warnTxt), '实际「' + warnTxt + '」');
+  ok('警告里点名了具体哪两个词',
+    warnTxt.indexOf('!!!') >= 0 && warnTxt.indexOf(LONG_BAD) >= 0, '实际「' + warnTxt + '」');
+  ok('★ 英文词不再被当成坏词（警告里没有 hello）', warnTxt.indexOf('hello') < 0, '实际「' + warnTxt + '」');
+  ok('★ 单个汉字也不再被当成坏词（警告里没有「卷」）',
+    warnTxt.replace(LONG_BAD, '').indexOf('卷') < 0, '实际「' + warnTxt + '」');
 
   await host.click('#btnThemeSave');
   await host.waitForFunction(() => {
@@ -250,7 +257,7 @@ async function openChainDialog(page) {
   const savedName = await host.textContent('#tmList .tm-item-name');
   ok('保存后列表里出现了「我们公司」', /我们公司/.test(savedName), '实际「' + savedName + '」');
   const savedCount = await host.textContent('#tmList .tm-item-count');
-  ok('词数是 6（两个坏词被丢掉）', /6/.test(savedCount), '实际「' + savedCount + '」');
+  ok('词数是 8（两个坏词被丢掉：只有标点的 + 超长的）', /8/.test(savedCount), '实际「' + savedCount + '」');
 
   const afterSave = await host.evaluate(() =>
     ((document.querySelector('#themeToast') || {}).textContent) || '');
@@ -271,10 +278,14 @@ async function openChainDialog(page) {
 
   const newId = list.custom[0].id;
   const wordsResp = await httpJson('/api/themes/' + newId + '/words').then(r => r.body);
-  ok('单取词表接口能拿回 6 个词', (wordsResp.words || []).length === 6,
+  ok('单取词表接口能拿回 8 个词', (wordsResp.words || []).length === 8,
     JSON.stringify(wordsResp.words));
-  ok('词表里没有坏词（hello / 卷）',
-    (wordsResp.words || []).indexOf('hello') < 0 && (wordsResp.words || []).indexOf('卷') < 0);
+  ok('词表里没有坏词（只有标点的 / 超长的）',
+    (wordsResp.words || []).indexOf('!!!') < 0 && (wordsResp.words || []).indexOf(LONG_BAD) < 0);
+  ok('★ 英文词被存下来了（hello）', (wordsResp.words || []).indexOf('hello') >= 0,
+    JSON.stringify(wordsResp.words));
+  ok('★ 单个汉字被存下来了（卷）', (wordsResp.words || []).indexOf('卷') >= 0,
+    JSON.stringify(wordsResp.words));
 
   const badDel = await httpJson('/api/themes/bluearchive', { method: 'DELETE' });
   ok('删内置词库被拒（HTTP 400）', badDel.code === 400, '实际 ' + badDel.code);
@@ -306,7 +317,7 @@ async function openChainDialog(page) {
   const loadedName = await host.inputValue('#tmName');
   const loadedWords = await host.inputValue('#tmWords');
   ok('点一下能把名字读回来', loadedName === '我们公司', '实际「' + loadedName + '」');
-  ok('点一下能把词表读回来（6 个）', loadedWords.split('、').length === 6,
+  ok('点一下能把词表读回来（8 个）', loadedWords.split('、').length === 8,
     '实际「' + loadedWords + '」');
   ok('选中后「删除」按钮露出来了',
     await host.evaluate(() => !document.querySelector('#btnThemeDelete').classList.contains('hidden')));

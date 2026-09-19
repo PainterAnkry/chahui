@@ -10,8 +10,11 @@
  * 为什么用「覆盖蒙版」而不是逐点盖章：
  *   逐点盖章会让同一笔在自己重叠处反复叠加变深（串珠）。覆盖率蒙版里 alpha 是「最大值」
  *   语义，一笔之内绝对不会因为折返而加深，这也是这类软件的手感来源。
- *   为支持「笔压→浓度」，笔迹在蒙版内按 (宽度, 浓度) 量化分段绘制，段间用平头端点相接，
+ *   为支持「笔压→浓度」，笔迹在蒙版内按浓度**粗分档**（带滞回，避免把线切碎）绘制：
+ *   每档内把笔身描成一条**逐点变宽的多边形**（宽度连续插值，没有阶梯），
  *   只在整笔首尾补半圆端帽 —— 既不产生接缝叠加，又保留圆润的起笔收笔。
+ *   ⚠ 宽度**不能**量化成固定段宽、浓度**不能**按 1/24 档切碎，两者都会让笔身出现
+ *     周期性粗细节（详见 paintRuns 注释）。
  */
 (function (global) {
   'use strict';
@@ -20,6 +23,15 @@
 
   var SCRATCH_POOL_MAX = 10;
   var ALPHA_STEPS = 24;   // 浓度量化级数（越大越平滑，分段越多）
+  // 浓度「换档滞回」：只有量化值跨过 ≥2 档才算真的变了。
+  // 为什么需要它 —— 见 paintRuns 头部注释：真实笔压下 alpha 会在量化边界上
+  // **每 1~2 个点来回跳**（例如 inking：pressOpacity 只有 0.15，alpha 实际在
+  // 0.965~0.991 之间，量化后只有 23/24 和 24/24 两个值，却沿线跳了 65 次）。
+  // 若按「不等就切一刀」分段，一条 120 点的线会被切成 65 段、每段只有 1~2 点
+  // （≈ 6~12px）—— 在 ~25px 宽的大笔上就是一堆**平头小方块**，接缝处掉一列像素，
+  // 视觉上就是「顿感」。而这 2 档之间的差别只有 4% 不透明度，**根本看不见**。
+  // 所以：看不见的档位差，不值得为它切断几何。
+  var ALPHA_HYST = 2;
 
   /* ============================================================ 基础工具 */
 
@@ -333,7 +345,35 @@
     ctx.globalAlpha = 1;
   }
 
-  /** 连续笔身：按 (宽度, 浓度) 量化分段，段间平头相接 */
+  /**
+   * 连续笔身：**变宽多边形**（每个采样点自带宽度，段与段之间线性过渡）。
+   *
+   * ⚠ 这里换过一次实现，起因是用户报「线条中间有顿感」（粗笔 + 真实笔压，
+   *   笔身沿线一串周期性加粗的方块，像被一节一节盖章）。老实现是这样的：
+   *     把相邻点按 (宽度, 浓度) **量化分组**，每组用 `stroke()` + 固定 `lineWidth` 画。
+   *   两个毛病叠加，结果就是上面那个样子：
+   *     ① 压力几乎每个点都在动，量化后的宽度也就每点都变 → 一条 100 点的线能切出
+   *        **70 段，其中 47 段只有一个点长**（实测）。每段固定宽度 → 宽度沿线的变化
+   *        变成阶梯（23 → 24.5 → 26 → 27 → 25 → 24 …），肉眼就是「一节一节」。
+   *     ② 段间要接头。用圆头会把每段沿切线各外扩 lineWidth/2，相邻段重叠一整个笔宽，
+   *        在 globalAlpha<1 下 source-over 叠加 → 接缝变深；用平头则拐角缺楔形。
+   *
+   *   现在的做法是这类软件的标准解法：**不要「一段一个宽度」，要「一点一个宽度」**。
+   *   把这一笔描成一条**带左右两条侧边的多边形**（每侧 = 逐点沿法线外扩 width/2），
+   *   一次性 fill。宽度因此是连续插值的，没有阶梯；多边形自己不相交地覆盖一遍，
+   *   没有接缝、也就没有叠色。
+   *
+   * 浓度（alpha）仍然是分段量化的 —— 但那是**颜色深浅**，量化后只是「一档一档变淡」，
+   * 边界上相邻两档共边、不重叠，看不出接缝，而且 alpha 变化本来就该是台阶（可撤销的
+   * 量化是色彩管理的常规做法）。宽度不一样：宽度是需要连续几何的。
+   *
+   * ⚠ 但「分段量化」有个前提：**段要足够长**。切出一堆 1~2 个点长的小段，
+   *   每一段都是一个平头小方块，段与段之间不重叠 → 接缝处整列像素掉一半覆盖率，
+   *   看起来就是一串周期性细腰（实测最窄掉到 3px，正常应有 23px）。
+   *   所以换档要带**滞回**（ALPHA_HYST）：只有当量化值离当前档 ≥2 档时才真的切，
+   *   在量化边界上来回抖动的那些「假变化」直接忽略 —— 它们的色差本来也看不见。
+   *   再配合「至少 2 个点才成段」，保证每段都够长、不出现细腰。
+   */
   function paintRuns(ctx, stroke, pts, fromIndex, m, opts) {
     strokeStyleSetup(ctx, stroke);
 
@@ -350,45 +390,126 @@
     var start = Math.max(0, (fromIndex || 0) - 1);
     if (start > pts.length - 2) return;
 
-    var runs = [];
-    var cur = null;
-    for (var i = start; i < pts.length - 1; i++) {
-      var pmid = (pts[i][2] + pts[i + 1][2]) / 2;
-      var w = q5(widthAt(stroke, pmid));
-      var al = qa(alphaAt(stroke, pmid));
-      if (cur && cur.w === w && cur.a === al) cur.i1 = i + 1;
-      else { if (cur) runs.push(cur); cur = { i0: i, i1: i + 1, w: w, a: al }; }
+    // 把用到的那一段点先映射到目标空间，并算好每点的半径
+    var n = pts.length;
+    var xs = new Array(n), ys = new Array(n), rs = new Array(n), as = new Array(n);
+    for (var i = 0; i < n; i++) {
+      var q = mp(m, pts[i][0], pts[i][1]);
+      xs[i] = q[0]; ys[i] = q[1];
+      rs[i] = Math.max(0.18, widthAt(stroke, pts[i][2]) / 2);
+      as[i] = qa(alphaAt(stroke, pts[i][2]));
     }
-    if (cur) runs.push(cur);
 
-    // 圆头端帽：一笔在「宽度 / 浓度变化处」会被拆成多段分别描边，
-    // 平头（butt）对接时，如果接头正好落在拐角上，外侧会缺一个楔形。
-    // 用圆头就没这个问题 —— 整笔首尾本来就另外补了半圆端帽，
-    // 所以换成圆头并不会让笔画两端变样，只是把内部接头填实。
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    for (var k = 0; k < runs.length; k++) {
-      var run = runs[k];
-      ctx.globalAlpha = run.a;
-      ctx.lineWidth = run.w;
-      ctx.beginPath();
-      var sp = mp(m, pts[run.i0][0], pts[run.i0][1]);
-      ctx.moveTo(sp[0], sp[1]);
-      for (var j = run.i0 + 1; j <= run.i1; j++) {
-        var pj = mp(m, pts[j][0], pts[j][1]);
-        ctx.lineTo(pj[0], pj[1]);
+    // 浓度分档（带滞回）：从当前档出发，往后找第一个「离本档够远」的点作为切点。
+    // 这样档位在边界上抖动不会切段，只有真正单调地变淡/变浓才会换档。
+    var segStart = start;
+    var cur = Math.round(as[start] * ALPHA_STEPS);
+    var i2 = start + 1;
+    while (i2 <= n - 1) {
+      var v = Math.round(as[i2] * ALPHA_STEPS);
+      if (Math.abs(v - cur) >= ALPHA_HYST) {
+        // 切在「跃变的中点」附近：把 i2 作为共享端点，两段首尾相连不断线
+        if (i2 > segStart) {
+          ctx.globalAlpha = cur / ALPHA_STEPS;
+          fillVariableRibbon(ctx, xs, ys, rs, segStart, i2, false, false);
+        }
+        segStart = i2;
+        cur = v;
       }
-      ctx.stroke();
+      i2++;
+    }
+    // 收尾：剩下的 [segStart, n-1] 一段
+    if (n - 1 > segStart) {
+      ctx.globalAlpha = cur / ALPHA_STEPS;
+      fillVariableRibbon(ctx, xs, ys, rs, segStart, n - 1, false, false);
     }
     ctx.globalAlpha = 1;
 
     // 整笔起点补半圆端帽（只在第一批绘制时补一次）
-    if (opts && opts.startCap && runs.length) {
-      var a0 = mp(m, pts[0][0], pts[0][1]);
-      var a1 = mp(m, pts[1][0], pts[1][1]);
-      drawCap(ctx, a0[0], a0[1], a0[0] - a1[0], a0[1] - a1[1],
-        widthAt(stroke, pts[0][2]) / 2, runs[0].a);
+    if (opts && opts.startCap) {
+      drawCap(ctx, xs[0], ys[0], xs[0] - xs[1], ys[0] - ys[1], rs[0], as[0]);
     }
+  }
+
+  /**
+   * 把 [i0,i1] 这段折线描成「左右各一条侧边」的变宽多边形，一次 fill。
+   *
+   * roundStart / roundEnd：端点是否补半圆（整笔首尾要，档位内部接口不要 ——
+   * 接口处两侧是共边相接的，补圆反而会鼓出来）。
+   *
+   * 用的是**相邻段法线的角平分线**（miter 的方向）而不是单段法线：
+   * 单段法线在拐角处会让左右侧边各自错位，窄笔还好，粗笔会出现缺口。
+   */
+  function fillVariableRibbon(ctx, xs, ys, rs, i0, i1, roundStart, roundEnd) {
+    var n = i1 - i0 + 1;
+    // 单点段（浓度真的跃变、只隔了一个点时会出现）：描成一个圆点，
+    // 别直接 return —— 那会在笔身上留一个洞。
+    if (n < 2) {
+      if (n === 1) {
+        ctx.beginPath();
+        ctx.arc(xs[i0], ys[i0], Math.max(0.35, rs[i0]), 0, Math.PI * 2);
+        ctx.fill();
+      }
+      return;
+    }
+
+    // 每点的「左侧偏移单位向量」（法线）。拐角用前后两段的角平分方向。
+    var ox = new Array(n), oy = new Array(n), kk = new Array(n);
+    for (var i = 0; i < n; i++) {
+      var gi = i0 + i;
+      var dxa = 0, dya = 0, dxb = 0, dyb = 0;
+      if (gi > i0) { dxa = xs[gi] - xs[gi - 1]; dya = ys[gi] - ys[gi - 1]; }
+      if (gi < i1) { dxb = xs[gi + 1] - xs[gi]; dyb = ys[gi + 1] - ys[gi]; }
+      if (!dxa && !dya) { dxa = dxb; dya = dyb; }
+      if (!dxb && !dyb) { dxb = dxa; dyb = dya; }
+      var la = Math.hypot(dxa, dya) || 1, lb = Math.hypot(dxb, dyb) || 1;
+      var ux = (dxa / la + dxb / lb), uy = (dya / la + dyb / lb);
+      var lu = Math.hypot(ux, uy);
+      if (lu < 1e-6) { ux = -dya / la; uy = dxa / la; lu = 1; }   // 180° 掉头
+      ux /= lu; uy /= lu;
+      // 法线 = 切线的垂线
+      ox[i] = -uy; oy[i] = ux;
+      // miter 拉伸系数：拐角越尖两侧拉得越长，夹一下免得炸出尖刺
+      var cosHalf = Math.abs(ux * (dxa / la) + uy * (dya / la));
+      kk[i] = cosHalf > 1e-3 ? Math.min(3, 1 / cosHalf) : 1;
+    }
+
+    var L = [], R = [];
+    for (var j = 0; j < n; j++) {
+      var r = rs[i0 + j] * kk[j];
+      L.push([xs[i0 + j] + ox[j] * r, ys[i0 + j] + oy[j] * r]);
+      R.push([xs[i0 + j] - ox[j] * r, ys[i0 + j] - oy[j] * r]);
+    }
+
+    // ⚠ 路径顺序必须是「左侧边正向 → 终点 → 右侧边逆向 → closePath 收口」，
+    //   即围成一个**不自交**的环。曾经写成「先画起点那条横边、再走左侧边」，
+    //   于是路径变成 L0→R0→L1→R1→L0 这种**蝴蝶结**（自交 X）——
+    //   canvas 的 nonzero 填充规则会把交叉区域互相抵消掉，
+    //   一条本该 31px 宽的带子只填出 ~16px（实测）。
+    //   所以：起点那条横边交给 closePath() 去补，绝不在开头画。
+    ctx.beginPath();
+    if (roundStart) {
+      // 起点端帽（半圆，朝后）：从 L0 出发，画到 R0
+      ctx.moveTo(L[0][0], L[0][1]);
+      ctx.arc(xs[i0], ys[i0], rs[i0],
+        Math.atan2(L[0][1] - ys[i0], L[0][0] - xs[i0]),
+        Math.atan2(R[0][1] - ys[i0], R[0][0] - xs[i0]), false);
+    } else {
+      ctx.moveTo(L[0][0], L[0][1]);
+    }
+    // 左侧边（正向）
+    for (var a = 1; a < n; a++) ctx.lineTo(L[a][0], L[a][1]);
+    // 终点端帽（半圆，朝前）：从 L(n-1) 画到 R(n-1)
+    var lastI = i0 + n - 1;
+    if (roundEnd) {
+      ctx.arc(xs[lastI], ys[lastI], rs[lastI],
+        Math.atan2(L[n - 1][1] - ys[lastI], L[n - 1][0] - xs[lastI]),
+        Math.atan2(R[n - 1][1] - ys[lastI], R[n - 1][0] - xs[lastI]), false);
+    }
+    // 右侧边（逆向），最后 closePath 把 R0 → L0 的起点横边补上
+    for (var b = n - 1; b >= 0; b--) ctx.lineTo(R[b][0], R[b][1]);
+    ctx.closePath();
+    ctx.fill();
   }
 
   /** 整笔终点补半圆端帽（提交 / 重放时调用一次） */
@@ -851,6 +972,30 @@
     this.dimUsers = {};            // userId -> 0..1，成员面板里单独设的
     this.meId = null;              // 我自己的 userId
     this.localHidden = new Set();  // 「只对我隐藏」的图层 id
+    /**
+     * 孤儿笔迹：layerId 在本地还不存在的笔迹，先按图层挂在这儿。
+     *
+     * 为什么必须有它：多人协作里「某人在**刚新建的图层**上落笔」时，
+     * LAYER_ADD 广播和 STROKE_* 广播是两条独立的消息，没有顺序保证 ——
+     * 笔迹完全可能先到。以前 addCommitted 遇到认不出的 layerId 会兜底到
+     * **最后一层**（newStroke 兜底的是「活动图层」，服务端又是「最后一层」，
+     * 三个兜底目标各说各话），于是那一笔落在谁的屏幕上都不一样，
+     * 表现就是「有概率看不到别人的某一图层」。
+     *
+     * 正确做法是**别猜**：认不出就存下来，等 LAYER_ADD 把那一层补进来再落笔。
+     * Map<layerId, stroke[]>
+     */
+    this.orphanStrokes = new Map();
+    /**
+     * 「正在画」那条路（STROKE_BEGIN→POINTS→END）的孤儿缓冲。
+     * 笔迹还没结束时分不清它是几笔，所以单独用一张表：
+     *   id -> { begin: info, pts: [[x,y,p]…], end: {seq} | null }
+     * 等图层补进来时整条重放，和作者端看到的完全一致。
+     * Map<strokeId, {begin, pts, end}>
+     */
+    this.orphanBegins = new Map();
+    /** 孤儿笔迹堆积上限。正常网络下几条就消化掉了，留着是防有人故意灌 */
+    this.orphanLimit = 512;
     this.replayStrokes = [];
     this.replayCursor = 0;
     this.replayTotal = 0;
@@ -1210,6 +1355,10 @@
     if (Array.isArray(groups)) this.setGroups(groups);
     if (!this.layers.length) this.addLayerMeta({ id: P.rid('L'), name: '图层 1' });
     if (!this.getLayer(this.activeLayerId)) this.activeLayerId = this.layers[this.layers.length - 1].id;
+    // 图层表定稿了 —— 把之前因为「层还没到」而挂着的笔迹补落下去。
+    // 必须在 baseDirty 之前做，否则这一帧合成用的还是旧图层表。
+    var flushed = this.flushOrphanStrokes();
+    if (flushed) this.baseKey = '';
     this.baseDirty = true;
     this.baseKey = '';
     this.emit('layers', this.layerList());
@@ -1227,6 +1376,10 @@
   /* ---------------- 笔迹 ---------------- */
 
   CanvasEngine.prototype.newStroke = function (info) {
+    // 认不出的 layerId 兜底到「活动图层」。
+    // 注意：这条兜底**只**对本地作画（自己刚落笔、图层一定在本地）成立。
+    // 远端笔迹走 addCommitted，那边认不出就挂起来等 LAYER_ADD，绝不兜底 ——
+    // 两个兜底目标不一致正是「同一笔落在不同图层」的来源。
     var layer = this.getLayer(info.layerId) || this.activeLayer();
     var br = P.normalizeBrush(info);
     return {
@@ -1285,6 +1438,15 @@
   };
 
   CanvasEngine.prototype.beginStroke = function (info) {
+    // 远端笔迹的 layerId 也认不出时**别兜底**：挂起来等 LAYER_ADD。
+    // 这里是「正在画」的实时预览路（STROKE_BEGIN → POINTS → END），
+    // 兜底到活动图层的话，那一笔会从头到尾长在错误的层上 ——
+    // 和 addCommitted 是同一个坑的两个入口。
+    // 本地作画（info.local）不受影响：自己的图层一定在本地。
+    if (info && !info.local && info.id && info.layerId && !this.getLayer(info.layerId)) {
+      this._queueOrphan(Object.assign({}, info, { _pendingBegin: true }));
+      return null;
+    }
     var stroke = this.newStroke(info);
     var layer = this.getLayer(stroke.layerId);
     if (!layer) return null;
@@ -1309,8 +1471,31 @@
     return stroke;
   };
 
+  /**
+   * 改写某条「正在画」的笔迹里，末尾 n 个点的压力值。
+   * 用途：起笔那一下浏览器给的是占位压力（Chrome 常给 0.5），真值要到第一个
+   * pointermove 才出现。等真值到了，把开头的点回改成同一档，笔尖才不会被
+   * 起手那半压顶出一个「小圆头」。
+   * 只改压力，坐标一律不动。
+   */
+  CanvasEngine.prototype.patchTailPressure = function (strokeId, n, pressure) {
+    var e = this.pending.get(strokeId);
+    if (!e || !e.stroke || !e.stroke.points.length) return 0;
+    var pts = e.stroke.points;
+    var cnt = Math.min(n, pts.length);
+    for (var i = pts.length - cnt; i < pts.length; i++) pts[i][2] = pressure;
+    return cnt;
+  };
+
   CanvasEngine.prototype.addPoints = function (strokeId, pts) {
     var e = this.pending.get(strokeId);
+    // 这条笔迹的 BEGIN 因为「层还没到」被挂起来了 → 点也一并缓冲，
+    // 等图层补进来时按原顺序重放，不然大家看到的线会缺前面几段。
+    if (!e) {
+      var ob = this.orphanBegins.get(strokeId);
+      if (ob && pts && pts.length) for (var k = 0; k < pts.length; k++) ob.pts.push(pts[k]);
+      return;
+    }
     if (!e || !pts || !pts.length) return;
     var fromIndex = e.stroke.points.length;
     // 尺子吸附：**只对本地笔迹**做，而且就在存点这一刻做 ——
@@ -1365,7 +1550,12 @@
 
   CanvasEngine.prototype.endStroke = function (strokeId, seq) {
     var e = this.pending.get(strokeId);
-    if (!e) return null;
+    // BEGIN 被挂起（层还没到）→ 先把 END 记下来，等 flush 时整条重放。
+    if (!e) {
+      var ob = this.orphanBegins.get(strokeId);
+      if (ob) ob.end = { seq: seq };
+      return null;
+    }
     this.pending.delete(strokeId);
     var stroke = e.stroke;
     // 收笔时刻（回放用）。本地落笔和远端笔迹都走这里，
@@ -1456,6 +1646,8 @@
   };
 
   CanvasEngine.prototype.cancelStroke = function (strokeId) {
+    // 被挂起的孤儿笔迹收到 CANCEL：直接丢掉，别等图层来了再补画一笔废线
+    if (this.orphanBegins.has(strokeId)) { this.orphanBegins.delete(strokeId); return; }
     var e = this.pending.get(strokeId);
     if (!e) return;
     this.pending.delete(strokeId);
@@ -1469,8 +1661,14 @@
 
   // 直接注入一笔已确认笔迹（历史同步 / 重做）
   CanvasEngine.prototype.addCommitted = function (stroke) {
+    if (!stroke) return null;
     if (this.byId.has(stroke.id)) return null;
-    var layer = this.getLayer(stroke.layerId) || this.layers[this.layers.length - 1];
+    var layer = this.getLayer(stroke.layerId);
+    // 认不出 layerId → **不要兜底**，先挂着等 LAYER_ADD。
+    // 兜底到 layers[last] 会让这一笔落在任意一层上，而且和作者端的兜底
+    // （newStroke → activeLayer）还不是同一层 —— 那正是「有概率看不到别人的
+    // 某一图层」的根子。等层补进来再落笔，画面对所有人一致。
+    if (!layer) { this._queueOrphan(stroke); return null; }
     stroke.layerId = layer.id;
     if (stroke.seq && layer.baseSeq && stroke.seq <= layer.baseSeq) {
       this.seq = Math.max(this.seq, stroke.seq);
@@ -1489,6 +1687,71 @@
     this.mirrorToView(layer, stroke);
     this.invalidate();
     return stroke;
+  };
+
+  /** 把认不出图层的笔迹挂进待办表 */
+  CanvasEngine.prototype._queueOrphan = function (stroke) {
+    var lid = stroke && stroke.layerId;
+    if (!lid) return;
+    // 「正在画」的实时笔迹另走一条：它后面还会来 POINTS / END，必须整条缓冲
+    if (stroke._pendingBegin) {
+      if (this.orphanBegins.size >= this.orphanLimit) return;
+      if (!this.orphanBegins.has(stroke.id)) {
+        this.orphanBegins.set(stroke.id, { begin: stroke, pts: [], end: null });
+      }
+      return;
+    }
+    var arr = this.orphanStrokes.get(lid);
+    if (!arr) { arr = []; this.orphanStrokes.set(lid, arr); }
+    if (arr.length >= this.orphanLimit) {
+      arr.shift();     // 堆爆了就丢最老的，别让它无限涨
+      this.baseDirty = true;
+    }
+    arr.push(stroke);
+  };
+
+  /**
+   * 图层表更新后，把「等这一层」的孤儿笔迹补落下去。
+   * setLayers / addLayerMeta 之后都要调一次（服务端 LAYERS 广播是唯一入口）。
+   */
+  CanvasEngine.prototype.flushOrphanStrokes = function () {
+    if (!this.orphanStrokes.size && !this.orphanBegins.size) return 0;
+    var self = this;
+    var landed = 0;
+    // 先快照再清空：addCommitted 有可能又挂出新的孤儿（链式情形），
+    // 直接在原 Map 上迭代会边改边遍历，行为不确定。
+    var pending = new Map(this.orphanStrokes);
+    this.orphanStrokes = new Map();
+    pending.forEach(function (arr, lid) {
+      var layer = self.getLayer(lid);
+      if (!layer) { self.orphanStrokes.set(lid, arr); return; }  // 那一层还是没来，继续等
+      arr.forEach(function (s) {
+        var got = self.addCommitted(s);
+        if (got) landed++;
+      });
+    });
+    // 实时笔迹：整条重放（BEGIN → POINTS → END）
+    var begins = new Map(this.orphanBegins);
+    this.orphanBegins = new Map();
+    begins.forEach(function (rec, id) {
+      if (!rec.begin || !self.getLayer(rec.begin.layerId)) { self.orphanBegins.set(id, rec); return; }
+      var st = self.beginStroke(Object.assign({}, rec.begin, { _pendingBegin: false }));
+      if (!st) return;
+      if (rec.pts.length) self.addPoints(id, rec.pts);
+      // 还没收到 END 的就让它继续在 pending 里长着，后面的 POINTS/END 走正常路
+      if (rec.end) self.endStroke(id, rec.end.seq);
+      landed++;
+    });
+    if (landed) this.baseDirty = true;
+    return landed;
+  };
+
+  /** 孤儿笔迹数（测试 / 调试用） */
+  CanvasEngine.prototype.orphanCount = function () {
+    var n = 0;
+    this.orphanStrokes.forEach(function (a) { n += a.length; });
+    n += this.orphanBegins.size;
+    return n;
   };
 
   CanvasEngine.prototype.applyStrokeToLayer = function (layer, stroke) {
@@ -1764,7 +2027,14 @@
 
   /** 刚提交完一笔：顺手往 viewCanvas 上补一笔（不用重放整层，几十笔的图层也不会卡） */
   CanvasEngine.prototype.mirrorToView = function (layer, stroke) {
-    if (!this.dimOn() || !layer || !stroke) return;
+    if (!layer || !stroke) return;
+    // 协作视图关着时**没有** viewCanvas 这个概念（displayCanvas 直接返回 layer.canvas），
+    // 所以什么都不用补。但要顺手把可能存在的陈年 viewCanvas 丢掉 ——
+    // 以前这里直接 return，残留的旧 viewCanvas 一旦被读到就是「某一图层画面停在过去」。
+    if (!this.dimOn()) {
+      if (layer.viewCanvas) { layer.viewCanvas = null; layer.viewCtx = null; layer.viewN = -1; }
+      return;
+    }
     if (isSelectStroke(stroke)) return;
     this.ensureView(layer);
     this.applyStrokeToView(layer, stroke);
@@ -2696,9 +2966,14 @@
         return g.id + (g.visible ? '1' : '0') + g.opacity + g.blend;
       }).join(',') + '|' +
       this.layers.map(function (l) {
+        // 蒙版与剪贴的状态**必须进键**。少它们的后果：远端把某层的
+        // 「套上/摘掉蒙版」或「设成剪贴蒙版」广播过来时，图层数组的
+        // 长度 / 顺序 / 可见性全都没变 → 键一样 → 复用旧基底，
+        // 屏幕上那一层看着像根本没变（用户反馈的「看不到某一图层」有一路就是它）。
         return l.id + (l.visible ? '1' : '0') + l.opacity + l.blend + ':' +
           l.groupId + ':' +
-          l.strokes.length + '/' + (l.baseSeq || 0) + '/' + (l.alphaLock ? 1 : 0);
+          l.strokes.length + '/' + (l.baseSeq || 0) + '/' + (l.alphaLock ? 1 : 0) + '/' +
+          (l.hasMask ? 1 : 0) + (l.maskEnabled === false ? 0 : 1) + (l.clip ? 1 : 0);
       }).join(',');
     if (!this.baseDirty && key === this.baseKey && this.baseComposite) return;
     if (!this.baseComposite || this.baseComposite.width !== this.width ||
@@ -3146,7 +3421,12 @@
     if (!(opts && opts.rawLayer) && layer.clip) {
       var ci = this.layers.indexOf(layer);
       var below = ci > 0 ? this.layers[ci - 1] : null;
-      if (below && below.canvas && this.layerDrawable(below)) clipSrc = below.canvas;
+      // ⚠ 这里必须取**显示那份**（displayCanvas），不能直接用 below.canvas。
+      // 下面那层的 srcCanvas 传进来的已经是 displayCanvas/layer.canvas 了，
+      // 剪贴的底却读原始像素的话，两边取的不是同一份内容 ——
+      // 协作视图开着、或下面那层还有未提交笔迹时，剪贴范围会和实际显示对不上
+      // （表现就是「上面那层被裁掉一大块 / 某一层看着像消失了」）。
+      if (below && below.canvas && this.layerDrawable(below)) clipSrc = this.displayCanvas(below);
     }
     if (!m && !clipSrc) {
       dstCtx.globalAlpha = layer.opacity;
@@ -3218,6 +3498,30 @@
 
   CanvasEngine.prototype.exportPNG = function () {
     return this.renderDocument({}).canvas.toDataURL('image/png');
+  };
+
+  /**
+   * 把一份「笔迹数组」渲染成一张图（白底）—— 接龙专用。
+   *
+   * 猜词阶段拿到的题面是上家的**笔迹数据**（不是 PNG），本地渲成图展示；
+   * 回放阶段每幅画的缩略 / 大图也走这里。渲染路径与回放共用
+   * （replayStampOne：普通笔迹 / 油漆桶 / 模糊都能吃），保证「猜的时候看到的」
+   * 和「回放里看到的」跟作者当时画出来的完全一致。
+   *
+   * @param {Array} strokes 服务端收格时存下的笔迹数组（engine 原生格式）
+   * @param {string} [bg] 背景色（默认白色；传 'transparent' 就不铺底）
+   */
+  CanvasEngine.prototype.renderStrokesPNG = function (strokes, bg) {
+    var c = mkCanvas(this.width, this.height, false);
+    if (bg !== 'transparent') {
+      c.ctx.fillStyle = bg || '#ffffff';
+      c.ctx.fillRect(0, 0, this.width, this.height);
+    }
+    var self = this;
+    (strokes || []).forEach(function (s) {
+      try { self.replayStampOne(c.ctx, c.canvas, s); } catch (e) { /* 单笔坏了别拖垮整幅 */ }
+    });
+    return c.canvas.toDataURL('image/png');
   };
 
   CanvasEngine.prototype.renderLayerPNG = function (layerId) {

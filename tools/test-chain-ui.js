@@ -9,6 +9,19 @@
  * 然后逐个把新加的弹窗 / 面板翻出来看它们在不在、有没有报错。
  *
  * 用法：node tools/test-chain-ui.js [wsUrl]
+ *
+ * ⚠ 现状：**大部分已跟上 v9 的接龙重制，只剩「回放」那一节还没重写，所以整份仍是红的。**
+ *   已修好：开局要在**大厅**里四个人都点「准备」（v9 起 GAME_START 只进大厅）；
+ *   面板里的「回合数」换成「链长」#chainLength；进度面板是「当前这手 + 已交几份」两行
+ *   （不再一条链一行）；题面形状是 WORD/DRAWING/GUESS 三个大写 STEP（作画拿 word、
+ *   猜词拿 strokes）；链长 = 人数 = 4，所以一圈是**四格**（词→画→猜→画）。
+ *
+ *   ❌ 还没改的：[7] 后半段。v9 的回放面板换成了**单舞台播放器**
+ *      （`#rpStage` 一次只演一格 + `#rpNextItem`/`#rpPrevItem` 逐格走），
+ *      而这节还在找旧版的 `#rpStrip .rp-cell`（一格一列的长条）和 `.rp-cell.covered`，
+ *      所以「回放里摆出了每一格」和后面的 `waitReveal()` 都会超时。
+ *      要按 `#rpStage` + `#rpPills` + `#rpNextItem` 重写这一节。
+ *      回放面板本身是好的 —— 这条是**测试没跟上**，不是功能坏了。
  */
 'use strict';
 
@@ -212,8 +225,14 @@ async function createRoom(page, name) {
     themeLabels.some(t => /碧蓝|档案/.test(t)) && themeLabels.some(t => /方舟/.test(t)),
     JSON.stringify(themeLabels));
 
-  const rounds = await host.inputValue('#chainRounds');
-  ok('圈数默认 3（最短的完整「词→画→猜」）', rounds === '3', '实际 ' + rounds);
+  // ⚠ v9 把接龙的「回合数」换成了「链长」（#chainRounds 在接龙面板里已经不存在了 ——
+  //    上面那条「回合数那行被隐藏」正是在说这件事）。默认 = 在线人数，也就是「传遍全场」。
+  const chainLen = await host.inputValue('#chainLength');
+  ok('链长默认 = 在线人数（4 人 → 4 手，传遍全场）', chainLen === '4', '实际 ' + chainLen);
+  const lenOpts = await host.evaluate(() =>
+    Array.from(document.querySelectorAll('#chainLength option')).map(o => o.value));
+  ok('链长可选范围是 3 ~ 人数', lenOpts[0] === '3' && lenOpts[lenOpts.length - 1] === '4',
+    JSON.stringify(lenOpts));
   const playersTxt = await host.textContent('#chainPlayers');
   ok('写明了在线人数与门槛', /4/.test(playersTxt) && /人/.test(playersTxt), '实际「' + playersTxt + '」');
 
@@ -223,10 +242,27 @@ async function createRoom(page, name) {
     (await host.inputValue('#chainTheme')) === 'bluearchive');
 
   await host.click('#btnChainStart');
-  await sleep(1500);
+  await sleep(1200);
+
+  // ⚠ v9 起「进入大厅」不等于开打：GAME_START 只把大家带进**大厅**等人准备
+  //    （见 chain.js 的 start()）。少了四个人都点「准备」这一步，
+  //    后面所有阶段断言都会停在 chain_lobby —— 这条用例是 v9 之前写的。
+  const lobby = await host.evaluate(() => (window.ChaApp.state.game || {}).phase);
+  ok('点「进入大厅」后落在接龙大厅', lobby === 'chain_lobby' || lobby === 'lobby', 'phase=' + lobby);
+  for (const p of pages) {
+    const canReady = await p.evaluate(() => !!document.querySelector('#btnChainReady'));
+    if (!canReady) continue;
+    await p.click('#btnChainReady');
+    await sleep(150);
+  }
+  // 全员就绪 → 自动开局 → 开场鼓点（INIT）过了才进写词
+  await host.waitForFunction(
+    () => (window.ChaApp.state.game || {}).phase === 'chain_write',
+    null, { timeout: 20000 }).catch(() => {});
+  await sleep(300);
 
   const st = await host.evaluate(() => (window.ChaApp.state.game || {}).phase);
-  ok('服务端认为在接龙写词阶段', st === 'chain_write', 'phase=' + st);
+  ok('四个人都准备后，服务端认为在接龙写词阶段', st === 'chain_write', 'phase=' + st);
   ok('快照里的 mode 是 chain',
     await host.evaluate(() => (window.ChaApp.state.game || {}).mode === 'chain'));
 
@@ -255,10 +291,19 @@ async function createRoom(page, name) {
 
   const prog = await host.evaluate(() => {
     const b = document.querySelector('#chainProgress');
-    return { visible: b && !b.classList.contains('hidden'), rows: document.querySelectorAll('#cpList .cp-row').length };
+    const dots = document.querySelectorAll('#cpList .cp-dot').length;
+    return {
+      visible: b && !b.classList.contains('hidden'),
+      rows: document.querySelectorAll('#cpList .cp-row').length,
+      dots,
+      text: b ? b.textContent.replace(/\s+/g, ' ').trim() : ''
+    };
   });
   ok('链条进度面板可见', prog.visible);
-  ok('4 条链各占一行', prog.rows === 4, '实际 ' + prog.rows);
+  // ⚠ v9 把「每条链一行」改成了「当前这一手 + 提交进度」两行 ——
+  //    因为现在所有链是**同步走同一手**的，一条链一行的列表反而看不出「现在到第几手」。
+  ok('进度面板两行（当前这手 / 已交几份）', prog.rows === 2, '实际 ' + prog.rows + ' 行：' + prog.text);
+  ok('★ 手数用一排点标出来（点数 = 链长 4）', prog.dots === 4, '实际 ' + prog.dots + ' 个点');
 
   ok('房主能看到「立刻推进」', await host.isVisible('#ghNext'));
   ok('非房主看不到「立刻推进」', !(await pages[1].isVisible('#ghNext')));
@@ -299,10 +344,12 @@ async function createRoom(page, name) {
   // stepTotal 是「这一圈」的步数（每人一步），不是整局的 —— 4 人一圈就是 4
   const st2 = await host.evaluate(() => ({
     total: (window.ChaApp.state.game || {}).stepTotal,
-    totalRounds: (window.ChaApp.state.game || {}).rounds
+    chainLength: (window.ChaApp.state.game || {}).chainLength
   }));
   ok('这一圈的总步数 = 在场人数', st2.total === 4, JSON.stringify(st2));
-  ok('总圈数是刚才选的 3', st2.totalRounds === 3, JSON.stringify(st2));
+  // ⚠ v9 把「回合数（圈数）」换成了「链长」——一圈就是一次接力，链长 = 传几手。
+  //    开局时没显式改过 #chainLength，它的默认值 = 在线人数 = 4。
+  ok('链长 = 在线人数（4 手）', st2.chainLength === 4, JSON.stringify(st2));
 
   // 每个人都提交自己的词
   for (let i = 1; i < 4; i++) {
@@ -339,10 +386,13 @@ async function createRoom(page, name) {
 
   const drawTask = await host.evaluate(() => {
     const t = window.ChaApp.state.chainTask;
-    return t ? { step: t.step, hasWord: !!t.word, hasImg: !!t.image } : null;
+    return t ? { step: t.step, hasWord: !!t.word, hasImg: !!t.image, strokes: (t.strokes || []).length } : null;
   });
+  // ⚠ STEP 的值在 v9 改成了大写（'DRAWING' / 'GUESS' / 'WORD'），题面也换了形状：
+  //    作画拿到的是**一个词**（word），猜词拿到的是**上家的笔迹数组**（strokes，
+  //    客户端自己渲染成图）—— 不再是以前的 _img / hasImg。
   ok('作画这一步的题面是「一个词」，不是图',
-    !!drawTask && drawTask.step === 'draw' && drawTask.hasWord && !drawTask.hasImg,
+    !!drawTask && drawTask.step === 'DRAWING' && drawTask.hasWord && drawTask.strokes === 0,
     JSON.stringify(drawTask));
 
   for (const p of pages) await drawOne(p);
@@ -364,13 +414,15 @@ async function createRoom(page, name) {
   }
   const guessTask = await host.evaluate(() => {
     const t = window.ChaApp.state.chainTask;
-    return t ? { step: t.step, keys: Object.keys(t).sort().join(','), wordLen: t.wordLen, hasImg: !!t.image } : null;
+    return t ? { step: t.step, keys: Object.keys(t).sort().join(','), strokes: (t.strokes || []).length, word: t.word } : null;
   });
-  ok('猜词这一步只拿到「图 + 字数」，没有词',
-    !!guessTask && guessTask.step === 'guess'
-      && guessTask.keys === 'deadline,image,step,wordLen' && guessTask.hasImg,
+  // ⚠ v9 的猜词题面是 { step:'GUESS', strokes:[...] } —— 笔迹数组，客户端本地渲染成图
+  //    （渲染好的那张会挂在本地字段 _img 上，所以 keys 里有它，但那是前端自己加的）。
+  //    关键是：**只有笔迹，没有 word**。
+  ok('猜词这一步只拿到「上家的笔迹」，没有词',
+    !!guessTask && guessTask.step === 'GUESS' && guessTask.strokes > 0 && !guessTask.word,
     JSON.stringify(guessTask));
-  ok('猜词面板把图显示出来了', await host.evaluate(() => {
+  ok('猜词面板把图渲染出来了', await host.evaluate(() => {
     const el = document.querySelector('#chainTask .ct-img');
     return !!(el && el.src && el.src.length > 100);
   }));
@@ -405,9 +457,17 @@ async function createRoom(page, name) {
   }
   await sleep(2600);
 
-  // 三圈走完 → 回放 / 投票
+  // ⚠ v9 的链长默认 = 在线人数 = 4，所以格子是**四格**：
+  //    写词 → 照词作画 → 看画猜词 → 再照词作画（第 4 手还是画），然后才进回放。
+  //    这里补上最后一格作画，不然会停在 chain_draw 上。
   phase = await host.evaluate(() => (window.ChaApp.state.game || {}).phase);
-  ok('一圈走完自动进入回放 / 投票阶段', phase === 'chain_vote', 'phase=' + phase);
+  if (phase === 'chain_draw') {
+    console.log('    （第 4 手还是作画 —— 补走一格）');
+    for (const p of pages) await drawOne(p);
+    await sleep(2600);
+    phase = await host.evaluate(() => (window.ChaApp.state.game || {}).phase);
+  }
+  ok('一圈走完自动进入回放阶段', phase === 'chain_reveal' || phase === 'chain_vote', 'phase=' + phase);
   if (phase !== 'chain_vote') {
     const rg = await host.evaluate(() => {
       const g = window.ChaApp.state.game || {};
@@ -421,6 +481,9 @@ async function createRoom(page, name) {
     }
   }
 
+  // 回放面板要等它真的弹出来再取样（阶段刚切过去时它还在渲染）
+  await host.waitForSelector('#replayMask:not(.hidden)', { timeout: 6000 }).catch(() => {});
+  await sleep(400);
   const rp = await host.evaluate(() => {
     const mask = document.querySelector('#replayMask');
     return {
@@ -432,8 +495,8 @@ async function createRoom(page, name) {
     };
   });
   ok('回放面板自动弹出来', rp.visible);
-  // 3 圈 = 一条链 3 格（词→画→猜），4 条链逐条翻
-  ok('回放里摆出了这条链的每一格（3 圈 = 3 格）', rp.cells === 3, '实际 ' + rp.cells + ' 格');
+  // 链长 4 → 一条链 4 格（词→画→猜→画），4 条链逐条翻
+  ok('回放里摆出了这条链的每一格（链长 4 = 4 格）', rp.cells === 4, '实际 ' + rp.cells + ' 格');
 
   // 回放是「逐格揭晓」的：格子上先挂着 .covered，判定与投票按钮要等演完才出现。
   // 所以下面所有依赖「揭晓完成」的断言都必须先等这一个条件 —— 用固定 sleep 会随机失败。

@@ -1,6 +1,7 @@
 'use strict';
 
 const CT = require('./custom-themes');
+const P = require('./protocol');
 
 /**
  * 主题词库。
@@ -485,16 +486,20 @@ function nameOf(id) {
 }
 
 /**
- * 主题词库自检：和通用词库同一套规矩 —— 必须是 2 字以上的中文。
- * 单字词在这类游戏里是硬错误：猜手只知道「一个字」，而且任何字与它的编辑距离
- * 都是 1，会不停误报「很接近了」。
+ * 主题词库自检：和通用词库同一套规矩 —— 必须是「能玩的词」
+ * （中文 / 英文 / 数字，1 ~ 12 个字符，不带空格标点，见 protocol.isPlayableWord）。
+ *
+ * ⚠ 单字词现在是允许的（用户要求「可英文和一个字」）：
+ *   当初拦它的两个理由都已经在别处解决 —— 露字提示有 HINT_MIN_LEN = 3 兜着，
+ *   「很接近了」的误报有 isNearGuess 的 `w.length < 2 → false` 兜着。
+ *   上面「刻意不收单字代号」那段注释是历史包袱，收不收只看**画不画得出来**。
  */
 Object.keys(THEMES).forEach(k => {
   const list = THEMES[k].words;
   if (!list) return;
-  const bad = list.filter(w => !/^[\u4e00-\u9fa5]{2,}$/.test(w));
+  const bad = list.filter(w => !P.isPlayableWord(w));
   if (bad.length) {
-    throw new Error('主题词库「' + THEMES[k].name + '」里有不合格的词（必须是 2 字以上的中文）：' + bad.join('、'));
+    throw new Error('主题词库「' + THEMES[k].name + '」里有不合格的词（非空、不带空白、1~12 个字符、至少一个实义字符）：' + bad.join('、'));
   }
   const dup = list.filter((w, i) => list.indexOf(w) !== i);
   if (dup.length) {

@@ -16,6 +16,8 @@ screenshots/
 tools/_*.js
 tools/bin/
 *.log
+# 有些用例把房间存档直接落在仓库根目录（相对路径没写全时就会这样），别带进版本库
+.tmp-rooms-*/
 
 # 介绍视频的中间产物（成片太大也不进库；video/README.md 例外）
 video/*

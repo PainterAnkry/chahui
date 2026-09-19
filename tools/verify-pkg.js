@@ -26,13 +26,23 @@ if (!fs.existsSync(ASAR)) {
 // 命中不了说明 asar 里还是旧版本。
 const CHECKS = [
   ['renderer/config.js', [/appVersion:\s*'([0-9.]+)'/]],
-  ['renderer/engine.js', [/renderUnits/, /composeGroup/, /activeGroupIds/, /applyStrokeToMask/, /dropMask/]],
+  ['renderer/engine.js', [/renderUnits/, /composeGroup/, /activeGroupIds/, /applyStrokeToMask/, /dropMask/,
+    // v2.0.4：「线条中间有顿感」的根治 —— 逐点变宽带状填充 + alpha 迟滞，
+    // 两者缺一，包里的笔迹还是会一段粗一段细、每隔几个点掐一下
+    /fillVariableRibbon/, /ALPHA_HYST/,
+    // v2.0.4 追加：「有概率看不到别人的某一图层」—— 孤儿笔迹挂起等图层，
+    // 缺了它包里的多人协作还是会把先到的笔迹兜底到错误的图层上
+    /orphanStrokes/, /flushOrphanStrokes/,
+    // 同批：合成缓存键必须含蒙版/剪贴状态（否则远端改蒙版那一层看着不更新）
+    /\(l\.hasMask \? 1 : 0\)/]],
   ['renderer/app.js', [/groupAdd/, /pickUpdateAsset/, /groups/, /tunnelRowHtml/, /setMyAvatar/,
     // v2.0.1：图层蒙版 / 剪贴蒙版 + PSD 导入 + 入口页那颗「离线模式」开关
     // serverButtonAction 是「按按钮文案行事」那一下 —— 有它才说明不是旧的「关闭服务器」语义
     /importPsdBytes/, /toggleOffline/, /serverButtonAction/, /renderServerToggle/, /maskEdit/,
     // v2.0.2：GIF 表情不再 canvas 重编码（否则动画变静态第一帧）+ 头像方形裁剪
     /GIF 无论大小都原样保留/, /openAvaCrop/, /acConfirm/]],
+  // v2.0.4 追加：.sut（CSP 笔刷）导入 —— 列名感知的 SQLite 读取 + 真参数连表 + 空白缩略图拒绝
+  ['renderer/brush-import.js', [/sqliteTableRows/, /sutBrushMeta/, /isFlatImage/, /cspColumnNames/]],
   ['renderer/project.js', [/groups/, /maskPng/]],
   // PSD 导出（v1.10.0）：整块自己写的编码器，特征挑格式里最认得出的几个
   ['renderer/psd.js', [/8BPS/, /luni/, /lddg/, /packbits/, /grayChannelRLE/]],

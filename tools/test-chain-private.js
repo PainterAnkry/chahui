@@ -185,7 +185,18 @@ async function main() {
   /* ================= [1] 开局 → 写词 → 作画 ================= */
   console.log('[1] 走到「作画」这一步');
   A.send(P.C2S.GAME_START, { mode: 'chain', rounds: 3 });
-  const inWrite = await waitFor(() => players.every(c => c.phase() === 'chain_write'), 6000, '写词阶段');
+  // ⚠ v9 起 GAME_START **不直接开打**，先进「大厅」等人准备（见 chain.js 的 start()）。
+  //    少了下面这一步，四个人会一直停在 lobby —— 这条用例是 v9 之前写的，原先没这一手。
+  //    另外 GAME_READY 是四条连接各自发的，得等 A 的 GAME_START 真的到了服务端再发，
+  //    否则别的连接上会「没有正在玩的游戏」被静默丢掉。
+  const inLobby = await waitFor(() => players.every(c => c.phase() === 'lobby'), 6000, '大厅');
+  if (!inLobby) {
+    console.log('开局没进大厅：' + players.map(c => c.phase()).join(','));
+    process.exit(1);
+  }
+  players.forEach(c => c.send(P.C2S.GAME_READY, { ready: true }));
+  // INIT（开场鼓点）过了才进写词，窗口要留够
+  const inWrite = await waitFor(() => players.every(c => c.phase() === 'chain_write'), 12000, '写词阶段');
   ok('四个人都进入写词阶段', inWrite,
     'phase=' + players.map(c => c.phase()).join(',') + '  最后一条错误='
     + JSON.stringify(A.last(P.S2C.ERROR)));
@@ -197,7 +208,9 @@ async function main() {
   players.forEach(c => c.send(P.C2S.GAME_SUBMIT, { text: '长颈鹿' }));
   const inDraw = await waitFor(() => players.every(c => c.phase() === 'chain_draw'), 8000, '作画阶段');
   ok('全部交齐后进入作画阶段', inDraw, 'phase=' + players.map(c => c.phase()).join(','));
-  const drawers = players.filter(c => c.task && c.task.step === 'draw');
+  // ⚠ v9 把 STEP 的值改成了大写（STEP = { WORD:'WORD', DRAWING:'DRAWING', GUESS:'GUESS' }），
+  //    这里原先比的是小写 'draw' —— 于是 drawers 恒为空数组，下面一串 .every() 全假绿。
+  const drawers = players.filter(c => c.task && c.task.step === 'DRAWING');
   ok('这一圈每个人都在画（4 条链并行作画）', drawers.length === 4,
     '作画人数=' + drawers.length + '  phase=' + A.phase());
   // 下面一堆断言都是 .every() —— 空数组恒真。必须先确认「确实有 4 个画手」，
@@ -305,7 +318,11 @@ async function main() {
   /* ================= [6] 私密化没把玩法弄坏 ================= */
   console.log('\n[6] 作画这一步照常收尾、链条照常往下走');
   const prevRound = A.gstate.round;
-  drawers.forEach((c, i) => c.send(P.C2S.GAME_ART, { png: fakePng('drawer' + i) }));
+  // ⚠ v9 删掉了 C2S.GAME_ART：作画的收格由服务端**从房间笔迹表按作者摘取**，
+  //    客户端只要发一个无参的 GAME_SUBMIT 当「我画好了」的信号。
+  //    这里原先还在发 GAME_ART，而那个常量已经是 undefined →
+  //    服务端 switch 落到 default 静默丢掉 → 一直卡在 chain_draw。
+  drawers.forEach(c => c.send(P.C2S.GAME_SUBMIT, {}));
   const advanced = await waitFor(() => players.every(c => c.phase() !== 'chain_draw'), 8000, '离开作画阶段');
   ok('四个人都交作品后这一步就结束了', advanced,
     'phase=' + A.phase() + ' round=' + (A.gstate && A.gstate.round));

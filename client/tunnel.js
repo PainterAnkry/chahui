@@ -37,6 +37,9 @@ const CF_URL = IS_WIN
 /** 快速隧道给出的地址长这样；ssh 备选通道是 lhr.life / localhost.run */
 const URL_RE = /https:\/\/[a-z0-9][a-z0-9-]*\.(?:trycloudflare\.com|lhr\.life|localhost\.run)/i;
 
+/** 等 cloudflared 吐出公网地址的上限（首次启动含杀软扫描，不能太短） */
+const WAIT_URL_MS = 180000;
+
 /** 从一段输出里挑出公网地址（cloudflared 的日志是给人看的，格式会变，所以按正则捞） */
 function parseTunnelUrl(text) {
   const m = String(text || '').match(URL_RE);
@@ -73,50 +76,137 @@ function findBinary(opts) {
   return '';
 }
 
-function downloadTo(url, dest, onProgress, depth) {
-  depth = depth || 0;
+/* ---------------- 下载（带重试 / 续传 / 完整性校验） ----------------
+ * 这一段以前是「一把梭」：转三次失败就整个放弃、没有重试、下完不验大小。
+ * 国内拉 GitHub 大文件经常中途被掐，一掐就整条失败，用户看到的就是
+ * 「内置公网组件总是下载失败」。现在按「失败就换招、断了接着下」来做。
+ */
+
+/** 一个会跟重定向的 GET，把「成功 / 重定向 / 失败」三件事分开报给调用方 */
+function httpGet(url, onOk, onErr, onRedirect, opts) {
+  // 下载 54MB 的二进制，60 秒太紧（慢速网络一动就超）。默认放宽到 5 分钟，
+  // 无数据流动的「静默超时」另算（见 downloadOnce 的 idle timer）。
+  const o = opts || {};
+  const timeout = o.timeout || 300000;
+  const headers = Object.assign({ 'User-Agent': 'chahui-tunnel' }, o.headers || {});
+  // 按地址本身的协议选请求器：https 走 https，http 走 http。
+  // （写死 https.get 会让 http:// 的地址直接抛 "Protocol http: not supported"，
+  //  本地伪服务器 / 内网自建下载源就全测不了、也用不了。）
+  const mod = /^http:\/\//i.test(url) ? http : https;
+  const req = mod.get(url, { timeout: timeout, headers: headers }, (res) => {
+    // 3xx 一律交给调用方处理（GitHub → release-assets 会转两次）
+    if (res.statusCode >= 300 && res.statusCode < 400) {
+      const loc = res.headers.location;
+      res.resume();
+      return onRedirect(res.statusCode, loc ? new URL(loc, url).toString() : '');
+    }
+    // 200 = 整份；206 = 服务端接受了 Range，给的是「续传的那一段」（同样算成功）
+    if (res.statusCode !== 200 && res.statusCode !== 206) {
+      res.resume();
+      return onRedirect(res.statusCode, '');
+    }
+    onOk(res);
+  });
+  req.on('error', (e) => onErr(e));
+  req.on('timeout', () => { req.destroy(new Error('请求超时')); });
+  return req;
+}
+
+/** 判断一个错误值不值得重试（网络抖动 / 服务器抽风都值得，404、403 不值得） */
+function worthRetrying(e) {
+  const msg = String((e && e.message) || e || '');
+  if (/4\d\d/.test(msg)) return false;          // 404 / 403 / 429 之外的重试意义不大
+  if (/重定向次数过多/.test(msg)) return false;
+  return true;                                   // 超时 / 断流 / 5xx / DNS 抖动 → 重试
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * 下载一次（支持断点续传）。
+ * @param url      最终可取的地址（已跟完重定向）
+ * @param dest     目标文件
+ * @param onProgress(loaded, total)
+ */
+function downloadOnce(url, dest, onProgress) {
   return new Promise((resolve, reject) => {
-    if (depth > 6) return reject(new Error('重定向次数过多'));
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     const tmp = dest + '.part';
-    const out = fs.createWriteStream(tmp);
-    let got = 0, total = 0;
-    httpGet(url, (res) => {
-      total = Number(res.headers['content-length']) || 0;
-      res.on('data', (c) => {
-        got += c.length;
-        if (onProgress) onProgress(total ? Math.min(1, got / total) : 0, got, total);
-      });
-      res.on('error', (e) => { out.destroy(); reject(e); });
-      out.on('error', (e) => { reject(e); });
-      out.on('finish', () => out.close(() => {
-        try { fs.renameSync(tmp, dest); } catch (e) { return reject(e); }
-        resolve({ bytes: got });
-      }));
-      res.pipe(out);
-    }, (err) => {
-      if (depth < 6) return downloadTo(url, dest, onProgress, depth + 1).then(resolve, reject);
-      reject(err);
-    }, (status, location) => {
-      if (location) return downloadTo(location, dest, onProgress, depth + 1).then(resolve, reject);
-      reject(new Error('HTTP ' + status));
-    });
+    // 已经有半截文件就带上 Range 接着下（服务端不支持就退回整份重下）
+    let have = 0;
+    try { if (fs.existsSync(tmp)) have = fs.statSync(tmp).size; } catch (e) { have = 0; }
+
+    const headers = {};
+    if (have > 0) headers.Range = 'bytes=' + have + '-';
+
+    let settled = false;
+    const done = (fn, arg) => { if (!settled) { settled = true; fn(arg); } };
+
+    const follow = (u, depth) => {
+      if (depth > 8) return done(reject, new Error('重定向次数过多'));
+      const req = httpGet(u, (res) => {
+        // 服务端忽略了 Range（返回 200 整份）→ 从头写，别接在半截后面
+        const resumed = have > 0 && res.statusCode === 206;
+        if (have > 0 && !resumed) have = 0;
+
+        const total = (Number(res.headers['content-length']) || 0) + have;
+        let got = have;
+        const out = fs.createWriteStream(tmp, resumed ? { flags: 'a' } : {});
+        // 长时间没有数据流动就掐掉（连接僵死），交给上层重试
+        let idle = null;
+        const bumpIdle = () => {
+          if (idle) clearTimeout(idle);
+          idle = setTimeout(() => {
+            req.destroy(new Error('下载停滞（超过 60 秒没有数据）'));
+          }, 60000);
+        };
+        bumpIdle();
+
+        res.on('data', (c) => {
+          got += c.length;
+          bumpIdle();
+          if (onProgress) onProgress(got, total);
+        });
+        res.on('error', (e) => { if (idle) clearTimeout(idle); out.destroy(); done(reject, e); });
+        out.on('error', (e) => { if (idle) clearTimeout(idle); done(reject, e); });
+        out.on('finish', () => out.close(() => {
+          if (idle) clearTimeout(idle);
+          // 声明了总大小就核一下，短了说明断流，保留 .part 让下次续传
+          if (total && got < total) {
+            return done(reject, new Error('下载不完整（' + got + '/' + total + ' 字节）'));
+          }
+          try { fs.renameSync(tmp, dest); } catch (e) { return done(reject, e); }
+          done(resolve, { bytes: got });
+        }));
+        res.pipe(out);
+      }, (err) => {
+        done(reject, err);
+      }, (status, location) => {
+        if (location) return follow(location, depth + 1);
+        done(reject, new Error('HTTP ' + status));
+      }, { headers: headers });
+    };
+    follow(url, 0);
   });
 }
 
-/** 一个会跟重定向的 GET，把「成功 / 重定向 / 失败」三件事分开报给调用方 */
-function httpGet(url, onOk, onErr, onRedirect) {
-  const req = https.get(url, { timeout: 60000, headers: { 'User-Agent': 'chahui-tunnel' } }, (res) => {
-    if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
-      res.resume();
-      const loc = res.headers.location;
-      return onRedirect(res.statusCode, loc ? new URL(loc, url).toString() : '');
+/**
+ * 下载：同一地址最多试 maxAttempts 次（第 2 次起走续传），
+ * 全用完再交给上层换下一个镜像。
+ */
+async function downloadWithRetry(url, dest, onProgress, maxAttempts) {
+  const tries = maxAttempts || 3;
+  let lastErr = null;
+  for (let i = 0; i < tries; i++) {
+    try {
+      return await downloadOnce(url, dest, onProgress);
+    } catch (e) {
+      lastErr = e;
+      if (!worthRetrying(e)) break;
+      if (i < tries - 1) await sleep(600 * (i + 1));   // 退避一下再试
     }
-    if (res.statusCode !== 200) { res.resume(); return onErr(new Error('HTTP ' + res.statusCode)); }
-    onOk(res);
-  });
-  req.on('error', onErr);
-  req.on('timeout', () => req.destroy(new Error('下载超时')));
+  }
+  throw lastErr || new Error('下载失败');
 }
 
 /**
@@ -173,7 +263,9 @@ function createTunnel(cfg) {
       try {
         if (isTgz) {
           const tgz = dest + '.tgz';
-          await downloadTo(urls[i], tgz, (p) => set({ percent: p }));
+          await downloadWithRetry(urls[i], tgz, (got, total) => {
+            set({ percent: total ? Math.min(1, got / total) : 0 });
+          });
           require('child_process').execSync('tar -xzf "' + tgz + '" -C "' + path.dirname(dest) + '"');
           try { fs.unlinkSync(tgz); } catch (e) { /* ignore */ }
           if (!fs.existsSync(dest)) {
@@ -182,10 +274,18 @@ function createTunnel(cfg) {
             if (cand) fs.renameSync(path.join(dir, cand), dest);
           }
         } else {
-          await downloadTo(urls[i], dest, (p) => set({ percent: p }));
+          await downloadWithRetry(urls[i], dest, (got, total) => {
+            set({ percent: total ? Math.min(1, got / total) : 0 });
+          });
         }
         try { if (!IS_WIN) fs.chmodSync(dest, 0o755); } catch (e) { /* ignore */ }
         if (!fs.existsSync(dest)) throw new Error('下载完成但文件不在');
+        // 下完了还是半截 / 0 字节，说明网络在骗我们 —— 删掉别留下坏二进制
+        const sz = fs.statSync(dest).size;
+        if (sz < 1024 * 1024) {
+          try { fs.unlinkSync(dest); } catch (e) { /* ignore */ }
+          throw new Error('下载到的文件不完整（只有 ' + sz + ' 字节）');
+        }
         set({ phase: 'starting', percent: 1 });
         return dest;
       } catch (e) {
@@ -193,7 +293,10 @@ function createTunnel(cfg) {
         set({ percent: 0 });
       }
     }
-    throw new Error('公网组件下载失败（' + ((lastErr && lastErr.message) || '未知错误') + '）');
+    // 把所有镜像的真实原因都带上，用户报障时能一眼看出是网络还是别的
+    throw new Error('公网组件下载失败（试了 ' + urls.length + ' 个下载源）' +
+      ((lastErr && lastErr.message) ? '：' + lastErr.message : '') +
+      '，请检查网络或代理设置');
   }
 
   async function start(port, host) {
@@ -247,8 +350,10 @@ function createTunnel(cfg) {
       const timer = setTimeout(() => {
         if (settled) return;
         settled = true;
-        reject(new Error('等了 90 秒还没拿到公网地址，隧道可能被网络挡了'));
-      }, 90000);
+        // 首次启动要等二进制落地（杀软扫描 54MB 的加壳 exe 慢到一两分钟不稀奇），
+        // 90 秒太紧，曾经让「其实能通」的网络被误判成失败
+        reject(new Error('等了 ' + Math.round(WAIT_URL_MS / 1000) + ' 秒还没拿到公网地址，隧道可能被网络挡了'));
+      }, WAIT_URL_MS);
 
       const onData = (buf) => {
         const s = buf.toString();
@@ -322,6 +427,11 @@ module.exports = {
   probeTarget: probeTarget,
   findBinary: findBinary,
   binaryCandidates: binaryCandidates,
+  // 下载相关的内部函数导出出来，是为了 tools/test-tunnel-download.js
+  // 能用本地伪服务器把「断流 → 续传 → 完成」整条路真跑一遍
+  downloadWithRetry: downloadWithRetry,
+  downloadOnce: downloadOnce,
+  worthRetrying: worthRetrying,
   CF_URL: CF_URL,
   CF_NAME: CF_NAME
 };

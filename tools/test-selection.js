@@ -116,7 +116,29 @@ function check(name, ok, extra) {
   await sleep(200);
   await page.evaluate(() => { const e = document.querySelector('#sizeRange'); e.value = 40; e.dispatchEvent(new Event('input', { bubbles: true })); });
   let r = await drag([[200, 400], [1000, 400]]);
-  check('选区笔：涂出一条 40px 宽的带（≈32000 像素）', Math.abs(r.px - 32000) / 32000 < 0.15, r.px + ' 像素');
+  // ⚠ 选区笔是**变宽笔迹**（select 笔刷 pressSize=0.5 / minSize=0.6），
+  //   而 page.mouse 合成的指针事件压力恒为 0.5，所以实际带宽
+  //   = size * widthAt(0.5) = 40 * (1 - 0.5*(1 - 0.5^0.8)) ≈ 31.5px，不是 40px。
+  //   这里是**验收带宽随压感变化**：恒压拖拽必须得到一条宽度稳定、不漏白的带。
+  //   之前这条断言写死 32000±15%，把「40px」当成了恒压结果 —— 属测试预期错误。
+  //   恒压 ~31.5px × 800px ≈ 25000，留 ±15% 余量；同时单独卡「带宽」下限防回到半宽 bug。
+  const bandSpan = await page.evaluate(() => {
+    const e = window.ChaApp.engine;
+    const d = e.selection.ctx.getImageData(0, 0, e.width, e.height).data;
+    let colMax = 0;
+    // 沿线取几列，量每列竖直方向的墨迹跨度（避开两端圆头）
+    for (const x of [350, 500, 650, 800, 950]) {
+      let up = -1, dn = -1;
+      for (let y = 300; y < 500; y++) { if (d[(y * e.width + x) * 4 + 3] > 8) { if (up < 0) up = y; dn = y; } }
+      const span = up < 0 ? 0 : dn - up + 1;
+      // 最窄的一段才是关键（半宽 bug 会让它掉到 ~16）
+      if (colMax === 0 || span < colMax) colMax = span;
+    }
+    return colMax;
+  });
+  check('选区笔：涂出一条带宽稳定的带（恒压 ≈31.5px，不是 40px）',
+    Math.abs(r.px - 25000) / 25000 < 0.15, r.px + ' 像素');
+  check('选区笔：带的竖直跨度 ≈31.5px（半宽 bug 回归防线）', bandSpan > 28 && bandSpan < 36, '最窄列跨度 ' + bandSpan + 'px');
 
   await page.click('#toolGrid .tool[data-item="marquee"]');
   await sleep(200);

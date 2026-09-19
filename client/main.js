@@ -214,8 +214,13 @@ function tunnelOptions() {
     // 写进去之后 App 里的分享链接会自动切到公网地址。
     urlFile: path.join(app.getPath('userData'), 'public-url.txt'),
     logFile: path.join(app.getPath('userData'), 'tunnel.log'),
-    // 国内直连 GitHub 的下载经常不通，自动换镜像再试
-    mirrors: ['https://ghfast.top/']
+    // 国内直连 GitHub 的下载经常不通：按顺序多试几个镜像，
+    // 每个镜像内部还会自动重试 + 断点续传（见 tunnel.js downloadWithRetry）
+    mirrors: [
+      'https://ghfast.top/',
+      'https://gh-proxy.com/',
+      'https://ghproxy.net/'
+    ]
   };
 }
 

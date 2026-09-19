@@ -10,6 +10,7 @@ const P = require('./protocol');
 const { RoomStore } = require('./rooms');
 const { Game, PHASE, CFG: GAME_CFG } = require('./game');
 const { ChainGame, CHAIN_PHASE, CHAIN_PHASE_LABEL, CFG: CHAIN_CFG } = require('./chain');
+const { SkinGame, SKIN_PHASE, SKIN_PHASE_LABEL, ROLE_INFO, CAMP, CFG: SKIN_CFG } = require('./skin');
 const THEMES = require('./themes');
 const WORDS = require('./words');
 
@@ -82,7 +83,7 @@ const MIME = {
 };
 
 function serveStatic(req, res) {
-  const url = new URL(req.url, 'http://localhost');
+  const url = parseReqUrl(req);
   let rel = decodeURIComponent(url.pathname);
   if (rel === '/' || rel === '') rel = '/index.html';
   const file = path.normalize(path.join(PUBLIC_DIR, rel));
@@ -117,9 +118,38 @@ function json(res, code, obj) {
   res.end(body);
 }
 
+/**
+ * 安全地解析请求 URL。
+ *
+ * 为什么不能直接 `new URL(req.url, 'http://localhost')`：
+ * Node 的 HTTP 解析器对「请求行」相当宽松，`GET // HTTP/1.1` 这种
+ * 请求目标是合法收下的，但 `new URL('//', base)` 会抛 `ERR_INVALID_URL`。
+ * 这个抛在请求处理器顶层且没被 catch —— 一个畸形请求就能把整个服务端
+ * 进程带走（实测：一条 `//` 请求让 112 个房间的服务原地退出）。
+ * 外壳/扫描器/手滑的客户端都可能造出这种 URL，不能靠「没人会这么发」兜底。
+ * 解析失败就退化成根路径，让后续逻辑当成普通 404 处理。
+ */
+function parseReqUrl(req) {
+  try {
+    return new URL(req.url, 'http://localhost');
+  } catch (e) {
+    return new URL('http://localhost/');
+  }
+}
+
 const server = http.createServer((req, res) => {
-  const url = new URL(req.url, 'http://localhost');
-  if (url.pathname === '/health') return json(res, 200, { ok: true, rooms: store.rooms.size, uptime: process.uptime() });
+  const url = parseReqUrl(req);
+  // pid / 协议版本一并给：监控和自动化测试靠它判断「端口上挂着的还是不是我起的那一个」
+  // （旧进程残留会静默顶替，光看 200 分辨不出来）。/api/share 也有，两处保持一致。
+  // 服务端没有「应用版本」这个概念（那是 client 的 package.json），
+  // 这里报协议版本 —— 它才是服务端真正对外承诺的东西。
+  if (url.pathname === '/health') return json(res, 200, {
+    ok: true,
+    rooms: store.rooms.size,
+    uptime: process.uptime(),
+    pid: process.pid,
+    protocolVersion: P.PROTOCOL_VERSION
+  });
   if (url.pathname === '/api/rooms') return json(res, 200, { rooms: store.list() });
   // 自定义主题词库的增删改查（配置类，见下方 handleThemesApi）
   if (url.pathname === '/api/themes' || url.pathname.indexOf('/api/themes/') === 0) {
@@ -132,7 +162,22 @@ const server = http.createServer((req, res) => {
     lanUrls: lanUrls(),
     pid: process.pid,
     game: { PICK_MS: GAME_CFG.PICK_MS, ROUND_MS: GAME_CFG.ROUND_MS, ROUND_END_MS: GAME_CFG.ROUND_END_MS },
-    chain: { WRITE_MS: CHAIN_CFG.WRITE_MS, DRAW_MS: CHAIN_CFG.DRAW_MS, REPLAY_MS: CHAIN_CFG.REPLAY_MS },
+    chain: {
+      INIT_MS: CHAIN_CFG.INIT_MS, WRITE_MS: CHAIN_CFG.WRITE_MS, DRAW_MS: CHAIN_CFG.DRAW_MS,
+      GUESS_MS: CHAIN_CFG.GUESS_MS, REVEAL_MS: CHAIN_CFG.REVEAL_MS, VOTE_MS: CHAIN_CFG.VOTE_MS,
+      SCORE_MS: CHAIN_CFG.SCORE_MS, GRACE_MS: CHAIN_CFG.GRACE_MS
+    },
+    // 画皮的计时同理：自动化测试靠这几个值判断「端口上挂的是不是压缩计时的那个进程」。
+    // 少了这一段，画皮 E2E 就只能盲跑，旧进程残留时会跑出一片假绿。
+    skin: {
+      NIGHT_MS: SKIN_CFG.NIGHT_MS,
+      DAWN_MS: SKIN_CFG.DAWN_MS,
+      DRAW_MS: SKIN_CFG.DRAW_MS,
+      TALK_MS: SKIN_CFG.TALK_MS,
+      VOTE_MS: SKIN_CFG.VOTE_MS,
+      VOTE_END_MS: SKIN_CFG.VOTE_END_MS,
+      WITCH_GRACE_MS: SKIN_CFG.WITCH_GRACE_MS
+    },
     words: WORDS.length,
     customWords: WORDS.isCustom(),          // CHAHU_WORDS 是否生效（测试的「身份」判据之一）
     // 主题词库：给前端拿来填「接龙主题」下拉（含可读名），也给测试当身份判据。
@@ -318,13 +363,56 @@ function sendToUser(room, userId, type, payload) {
  */
 function privateDrawOn(room) {
   const g = room && room.game;
-  return !!(g && g.mode === 'chain' && g.phase === CHAIN_PHASE.DRAW);
+  if (!g) return false;
+  if (g.mode === 'chain' && g.phase === CHAIN_PHASE.DRAW) return true;
+  // 画皮：天亮后大家画同一主题，但**各自私密画** —— 交稿之前谁都不该看见别人的画，
+  // 否则「看画猜作者」这个玩法在第一笔落下去的时候就没了。
+  // 展示阶段（DAY_TALK 起）画布是干净的（beginTalk 前已经交完了），
+  // 笔迹不出现在画布上，所以不在这里放行 —— 展示靠 SKIN_GALLERY 里的 PNG。
+  if (g.mode === 'skin' && g.phase === SKIN_PHASE.DAY_DRAW) return true;
+  return false;
 }
 
 /** 笔迹类广播的统一出口：私密作画期间**谁都不发** */
 function strokeBroadcast(room, type, payload, exceptId) {
   if (privateDrawOn(room)) return;
   roomBroadcast(room, type, payload, exceptId);
+}
+
+/**
+ * 私密作画这一步**不能动图层结构或画布尺寸**。
+ *
+ * 这一步大家共用同一块画布、只是互相看不见，所以这些操作会直接把「我这张画」
+ * 漏出去或者把别人正在画的东西一起抹掉：
+ *   · LAYER_PIXELS / LAYER_DUP / LAYER_MERGE / LAYER_FLATTEN / ROOM_COMPRESS
+ *     全都带 `baseImages` 广播 —— 整张图层 PNG 发给全场，下一位猜词的人等于直接拿到答案；
+ *   · LAYER_CLEAR / ROOM_RESIZE 会把别人正在画的私密内容一起清掉。
+ * 它们在这一步本来也没有正当用法，一律拒绝。
+ *
+ * 只管作画这一步：其余阶段 lockedFor() 已经是「一律锁笔」，writeBlocked() 自己就挡住了，
+ * 这里补的是作画阶段「全员解锁」留下的那个缺口。
+ */
+function privateDrawLocked(ws, room, member) {
+  if (!member || !privateDrawOn(room)) return false;
+  send(ws, P.S2C.ERROR, {
+    code: 'game_private',
+    message: '作画这一步不能改图层结构或画布尺寸 —— 交了这张画再说'
+  });
+  return true;
+}
+
+/** 游戏进行中一律不许装载工程：它是整份文档替换，局里画的东西会全没 */
+function gameBusy(ws, room, member) {
+  // ⚠ 结束游戏之后 room.game 这个对象**还在**，只是 phase 变回了 'off'
+  //（三个玩法的 PHASE.OFF 都是字符串 'off'）。所以不能只看「有没有 game」——
+  // 那样一局打完就再也装不了工程了，闸门等于关死。
+  const g = room && room.game;
+  if (!member || !g || !g.phase || g.phase === 'off') return false;
+  send(ws, P.S2C.ERROR, {
+    code: 'game_busy',
+    message: '游戏进行中不能装载工程 —— 先点「结束游戏」'
+  });
+  return true;
 }
 
 /** 某人此刻**能看到的**历史笔迹（私密作画期间只有他自己画的那几笔） */
@@ -372,7 +460,8 @@ function broadcastLayers(room, baseImages, maskImages) {
 /** 两种玩法的注册表。**加新玩法只需要在这里添一行**，其余接线全是通用的 */
 const GAME_MODES = {
   classic: { Cls: Game, phases: PHASE, label: '你画我猜' },
-  chain: { Cls: ChainGame, phases: CHAIN_PHASE, label: '接龙' }
+  chain: { Cls: ChainGame, phases: CHAIN_PHASE, label: '接龙' },
+  skin: { Cls: SkinGame, phases: SKIN_PHASE, label: '画皮' }
 };
 
 function modeDef(mode) { return GAME_MODES[mode] || GAME_MODES.classic; }
@@ -424,7 +513,8 @@ function startGameOf(room, mode, opts) {
   const cfg = {
     rounds: opts && opts.rounds,
     theme: opts && opts.theme,
-    drawSeconds: opts && opts.drawSeconds
+    drawSeconds: opts && opts.drawSeconds,
+    chainLength: opts && opts.chainLength
   };
   if (g.mode === 'chain') {
     snapshotArtwork(room);
@@ -438,7 +528,11 @@ function makeGameApi(room) {
   return {
     sync() { syncGame(room); },
     systemChat(text) { gameChat(room, text); },
-    resetCanvas() { resetGameCanvas(room); }
+    resetCanvas() { resetGameCanvas(room); },
+    // 回放数据的一次性广播（进回放阶段时发一次；迟到的人由 syncGame 按 version 补发）
+    revealAll(chains, version) {
+      roomBroadcast(room, P.S2C.GAME_REVEAL, { version: version, chains: chains });
+    }
   };
 }
 
@@ -447,25 +541,51 @@ function makeGameApi(room) {
  * **逐人发送**（而不是一次广播）的唯一理由是：快照要按收件人裁剪 ——
  * 猜手拿到的版本里 word 必须是空的。词另走一条私有消息，压根不进广播流。
  *
- * 两种玩法共用这条通路：
+ * 三种玩法共用这条通路：
  *   经典模式 → 额外给画手补一条 GAME_WORD（他丢了状态就画不了）
  *   接龙     → 额外给「这一步有活的人」补一条 GAME_TASK
  *              （写词的候选 / 要画的词 / 要猜的那幅画，都只能给他本人）
+ *   画皮     → 额外补两条**身份类**私有消息：SKIN_ROLE（我是谁）与
+ *              SKIN_NIGHT（我验到了什么 / 我被刀了）。这两条**绝不能**并进
+ *              GAME_STATE —— 那条是广播的，把身份放进去等于全场底牌公开。
+ *              每次 sync 都重发是刻意的：重连、中途入局、阶段切换都会 sync，
+ *              重发让「第一次拿到手」和「丢了再要一份」走同一条路径，前端不用额外兜底。
  */
 function syncGame(room) {
   const g = room.game;
   if (!g) return;
   const isChain = g.mode === 'chain';
+  const isSkin = g.mode === 'skin';
   for (const m of room.members.values()) {
     if (m.ws.readyState !== m.ws.OPEN) continue;
     send(m.ws, P.S2C.GAME_STATE, { game: g.snapshotFor(m.userId) });
     if (isChain) {
-      // GAME_TASK 只在「做事」的阶段发；回放 / 投票阶段它自然是 null
+      // GAME_TASK 只在「做事」的阶段发；回放 / 投票阶段它自然是 null。
+      // 猜词那一步的题面带着上家的**笔迹数据**（可能几百 KB），不能每次 sync 都重发 ——
+      // 按 taskVersion 判断：换格了才发。重连 / RESYNC 会把 m._chainTaskV 清零，保证补发。
       const task = g.taskFor(m.userId);
-      if (task) send(m.ws, P.S2C.GAME_TASK, { task });
+      if (task && m._chainTaskV !== g.taskVersion) {
+        send(m.ws, P.S2C.GAME_TASK, { task });
+        m._chainTaskV = g.taskVersion;
+      }
+      // 回放数据：version 没对上的补发一份（进回放阶段的广播 + 迟到者的补发共用这一处）
+      if (g.revealVersion && m._chainRevealV !== g.revealVersion && g.revealData) {
+        send(m.ws, P.S2C.GAME_REVEAL, { version: g.revealVersion, chains: g.revealData });
+        m._chainRevealV = g.revealVersion;
+      }
+    } else if (isSkin) {
+      const role = g.roleInfoFor(m.userId);
+      if (role) send(m.ws, P.S2C.SKIN_ROLE, role);
+      const night = g.nightInfoFor(m.userId);
+      if (night) send(m.ws, P.S2C.SKIN_NIGHT, night);
     } else if (g.phase === PHASE.DRAW && m.userId === g.drawerId && g.word) {
       send(m.ws, P.S2C.GAME_WORD, { word: g.word });
     }
+  }
+  // 画皮：出局身份公开时补一条「真相表」（只在结算阶段，见 revealAll）
+  if (isSkin && g.phase === SKIN_PHASE.OVER) {
+    const all = g.revealAll();
+    if (all) roomBroadcast(room, P.S2C.SKIN_ROLE + ':all', { all });
   }
 }
 
@@ -585,11 +705,21 @@ function writeBlocked(ws, room, member) {
   }
   if (!room || !room.game) return false;
   if (!room.game.lockedFor(member.userId)) return false;
-  const msg = room.game.mode === 'chain'
-    ? '接龙这一步轮不到你动笔'
-    : '这一回合只有画手能改画布';
+  const msg = lockedMsg(room, member.userId);
   send(ws, P.S2C.ERROR, { code: 'game_locked', message: msg });
   return true;
+}
+
+/** 「现在为什么不能动笔」—— 按玩法给不同的话，别让画皮玩家读一句接龙的提示 */
+function lockedMsg(room, userId) {
+  const g = room.game;
+  if (g.mode === 'chain') return '接龙这一步轮不到你动笔';
+  if (g.mode === 'skin') {
+    if (g.phase === SKIN_PHASE.DAY_DRAW) return '你已经出局了，只能看着别人画';
+    if (g.phase === SKIN_PHASE.NIGHT) return '夜里不能画画 —— 等天亮';
+    return '画皮正在进行，现在是看画和投票的时候';
+  }
+  return '这一回合只有画手能改画布';
 }
 
 /**
@@ -604,10 +734,7 @@ function undoBlocked(ws, room, member) {
   if (!room.game.lockedFor(member.userId)) return false;
   const g = room.game;
   if (g.mode !== 'chain' && member.userId === g.drawerId && g.phase === 'round_end') return false;
-  const msg = g.mode === 'chain'
-    ? '接龙这一步轮不到你动笔'
-    : '现在不能改画布';
-  send(ws, P.S2C.ERROR, { code: 'game_locked', message: msg });
+  send(ws, P.S2C.ERROR, { code: 'game_locked', message: lockedMsg(room, member.userId) });
   return true;
 }
 
@@ -871,8 +998,12 @@ function handle(ws, msg) {
       const chunks = historyChunks(room, member.userId);
       if (!chunks.length) send(ws, P.S2C.HISTORY_CHUNK, { strokes: [], done: true });
       else chunks.forEach((c, i) => send(ws, P.S2C.HISTORY_CHUNK, { strokes: c, done: i === chunks.length - 1 }));
-      // 重连的人可能是画手，得把词补发给他
-      if (room.game && room.game.active) syncGame(room);
+      // 重连的人可能是画手，得把词补发给他；接龙的题面 / 回放包有去重记账，
+      // 这里把记账清零强制补发（否则重连后拿不到当前的题面）
+      if (room.game && room.game.active) {
+        if (member) { member._chainTaskV = 0; member._chainRevealV = 0; }
+        syncGame(room);
+      }
       return;
     }
 
@@ -1030,6 +1161,7 @@ function handle(ws, msg) {
     case P.C2S.ROOM_RESIZE: {
       if (!room || !member) return;
       if (writeBlocked(ws, room, member)) return;
+      if (privateDrawLocked(ws, room, member)) return;
       if (member.userId !== room.ownerId) {
         return send(ws, P.S2C.ERROR, { code: 'not_owner', message: '只有房主可以调整画布分辨率' });
       }
@@ -1097,8 +1229,12 @@ function handle(ws, msg) {
       if (!r.ok) return send(ws, P.S2C.ERROR, { code: r.code || 'game_start', message: r.message });
       const g = room.game;
       if (g.mode === 'chain') {
-        console.log('[game] ' + room.id + ' 接龙开局（' + g.rounds + ' 圈，主题 '
-          + g.theme + '，' + room.online + ' 人）');
+        console.log('[game] ' + room.id + ' 接龙大厅就绪（链长 ' + g.chainLength
+          + '，主题 ' + g.theme + '，' + room.online + ' 人）');
+      } else if (g.mode === 'skin') {
+        console.log('[game] ' + room.id + ' 画皮开局（' + g.maxRounds + ' 轮，主题 '
+          + g.theme + '，' + g.players.length + ' 人，'
+          + g.wolves(false).length + ' 狼）');
       } else {
         console.log('[game] ' + room.id + ' 开局（' + g.rounds + ' 回合，' + room.online + ' 人）');
       }
@@ -1133,45 +1269,78 @@ function handle(ws, msg) {
       return;
     }
 
-    /* ---------------- 接龙 ---------------- */
+    /* ---------------- 接龙（v9 重制：多链并行 Whisper） ---------------- */
 
-    // 我这一步交东西：写词 / 猜词都走这条（作画的产物走 GAME_ART）
+    // 我这一格交卷：写词 / 猜词带文本（index = 选了第几个候选）；
+    // 作画只发一个「画好了」的信号 —— 笔迹早已通过 STROKE_* 进了房间笔迹表，
+    // 收格时服务端按作者摘取（像素渲染在客户端，服务端只存数据，与图层像素同一套分工）。
     case P.C2S.GAME_SUBMIT: {
       if (!room || !member || !room.game || room.game.mode !== 'chain') return;
-      const g = room.game;
-      const r = g.phase === CHAIN_PHASE.GUESS
-        ? g.submitGuess(member.userId, msg.text)
-        : g.submitWord(member.userId, msg.text, msg.index);
+      const r = room.game.submit(member.userId, msg);
       if (!r.ok) return send(ws, P.S2C.ERROR, { code: 'game_submit', message: r.message });
       return;
     }
 
-    /**
-     * 作画那一步的产物。
-     *
-     * 分工与图层像素完全一致：**像素由客户端渲染，服务端只做哑存储**。
-     * 客户端把画布导成 PNG 回传，这里原样塞进链格子 —— 服务端不碰像素。
-     */
-    case P.C2S.GAME_ART: {
+    // 大厅准备 / 取消准备（全员就绪自动开局）
+    case P.C2S.GAME_READY: {
       if (!room || !member || !room.game || room.game.mode !== 'chain') return;
-      const r = room.game.submitArt(member.userId, msg.png);
-      if (!r.ok) return send(ws, P.S2C.ERROR, { code: 'game_art', message: r.message });
+      const r = room.game.toggleReady(member.userId, msg.ready !== false);
+      if (!r.ok) return send(ws, P.S2C.ERROR, { code: 'game_ready', message: r.message });
       return;
     }
 
-    // 投票：这条链首尾对得上吗（票是匿名的，不广播「谁投了什么」）
+    // 投票：kind='keep'（这条链首尾对得上吗）/ kind='fav'（最喜欢的一张画）。
+    // 票是匿名的 —— 不广播「谁投了什么」，只在自己的快照里回显。
     case P.C2S.GAME_VOTE: {
       if (!room || !member || !room.game || room.game.mode !== 'chain') return;
-      const r = room.game.vote(member.userId, sanitizeText(msg.chainId, 24), !!msg.agree);
+      const g = room.game;
+      const chainId = sanitizeText(msg.chainId, 24);
+      const r = msg.kind === 'fav'
+        ? g.favVote(member.userId, chainId, msg.step)
+        : g.keepVote(member.userId, chainId, !!msg.agree);
       if (!r.ok) return send(ws, P.S2C.ERROR, { code: 'game_vote', message: r.message });
       return;
     }
 
-    // 房主提前推进：写词/画/猜 → 跳过没交的人；投票 → 立刻结算
+    // 房主推进：大厅强制开局 / 写画猜跳过没交的人 / 回放→投票 / 投票→结算 / 结算→大厅
     case P.C2S.GAME_NEXT: {
       if (!room || !member || !room.game || room.game.mode !== 'chain') return;
       const r = room.game.next(member.userId);
       if (!r.ok) return send(ws, P.S2C.ERROR, { code: 'game_next', message: r.message });
+      return;
+    }
+
+    /* ---------------- 画皮 ---------------- */
+
+    /**
+     * 画皮唯一的动作通道：夜里验人 / 刀人 / 用药，白天投票，猎人开枪。
+     *
+     * 做成一条而不是三条：这些动作互斥（同一时刻只可能有一个 phase 有活可干），
+     * 而且**裁定全在 skin.js 里**（谁有资格、目标在不在场上，
+     * 服务端一律按自己的 players 表核对，不信客户端传来的任何东西）。
+     */
+    case P.C2S.SKIN_ACTION: {
+      if (!room || !member || !room.game || room.game.mode !== 'skin') return;
+      const g = room.game;
+      const kind = sanitizeText(msg.kind, 12);
+      const target = sanitizeText(msg.target, 40);
+      let r;
+      if (kind === 'vote') r = g.vote(member.userId, target || 'skip');
+      else if (kind === 'shot') r = g.hunterShot(member.userId, target);
+      else if (kind === 'next') r = g.next(member.userId);
+      else r = g.nightAction(member.userId, kind, target);
+      if (!r.ok) return send(ws, P.S2C.ERROR, { code: 'skin_action', message: r.message });
+      return;
+    }
+
+    /**
+     * 天亮的作画产物。与接龙的 GAME_ART 同一套分工：
+     * **像素由客户端渲染，服务端只做哑存储**。
+     */
+    case P.C2S.SKIN_ART: {
+      if (!room || !member || !room.game || room.game.mode !== 'skin') return;
+      const r = room.game.submitArt(member.userId, msg.png);
+      if (!r.ok) return send(ws, P.S2C.ERROR, { code: 'skin_art', message: r.message });
       return;
     }
 
@@ -1364,6 +1533,7 @@ function handle(ws, msg) {
     case P.C2S.LAYER_DUP: {
       if (!room || !member) return;
       if (writeBlocked(ws, room, member)) return;
+      if (privateDrawLocked(ws, room, member)) return;
       if (room.layers.length >= MAX_LAYERS) {
         return send(ws, P.S2C.ERROR, { code: 'layer_limit', message: '图层数量上限为 ' + MAX_LAYERS });
       }
@@ -1379,6 +1549,7 @@ function handle(ws, msg) {
     case P.C2S.LAYER_CLEAR: {
       if (!room || !member) return;
       if (writeBlocked(ws, room, member)) return;
+      if (privateDrawLocked(ws, room, member)) return;
       const l = room.getLayer(sanitizeText(msg.layerId, 40));
       if (!l) return;
       if (!room.layerIsSolo(l.id, member.userId) && member.userId !== room.ownerId) {
@@ -1405,6 +1576,7 @@ function handle(ws, msg) {
     case P.C2S.LAYER_PIXELS: {
       if (!room || !member) return;
       if (writeBlocked(ws, room, member)) return;
+      if (privateDrawLocked(ws, room, member)) return;
       const l = room.getLayer(sanitizeText(msg.layerId, 40));
       if (!l) return;
       if (!room.layerIsSolo(l.id, member.userId) && member.userId !== room.ownerId) {
@@ -1423,6 +1595,7 @@ function handle(ws, msg) {
     case P.C2S.LAYER_MERGE: {
       if (!room || !member) return;
       if (writeBlocked(ws, room, member)) return;
+      if (privateDrawLocked(ws, room, member)) return;
       const srcId = sanitizeText(msg.srcId, 40);
       const dstId = sanitizeText(msg.dstId, 40);
       if (!room.layerIsSolo(srcId, member.userId) || !room.layerIsSolo(dstId, member.userId)) {
@@ -1440,6 +1613,7 @@ function handle(ws, msg) {
     case P.C2S.LAYER_FLATTEN: {
       if (!room || !member) return;
       if (writeBlocked(ws, room, member)) return;
+      if (privateDrawLocked(ws, room, member)) return;
       if (member.userId !== room.ownerId) {
         return send(ws, P.S2C.ERROR, { code: 'not_owner', message: '只有房主可以合并所有图层' });
       }
@@ -1540,6 +1714,7 @@ function handle(ws, msg) {
     case P.C2S.PROJECT_BEGIN: {
       if (!room || !member) return;
       if (writeBlocked(ws, room, member)) return;
+      if (gameBusy(ws, room, member)) return;
       if (member.userId !== room.ownerId) {
         return send(ws, P.S2C.ERROR, { code: 'not_owner', message: '只有房主可以装载工程' });
       }
@@ -1572,6 +1747,7 @@ function handle(ws, msg) {
 
     case P.C2S.PROJECT_LAYER: {
       if (!room || !member) return;
+      if (gameBusy(ws, room, member)) return;
       if (member.userId !== room.ownerId) return;
       const job = room.projectLoad;
       if (!job) {
@@ -1616,6 +1792,7 @@ function handle(ws, msg) {
 
     case P.C2S.PROJECT_END: {
       if (!room || !member) return;
+      if (gameBusy(ws, room, member)) return;
       if (member.userId !== room.ownerId) return;
       const job = room.projectLoad;
       if (!job) {
@@ -1645,6 +1822,7 @@ function handle(ws, msg) {
     case P.C2S.ROOM_COMPRESS: {
       if (!room || !member) return;
       if (writeBlocked(ws, room, member)) return;
+      if (privateDrawLocked(ws, room, member)) return;
       if (member.userId !== room.ownerId) {
         return send(ws, P.S2C.ERROR, { code: 'not_owner', message: '只有房主可以固化底图' });
       }
@@ -1865,6 +2043,24 @@ function shutdown() {
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+
+/* ── 最后的兜底：别让「一个畸形请求 / 一个漏网的异常」带走整个服务端。
+ * 房间是内存里的东西，进程一死所有人的画都断线（存档虽在，但体验归零）。
+ * 上面那个 parseReqUrl 修的是已经定位到的那个坑，这里留一层网兜住还没发现的：
+ * 记录 + 继续活着，比「干净地崩掉」对用户友好得多。 */
+process.on('uncaughtException', (err) => {
+  console.error('[server] 未捕获异常（服务继续运行）:', err && err.stack ? err.stack.split('\n')[0] : err);
+});
+process.on('unhandledRejection', (err) => {
+  console.error('[server] 未处理的 Promise 拒绝（服务继续运行）:', err && err.stack ? err.stack.split('\n')[0] : err);
+});
+// 客户端在握手/传输层发来畸形数据（比如坏的请求头）也会触发 error 事件；
+// 不接住同样会冒泡成 uncaughtException。
+server.on('clientError', (err, socket) => {
+  try {
+    if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
+  } catch (e) { /* ignore */ }
+});
 
 // ── 空房 GC：回收「没人在线 + 没有任何内容」的房间，避免房间列表堆积
 const ROOM_GC_INTERVAL_MS = parseInt(process.env.ROOM_GC_INTERVAL_MS || '30000', 10);       // 30 秒一次
