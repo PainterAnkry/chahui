@@ -2668,6 +2668,20 @@
         el.appendChild(role);
       }
 
+      // 房主可以把身份转给别人（别人退房时本来就有自动移交，这是主动版）。
+      // 只对别人显示：转给自己没有意义。
+      if (S.joined && S.me.isOwner && m.userId !== S.me.userId) {
+        var tr = document.createElement('button');
+        tr.className = 'm-transfer';
+        tr.textContent = '转让';
+        tr.title = '把房主转给 ' + m.name + '（此后由他管理房间：观众 / 清空 / 解散 / 开局等）';
+        tr.onclick = function (e) {
+          e.stopPropagation();
+          transferHost(m.userId, m.name);
+        };
+        el.appendChild(tr);
+      }
+
       // 别人的笔迹显示得多清楚 —— 点一下循环：跟随全局 → 原样 → 淡 → 隐藏 → 跟随全局
       // （纯本地设置，只改我自己屏幕上看到的）
       if (m.userId !== S.me.userId) {
@@ -5118,8 +5132,9 @@
     return d;
   }
 
-  /** 房间信息面板开着就整块重画一次 —— 面板本身很小，比精确改一行更不容易漏 */
+  /** 房间信息面板开着就整块重画一次 + 入口页那行跟着刷 —— 面板都很小，比精确改一行更不容易漏 */
   function refreshTunnelUi() {
+    renderTunnelToggle();
     var mask = $('#infoMask');
     if (mask && !mask.classList.contains('hidden') && S.room) showInfo();
   }
@@ -5164,6 +5179,46 @@
     Promise.resolve(d.stopTunnel()).then(function () {
       toast('已关闭公网联机', 'ok', 2600);
     }, function () { /* ignore */ });
+  }
+
+  /**
+   * 入口页那行「公网联机」。它和「房间信息」里的开关是同一份状态（S.tunnel），
+   * 只是放在进门就能看见的地方 —— 跨网联机不该藏在二层弹窗里。
+   *   · 开 = 给本机服务器加一条公网隧道，跨网的朋友点链接就能进
+   *   · 关 = 断掉隧道、切回本地（同一 WiFi 仍能进，服务器不停）
+   * 网页版没有起隧道的权限，整行收起来。
+   */
+  function renderTunnelToggle() {
+    var row = $('#tunnelRow');
+    if (!row) return;
+    var d = setupTunnelBridge();
+    if (!d) { row.classList.add('hidden'); return; }
+    row.classList.remove('hidden');
+    var btn = $('#btnTunnelToggle');
+    var st = $('#tunnelState');
+    var t = S.tunnel || { phase: 'off' };
+    btn.disabled = false;
+    if (S.publicUrl || t.phase === 'on') {
+      btn.textContent = '关闭公网联机';
+      st.className = 'srv-state on';
+      st.textContent = '已开启' + (S.publicUrl ? ' · ' + S.publicUrl : '');
+    } else if (t.phase === 'downloading' || t.phase === 'starting') {
+      btn.disabled = true;
+      btn.textContent = '请稍候…';
+      st.className = 'srv-state';
+      st.textContent = tunnelStatusText();
+    } else {
+      btn.textContent = '开启公网联机';
+      st.className = 'srv-state off';
+      st.textContent = '已关闭';
+    }
+  }
+
+  /** 入口页那颗开关：按当前相位决定开还是关（开着就关、关着就开） */
+  function toggleTunnelAction() {
+    var t = S.tunnel || { phase: 'off' };
+    if (t.phase === 'on' || S.publicUrl) stopTunnel();
+    else startTunnel();
   }
 
   /**
@@ -6450,6 +6505,9 @@
     $('#btnCopyLan').addEventListener('click', copyLan);
     var btnSrv = $('#btnServerToggle');
     if (btnSrv) btnSrv.addEventListener('click', serverButtonAction);
+    var btnTun = $('#btnTunnelToggle');
+    if (btnTun) btnTun.addEventListener('click', toggleTunnelAction);
+    renderTunnelToggle();   // 初始整行按「网页版 / 桌面端」收起或亮出
     var btnAva = $('#btnPickAvatar');
     if (btnAva) btnAva.addEventListener('click', pickAvatar);
     var btnAvaClr = $('#btnClearAvatar');
@@ -6727,6 +6785,14 @@
       if (e && e.message) toast(e.message, 'err');
       endTransformUi();
     });
+    // 引擎侧自己中止变换时（清选区 / 服务端回显清空图层触发的自愈），
+    // 面板和按钮状态也要跟着收起来 —— endTransformUi 是幂等的，重复调无害。
+    engine.on('transform', function (e) {
+      if (e && e.active === false) {
+        if (S.transformDragging) S.transformDragging = false;
+        endTransformUi();
+      }
+    });
     engine.on('selection', function (e) {
       var hint = $('#selHint');
       var on = !!(e && e.active);
@@ -6775,7 +6841,7 @@
     var mine = S.members.filter(function (m) { return m.userId === S.me.userId; })[0];
     var was = !!S.me.isOwner;
     S.me.isOwner = !!(mine && mine.isOwner);
-    if (S.joined && S.me.isOwner && !was) toast('原房主离开了，现在你是房主', 'ok', 3200);
+    if (S.joined && S.me.isOwner && !was) toast('你现在是房主了', 'ok', 3200);
 
     // 房主可能在成员列表里把我设成「只读观众」、也可能又放开 —— 跟着变。
     // 一定得当面说一声：不说的话，人只会觉得「我的笔怎么画不出来了」。
@@ -6831,6 +6897,19 @@
     if (!S.joined || !userId) return;
     if (!S.me.isOwner) { toast('只有房主可以设观众', 'err'); return; }
     net.send(P.C2S.MEMBER_ROLE, { userId: userId, readonly: !!readonly });
+  }
+
+  /**
+   * 房主转让：把房主身份转给某人。二次确认后发 HOST_TRANSFER，
+   * 之后的界面状态全靠服务端广播的 MEMBERS 回来刷（和自动移交一条路）。
+   */
+  async function transferHost(userId, name) {
+    if (!S.joined || !userId) return;
+    if (!S.me.isOwner) { toast('只有房主可以转让房主', 'err'); return; }
+    if (!await confirmDialog(
+      '把房主转给 ' + (name || 'TA') + '？转让后你将变回普通成员，\n' +
+      '观众管理 / 清空画布 / 解散房间 / 开局等房主操作都会交给 TA。', { danger: false })) return;
+    net.send(P.C2S.HOST_TRANSFER, { userId: userId });
   }
 
   function gameImDrawer() { return !!(S.game && S.game.isDrawer); }

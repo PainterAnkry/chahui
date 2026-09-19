@@ -9,6 +9,8 @@ const SUITE = [
   'test-browser.js',
   'test-stroke.js',
   'test-selection.js',
+  // 纸纹只做「半透调制」不再挖穿笔迹（「纸纹影响笔刷」的回归）
+  '_probe-paper.js',
   'test-overlay.js',
   'test-transform-buttons.js',
   'test-brush-import.js',
@@ -36,6 +38,8 @@ const SUITE = [
   'test-cansize.js',
   'test-collab-view.js',
   'test-readonly.js',
+  // 房主转让（协议层）：权限边界 + isOwner 换位 + 自动移交不回归
+  'test-host-transfer.js',
   'test-avatar.js',
   'test-groups.js',
   'test-update.js',
@@ -43,6 +47,8 @@ const SUITE = [
   'test-passkeys.js',
   'test-mobile.js',
   'test-chain-sim.js',
+  // 游戏结束还原原画（「游戏模式吃掉原画」的回归）——要压缩计时服务端
+  'test-game-restore.js',
   // 接龙「私密作画」：并行作画时笔迹只回作者本人（#4/#5 的回归）
   'test-chain-private.js',
   'test-theme-ui.js',

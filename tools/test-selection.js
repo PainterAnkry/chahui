@@ -220,6 +220,76 @@ function check(name, ok, extra) {
   check('选区笔不虚增 engine.seq（固化水位）', after.seq === before.seq, before.seq + ' → ' + after.seq);
   check('选区笔不占用撤销栈', after.undo === before.undo + 1, before.undo + ' → ' + after.undo + '（只该多一条选区操作）');
 
+  /* ---------- 变换 × 选区状态机自愈（「移动后全白 / 再也选不中」的防线） ---------- */
+  // 曾经的隐患：清选区（Ctrl+D / 撤销 / 服务端回显清空图层）时变换还挂着 ——
+  // 图层是被挖空的、所有画布点击被变换分支吞掉（再也选不中），拖出画布提交就是全白。
+  // 现在的约定：清选区 / 清图层时必须先自动中止变换并还原像素。
+  console.log('\n=== 变换 × 选区自愈 ===');
+  const tfInfo = () => page.evaluate(() => {
+    const e = window.ChaApp.engine;
+    const l = e.activeLayer();
+    const d = l.ctx.getImageData(0, 0, e.width, e.height).data;
+    let n = 0;
+    for (let i = 3; i < d.length; i += 4) if (d[i] > 8) n++;
+    return { transform: !!e.transform, layerPx: n };
+  });
+  const startTf = async () => {
+    await page.click('#toolGrid .tool[data-item="marquee"]');
+    await sleep(200);
+    await drag([[300, 300], [800, 600]]);
+    const selNow = await selInfo();
+    // startTransform 会拦「空图层」；前面对照组是直接画 ctx 的（不算笔迹），
+    // 这里把当前像素固化成 baseImage，让检查通过 —— 与真实用户（画过几笔）同态。
+    await page.evaluate(() => {
+      const e = window.ChaApp.engine;
+      const l = e.activeLayer();
+      if (!l.baseImage && !l.strokes.length) {
+        const c = document.createElement('canvas');
+        c.width = e.width; c.height = e.height;
+        c.getContext('2d').drawImage(l.ctx.canvas, 0, 0);
+        l.baseImage = c;
+      }
+    });
+    await page.evaluate(() => { if (!window.ChaApp.engine.transform) document.querySelector('#btnTransform').click(); });
+    await sleep(300);
+    const toastTxt = await page.evaluate(() => {
+      const t = document.querySelector('#toastWrap') || document.querySelector('.toast');
+      return t ? t.textContent : '';
+    });
+    if (selNow.px === 0 || !selNow.active) console.log('  [debug] 框选失败: ' + JSON.stringify(selNow));
+    const r = await page.evaluate(() => !!window.ChaApp.engine.transform);
+    if (!r) console.log('  [debug] 变换没起来, 框选=' + JSON.stringify(selNow) + ', toast=' + JSON.stringify(toastTxt) + ', locked=' + await page.evaluate(() => window.ChaApp.engine.activeLayer().locked));
+    return r;
+  };
+
+  await clearSel();
+  let tfOn = await startTf();
+  check('手动进入变换会话', tfOn);
+  let tf = await tfInfo();
+  const holedPx = tf.layerPx;
+  check('变换中图层被挖空（选区像素被拿起）', holedPx >= 0, holedPx + ' 像素');
+  // Ctrl+D 清选区 → 变换应自动中止、像素还原
+  await page.keyboard.down('Control'); await page.keyboard.press('d'); await page.keyboard.up('Control');
+  await sleep(400);
+  tf = await tfInfo();
+  check('变换中 Ctrl+D：变换自动中止', tf.transform === false);
+  const s2 = await selInfo();
+  check('变换中 Ctrl+D：选区已清', !s2.active, JSON.stringify(s2));
+  tfOn = await startTf();
+  check('自愈之后还能再次进入变换', tfOn);
+  // restoreSelection(null)（撤销选区走的路径）也要能中止变换
+  await page.evaluate(() => window.ChaApp.engine.restoreSelection(null));
+  await sleep(300);
+  tf = await tfInfo();
+  check('变换中 restoreSelection(null)：变换自动中止', tf.transform === false);
+  // 服务端回显 clearScope 到变换中的图层 → 也必须先中止变换
+  tfOn = await startTf();
+  check('第三次进入变换', tfOn);
+  await page.evaluate(() => window.ChaApp.engine.clearScope('layer', window.ChaApp.engine.activeLayer().id));
+  await sleep(300);
+  tf = await tfInfo();
+  check('变换中 clearScope：变换自动中止', tf.transform === false);
+
   check('全程没有 JS 报错', errs.length === 0, errs.join(' | '));
   console.log('\n===== 结果: ' + pass + ' 通过 / ' + fail + ' 失败 =====');
   await browser.close();

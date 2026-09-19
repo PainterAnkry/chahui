@@ -192,8 +192,9 @@ async function openChainDialog(page) {
 
   const themeOpts0 = await host.evaluate(() =>
     Array.from(document.querySelectorAll('#chainTheme option')).map(o => o.value));
-  ok('开局前主题下拉已经填好（15 套内置）', themeOpts0.length === 15,
+  ok('开局前主题下拉已经填好（16 套内置）', themeOpts0.length === 16,
     '实际 ' + themeOpts0.length + ' 套：' + JSON.stringify(themeOpts0.slice(0, 20)));
+  if (themeOpts0.indexOf('meme') < 0) { ok('网络热梗主题在下拉里', false, JSON.stringify(themeOpts0)); }
   for (const id of ['genshin', 'starrail', 'endfield', 'touhou', 'uma', 'zzz', 'mhw', 'food', 'animals', 'items']) {
     if (themeOpts0.indexOf(id) < 0) { ok('新主题 ' + id + ' 在下拉里', false, JSON.stringify(themeOpts0)); }
   }
@@ -294,7 +295,7 @@ async function openChainDialog(page) {
   const themeOpts1 = await host.evaluate(() =>
     Array.from(document.querySelectorAll('#chainTheme option')).map(o => o.textContent));
   ok('下拉里出现「我们公司」', themeOpts1.some(t => /我们公司/.test(t)), JSON.stringify(themeOpts1));
-  ok('下拉项数变成 16', themeOpts1.length === 16, '实际 ' + themeOpts1.length);
+  ok('下拉项数变成 17', themeOpts1.length === 17, '实际 ' + themeOpts1.length);
 
   // ---- [5] 编辑已有词库 ----
   console.log('\n[5] 编辑已有词库');
@@ -637,7 +638,7 @@ async function openChainDialog(page) {
     ok('★ 经典面板上也有「管理…」按钮（#1 回归）', await host.isVisible('#btnGameThemeManage'));
     const gameOpts = await host.evaluate(() =>
       Array.from(document.querySelectorAll('#gameTheme option')).map(o => o.value));
-    ok('经典面板的主题下拉也是填好的（≥15 套内置）', gameOpts.length >= 15,
+    ok('经典面板的主题下拉也是填好的（≥16 套内置）', gameOpts.length >= 16,
       '实际 ' + gameOpts.length);
 
     await host.click('#btnGameThemeManage');

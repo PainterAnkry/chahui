@@ -66,7 +66,26 @@ function fakeBridge(on, port) {
       },
       localClose: function () { window.__log.push('localClose'); return Promise.resolve(true); },
       onLocalMessage: function (cb) { window.__localCb = cb; return function () { window.__localCb = null; }; },
-      onServerState: function (cb) { window.__srvCb = cb; return function () { /* ignore */ }; }
+      onServerState: function (cb) { window.__srvCb = cb; return function () { /* ignore */ }; },
+      // ---- 公网联机（隧道）打桩：记录调用 + 按真主进程的时序推状态 ----
+      startTunnel: function () {
+        window.__log.push('tunStart');
+        window.__tunnel = { phase: 'starting', url: '', error: '', percent: 0 };
+        if (window.__tunCb) window.__tunCb(Object.assign({}, window.__tunnel));
+        setTimeout(function () {
+          window.__tunnel = { phase: 'on', url: 'https://chahui-tunnel.example', error: '', percent: 1 };
+          if (window.__tunCb) window.__tunCb(Object.assign({}, window.__tunnel));
+        }, 400);
+        return Promise.resolve({ ok: true });
+      },
+      stopTunnel: function () {
+        window.__log.push('tunStop');
+        window.__tunnel = { phase: 'off', url: '', error: '', percent: 0 };
+        if (window.__tunCb) window.__tunCb(Object.assign({}, window.__tunnel));
+        return Promise.resolve({ ok: true });
+      },
+      getTunnelStatus: function () { return Promise.resolve(Object.assign({}, window.__tunnel || { phase: 'off', url: '', error: '', percent: 0 })); },
+      onTunnelState: function (cb) { window.__tunCb = cb; return function () { window.__tunCb = null; }; }
     };
   `;
 }
@@ -98,6 +117,7 @@ const menuChecked = p => p.evaluate(() => {
       await sleep(250);
       ok('入口面板打开了', await page.isVisible('#entryMask'));
       ok('「离线模式」那一行是藏起来的', !(await page.isVisible('#srvRow')));
+      ok('「公网联机」那一行也是藏起来的（网页版起不了隧道）', !(await page.isVisible('#tunnelRow')));
       await ctx.close();
     }
 
@@ -186,10 +206,45 @@ const menuChecked = p => p.evaluate(() => {
     ok('局域网提示条还在', await page.evaluate(() => !!window.ChaConfig.lanBase()));
     ok('菜单里那个勾去掉了（回到在线档）', !(await menuChecked(page)));
 
+    // ---------------------------------------------------------- 5) 入口页公网联机
+    console.log('\n=== 5) 入口页「公网联机」：开 → 有地址 → 关 = 切回本地 ===');
+    await page.evaluate(() => window.ChaApp.openEntry(true));
+    await sleep(300);
+    ok('「公网联机」那一行显示出来了（桌面端才有）', await page.isVisible('#tunnelRow'));
+    const tunBtn = () => page.textContent('#btnTunnelToggle').then(t => t.trim());
+    const tunSt = () => page.textContent('#tunnelState');
+    ok('按钮写「开启公网联机」', (await tunBtn()) === '开启公网联机', await tunBtn());
+    ok('状态写「已关闭」', /已关闭/.test(await tunSt()), (await tunSt()).trim());
+
+    await clearLog(page);
+    await page.click('#btnTunnelToggle');
+    await sleep(200);
+    ok('调了 startTunnel', (await log(page)).indexOf('tunStart') >= 0, await log(page));
+    ok('进行中按钮禁用（防重复点）', await page.evaluate(() => document.querySelector('#btnTunnelToggle').disabled),
+      await tunBtn());
+    await sleep(700);   // 等假桥把相位推到 on
+    ok('状态小字带出公网地址', /chahui-tunnel\.example/.test(await tunSt()), (await tunSt()).trim());
+    ok('按钮翻成「关闭公网联机」', (await tunBtn()) === '关闭公网联机', await tunBtn());
+    ok('分享链接自动切到公网地址',
+      await page.evaluate(() => (window.ChaApp.state.publicUrl || '').indexOf('chahui-tunnel.example') >= 0),
+      await page.evaluate(() => window.ChaApp.state.publicUrl));
+
+    await clearLog(page);
+    await page.click('#btnTunnelToggle');
+    await sleep(600);
+    ok('调了 stopTunnel', (await log(page)).indexOf('tunStop') >= 0, await log(page));
+    ok('按钮回到「开启公网联机」', (await tunBtn()) === '开启公网联机', await tunBtn());
+    ok('状态回到「已关闭」', /已关闭/.test(await tunSt()), (await tunSt()).trim());
+    ok('分享链接切回本地（publicUrl 清掉）',
+      await page.evaluate(() => !window.ChaApp.state.publicUrl),
+      await page.evaluate(() => window.ChaApp.state.publicUrl));
+    ok('服务器本身没被动过（关闭公网 ≠ 停服务器）',
+      await page.evaluate(() => window.__srv.on === true));
+
     await ctx.close();
 
-    // ---------------------------------------------------------- 5) 服务器没起来
-    console.log('\n=== 5) 服务器根本没起来：按钮该是「开启服务器」 ===');
+    // ---------------------------------------------------------- 6) 服务器没起来
+    console.log('\n=== 6) 服务器根本没起来：按钮该是「开启服务器」 ===');
     {
       const ctx2 = await browser.newContext({ viewport: { width: 1280, height: 860 } });
       await ctx2.addInitScript(fakeBridge(false, PORT));

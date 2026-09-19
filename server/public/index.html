@@ -710,6 +710,20 @@
         </div>
         <span class="hint" id="srvHint">离线 = 自己单机画（服务器仍在后台跑）；在线 = 连上本机服务器，同一 WiFi 的朋友能加入。</span>
       </div>
+      <!-- 公网联机（只有桌面端有；网页版整行收起）。开 = 给本机服务器加一条公网隧道，
+           生成一个外网可访问的链接，跨网的朋友点链接就能进；关 = 断掉隧道、切回本地
+           （只剩同一 WiFi / 局域网能进）。行结构与上面 srv-row 相同：提示另起一行，
+           别和按钮挤同一个 flex 行（同样的命中测试坑，见上面的注释）。 -->
+      <div class="form-row srv-row" id="tunnelRow">
+        <div class="srv-top">
+          <label>公网联机</label>
+          <div class="srv-line">
+            <button class="btn tiny" id="btnTunnelToggle">检测中…</button>
+            <span class="srv-state" id="tunnelState">—</span>
+          </div>
+        </div>
+        <span class="hint" id="tunnelHint">开启后生成一个外网链接，跨网的朋友点链接就能进；关闭即切回本地，只有同一 WiFi 的人能进。</span>
+      </div>
 
       <div class="split">
         <div class="split-col">

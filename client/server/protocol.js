@@ -68,6 +68,7 @@
     STROKE_CLEAR: 'stroke:clear',   // { scope: 'layer'|'all', layerId? }
 
     MEMBER_ROLE: 'member:role',     // { userId, readonly } —— 仅房主；只读观众只能看不能改
+    HOST_TRANSFER: 'host:transfer', // { userId } —— 仅房主；把房主身份转给房间里另一个人
     // 换头像：只动自己那一行，其它人收到 MEMBERS 广播后重画成员列表 / 聊天 / 光标。
     // 头像走的是「压到 96px 的 dataURL」，体积由 normalizeAvatar 卡死（见下）。
     MEMBER_AVATAR: 'member:avatar', // { avatar } 改自己的头像（传 '' 表示清掉，回到「颜色 + 首字」）

@@ -209,16 +209,19 @@
   var grainCache = new Map();
 
   /**
-   * 颗粒纹理的 alpha 只有 0 / 1 两种取值，因此「重复叠加」是幂等的 —— 增量绘制时
-   * 反复对同一块区域打孔不会越打越透，这是它能边画边生效的关键。
+   * 颗粒纹理：「孔洞」不再把像素挖到全透（那会把细线打碎，用户反馈「纸纹影响
+   * 笔刷使用」），而是保留一层低 alpha —— 纹理观感还在，线条连续。
+   * 蒙版每笔都是 clearCtx 后整笔重画（paintToScratch / 各 redraw 路径），
+   * applyGrain 只跑一次，所以孔洞带半透明 alpha 不会越叠越透。
    */
   function grainPattern(stroke) {
     var paper = stroke.paper || 'none';
     var grain = stroke.grain || 0;
     if (!grain || paper === 'none') return null;
     var sc = clamp(stroke.grainScale || 1, 0.2, 4);
-    var keep = 1 - grain * 0.5;
-    var key = (stroke.seed >>> 0) + '|' + paper + '|' + Math.round(keep * 40) + '|' + Math.round(sc * 10);
+    var keep = 1 - grain * 0.5;                                   // 全不透明的比例
+    var holeA = Math.round(255 * Math.max(0.22, 1 - grain * 0.85)); // 孔洞保留的 alpha
+    var key = (stroke.seed >>> 0) + '|' + paper + '|' + Math.round(keep * 40) + '|' + holeA + '|' + Math.round(sc * 10);
     var hit = grainCache.get(key);
     if (hit !== undefined) return hit;
     if (grainCache.size > 12) grainCache.clear();
@@ -238,30 +241,31 @@
         for (x = 0; x < S; x++) {
           i = (y * S + x) * 4;
           var on = (x % 3 === 0) || (y % 3 === 0) || (rnd() < keep);
-          d[i + 3] = on ? 255 : 0;
+          d[i + 3] = on ? 255 : holeA;
         }
       }
       ctx.putImageData(img, 0, 0);
     } else if (paper === 'coarse') {
-      // 粗纹：低分辨率随机后放大，再二值化（保持「重复叠加幂等」）
+      // 粗纹：低分辨率随机后放大，再按阈值分成「全实 / 半透」两档
       var n = 18;
       var tmp = document.createElement('canvas');
       tmp.width = n; tmp.height = n;
       var tctx = tmp.getContext('2d');
       var ti = tctx.createImageData(n, n);
-      for (i = 0; i < n * n; i++) ti.data[i * 4 + 3] = rnd() < keep ? 255 : 0;
+      for (i = 0; i < n * n; i++) ti.data[i * 4 + 3] = rnd() < keep ? 255 : holeA;
       tctx.putImageData(ti, 0, 0);
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = 'high';
       ctx.drawImage(tmp, 0, 0, n, n, 0, 0, S, S);
       var img2 = ctx.getImageData(0, 0, S, S);
-      for (i = 0; i < S * S; i++) img2.data[i * 4 + 3] = img2.data[i * 4 + 3] > 110 ? 255 : 0;
+      var th = holeA + (255 - holeA) * 0.5;   // 阈值随 holeA 走：固定 110 会把新「半透孔」全判成实
+      for (i = 0; i < S * S; i++) img2.data[i * 4 + 3] = img2.data[i * 4 + 3] > th ? 255 : holeA;
       ctx.putImageData(img2, 0, 0);
     } else {
       // 细纹：单像素随机噪点
       img = ctx.createImageData(S, S);
       d = img.data;
-      for (i = 0, n = S * S; i < n; i++) d[i * 4 + 3] = rnd() < keep ? 255 : 0;
+      for (i = 0, n = S * S; i < n; i++) d[i * 4 + 3] = rnd() < keep ? 255 : holeA;
       ctx.putImageData(img, 0, 0);
     }
 
@@ -1863,6 +1867,13 @@
 
   CanvasEngine.prototype.clearScope = function (scope, layerId) {
     var self = this;
+    // 服务端回显的「清空」到达时若变换还挂着（比如刚提交过一次像素操作又立刻
+    // 开了新变换）：变换的浮层底座（图层像素）马上要被清掉，先中止变换还原，
+    // 再执行清除 —— 否则浮层会把已失效的像素叠回来。
+    if (this.transform) {
+      var tl = this.getLayer(this.transform.layerId);
+      if (scope === 'all' || (tl && tl.id === layerId)) this.endTransform(false);
+    }
     this.layers.forEach(function (l) {
       if (scope === 'all' || l.id === layerId) {
         l.baseImage = null; l.baseSeq = 0;
@@ -2351,6 +2362,10 @@
   };
 
   CanvasEngine.prototype.clearSelection = function () {
+    // 选区没了，挂着「拿起像素」状态的变换就成了孤儿：图层是被挖空的，
+    // 之后所有画布点击都会被变换分支吞掉（表现：再也选不中、画不了）。
+    // 所以清选区时必须先把变换中止（endTransform(false) 会还原像素）。
+    if (this.transform) this.endTransform(false);
     if (!this.selection) return;
     this.selection.active = false;
     this.selection.bbox = null;
@@ -2363,6 +2378,8 @@
 
   /** 整体换掉选区蒙版（撤销 / 重做选区快照用）。src 为 null 表示清空选区。 */
   CanvasEngine.prototype.restoreSelection = function (src) {
+    // 撤销 / 重做选区快照会整体换掉蒙版 —— 同 clearSelection：变换先中止
+    if (this.transform) this.endTransform(false);
     var s = this.ensureSelection();
     clearCtx(s.ctx, this.width, this.height);
     if (src) {

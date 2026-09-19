@@ -346,7 +346,7 @@ async function waitForPage(page, fn, timeout, label) {
              hasGenshin: !!Array.from(sel.options).find(o => o.value === 'genshin'),
              hasAnime: !!Array.from(sel.options).find(o => o.value === 'anime') };
   });
-  ok('经典面板的主题下拉有完整的 15 套（不再是单个占位项）', themeInfo.n >= 15, '实际 ' + themeInfo.n);
+  ok('经典面板的主题下拉有完整的 16 套（不再是单个占位项）', themeInfo.n >= 16, '实际 ' + themeInfo.n);
   ok('下拉里有扩展词库（原神 / 二次元混合）', themeInfo.hasGenshin && themeInfo.hasAnime, JSON.stringify(themeInfo.ids));
   ok('自定义词库与接龙共用同一个数据源（themeList 长度一致）',
     await B.evaluate(() => {

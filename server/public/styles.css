@@ -1265,6 +1265,21 @@ body.tool-dragging { cursor: grabbing; user-select: none; }
 }
 .member .m-role:hover { border-color: var(--accent); color: var(--accent); }
 .member .m-role.on { border-color: #d08a2a; background: #fdf3e2; color: #9a6412; font-weight: 600; }
+/* 房主转让按钮：跟 m-role 同尺寸，但更低调 —— 是个低频的重操作，不鼓励天天点 */
+.member .m-transfer {
+  flex: none;
+  height: 20px;
+  margin-left: 6px;
+  padding: 0 6px;
+  font-size: 10px; line-height: 1;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  opacity: 0.75;
+  cursor: pointer;
+}
+.member .m-transfer:hover { border-color: var(--accent); color: var(--accent); opacity: 1; }
 .badge.guest { background: #fdf3e2; color: #9a6412; }
 .badge {
   font-size: 10px;

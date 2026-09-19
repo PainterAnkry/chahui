@@ -392,8 +392,20 @@ function gameOf(room, mode) {
   // 在跑另一种玩法 → 只有它已经停了才允许换（在跑的局不能被人一脚踢掉）
   if (room.game && room.game.active) return room.game;
   const def = GAME_MODES[want];
-  room.game = new def.Cls(room, makeGameApi(room));
-  return room.game;
+  const g = new def.Cls(room, makeGameApi(room));
+  // 包一层生命周期：游戏终局（房主停止 / 整局打完）时把开局前的画还回去。
+  // start() 内部不会调 stop/finish（已核对两个玩法），不会误触发。
+  for (const m of ['stop', 'finish']) {
+    if (typeof g[m] !== 'function') continue;
+    const orig = g[m];
+    g[m] = function () {
+      const r = orig.apply(g, arguments);
+      restoreArtwork(room);
+      return r;
+    };
+  }
+  room.game = g;
+  return g;
 }
 
 /**
@@ -414,7 +426,11 @@ function startGameOf(room, mode, opts) {
     theme: opts && opts.theme,
     drawSeconds: opts && opts.drawSeconds
   };
-  if (g.mode === 'chain') return g.start(cfg);
+  if (g.mode === 'chain') {
+    snapshotArtwork(room);
+    return g.start(cfg);
+  }
+  snapshotArtwork(room);
   return g.start(cfg);
 }
 
@@ -482,6 +498,59 @@ function gameChat(room, text, onlyUserId) {
  * 经典模式每个回合都要清；接龙则**只在「作画」这一步的开始/结束**清
  * （写词 / 猜词时画布上放着上家的画当参考，绝不能清掉）。
  */
+/**
+ * 开局前把玩家的画作拍快照，结束后原样奉还 —— 游戏不再「吃掉」原画。
+ *
+ * 快照在**每一次开局**时尝试拍，但只在还没有快照时才真正拍：
+ * 「人不够退回大厅 → 再开一局」这种暂停续局，画布上是游戏的残局，
+ * 真正要保的是**第一次开局前**的那幅画（恢复时机见 restoreArtwork）。
+ */
+function snapshotArtwork(room) {
+  if (room.gameSnap) return;
+  const bases = {}, masks = {};
+  for (const l of room.layers) {
+    if (l.baseImage) bases[l.id] = l.baseImage;
+    if (l.maskImage) masks[l.id] = l.maskImage;
+  }
+  room.gameSnap = {
+    strokes: room.strokes.map(s => Object.assign({}, s)),
+    bases, masks
+  };
+}
+
+/**
+ * 游戏结束（房主停止 / 整局打完）时恢复开局前的画：
+ * 笔迹按新 seq 重放插回，底图 / 蒙版像素原样放回，
+ * 然后广播清空 + 重发底图 + 逐人重发历史，让每个客户端把画面换回来。
+ */
+function restoreArtwork(room) {
+  const snap = room.gameSnap;
+  if (!snap) return;
+  room.gameSnap = null;
+  const alive = new Set(room.layers.map(l => l.id));
+  room.clear('all');                     // 丢掉游戏期间的内容（含残局底图）
+  for (const s of snap.strokes) {
+    if (!alive.has(s.layerId)) continue; // 游戏期间被删掉的层，它的笔迹随它去
+    room.strokes.push(Object.assign({}, s, { seq: ++room.seq }));
+  }
+  const bases = {}, masks = {};
+  for (const l of room.layers) {
+    if (snap.bases[l.id]) { l.baseImage = snap.bases[l.id]; l.baseSeq = room.seq; bases[l.id] = l.baseImage; }
+    if (snap.masks[l.id]) { l.maskImage = snap.masks[l.id]; l.maskSeq = room.seq; masks[l.id] = l.maskImage; }
+  }
+  store.markDirty(room);
+  roomBroadcast(room, P.S2C.STROKE_REMOVED, {
+    ids: [], reason: 'clear', scope: 'all', by: 'system', removed: true, seq: room.seq
+  });
+  broadcastLayers(room, bases, masks);
+  for (const m of room.members.values()) {
+    if (!m.ws || m.ws.readyState !== m.ws.OPEN) continue;
+    const chunks = historyChunks(room, m.userId);
+    if (!chunks.length) send(m.ws, P.S2C.HISTORY_CHUNK, { strokes: [], done: true });
+    else chunks.forEach((c, i) => send(m.ws, P.S2C.HISTORY_CHUNK, { strokes: c, done: i === chunks.length - 1 }));
+  }
+}
+
 function resetGameCanvas(room) {
   // 接龙模式下，画布上的内容可能是「上家的画」（猜词阶段的参考图）。
   // 那种情况下不能清 —— 但 chain.js 只会在 DRAW 步的首尾调 resetCanvas()，
@@ -906,6 +975,39 @@ function handle(ws, msg) {
       roomBroadcast(room, P.S2C.CHAT, {
         id: P.rid('m'), userId: 'system', name: '系统', color: '#8b8b8b',
         text: target.name + (want ? ' 现在是观众，只能看' : ' 可以作画了'),
+        ts: Date.now(), system: true
+      });
+      return;
+    }
+
+    /**
+     * 房主转让：把房主身份转给房间里另一个人。
+     *
+     * 与退房时的自动移交（transferOwnerIfNeeded）走同一套状态位 —— room.ownerId /
+     * ownerName 改完广播 MEMBERS 就行，客户端的 isOwner 本来就是从成员列表里
+     * 自己那行推出来的（见 applyMembers）。纯权限状态、不落盘，所以不 markDirty。
+     */
+    case P.C2S.HOST_TRANSFER: {
+      if (!room || !member) return;
+      if (member.userId !== room.ownerId) {
+        return send(ws, P.S2C.ERROR, { code: 'not_owner', message: '只有房主可以转让房主' });
+      }
+      const who = sanitizeText(msg.userId, 40);
+      if (!who || who === member.userId) {
+        return send(ws, P.S2C.ERROR, { code: 'bad_target', message: '要转让的人不对' });
+      }
+      let target = null;
+      for (const m of room.members.values()) if (m.userId === who) target = m;
+      if (!target) {
+        return send(ws, P.S2C.ERROR, { code: 'no_member', message: '这个人已经不在房间里了' });
+      }
+      room.ownerId = target.userId;
+      room.ownerName = target.name;
+      // 成员是运行时状态，不落盘（同 MEMBER_ROLE）
+      roomBroadcast(room, P.S2C.MEMBERS, { members: room.memberList() });
+      roomBroadcast(room, P.S2C.CHAT, {
+        id: P.rid('m'), userId: 'system', name: '系统', color: '#8b8b8b',
+        text: '房主 ' + member.name + ' 把管理权转给了 ' + target.name + '，' + target.name + ' 现在是房主',
         ts: Date.now(), system: true
       });
       return;

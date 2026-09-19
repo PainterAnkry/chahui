@@ -1,7 +1,7 @@
 {
   "name": "chahui-desktop",
   "productName": "茶绘",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "private": true,
   "description": "茶绘 · 多人实时协作绘画聊天室（桌面端）",
   "author": "Ankry",
@@ -27,17 +27,17 @@
       "output": "../dist",
       "buildResources": "build"
     },
-  "files": [
-    "main.js",
-    "preload.js",
-    "server-embed.js",
-    "tunnel.js",
-    "local-host.js",
-    "server/**/*",
-    "renderer/**/*",
-    "build/icon.png",
-    "!node_modules/chahui/**"
-  ],
+    "files": [
+      "main.js",
+      "preload.js",
+      "server-embed.js",
+      "tunnel.js",
+      "local-host.js",
+      "server/**/*",
+      "renderer/**/*",
+      "build/icon.png",
+      "!node_modules/chahui/**"
+    ],
     "win": {
       "icon": "build/icon.png",
       "target": [
