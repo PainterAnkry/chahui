@@ -13,7 +13,7 @@
  *   - 秒数字段：0 / 缺省 / 非法 / 负数 = 用默认（存 0）；否则夹到 [3, 600]。
  *     **drawSeconds 例外** —— 它从 v4 起最短就是 30 秒（房主侧最短 30 秒），仍是 [30, 300]。
  *   - rounds：0 / 缺省 / 非法 = 用默认（存各玩法的默认回合数）；否则夹到 [1, 该玩法上限]。
- *   - chainLength：0 / 缺省 / 非法 = 用默认（开局时 = 人数 + 1）；否则夹到 [3, 16]。
+ *   - chainLength：0 / 缺省 / 非法 = 用默认（开局时 = **2 × 人数**，每人连续两格）；否则夹到 [3, 16]。
  *   - repickLimit：**0 是实义值**（这一局一次都不许「换一组」）；缺省 / 非法 = 默认 1；夹到 [0, 5]。
  *
  * ⚠ 与 start() 的分工：这里的值**只是预设 / 面板显示**，真正的裁定仍在三处 start() 里
@@ -121,7 +121,9 @@ function normalizeGamePrefs(src) {
     // ⚠ 0 在这里是实义值：0 = 这一局不允许「换一组」
     repickLimit: clampInt(src.repickLimit, G.REPICK_LIMIT, 0, 5),
     roundEndSeconds: secOrZero(src.roundEndSeconds),
-    // 0 = 默认（开局时 = 人数 + 1；chain.start 本来就认 0 为「没设」）
+    // 0 = 默认（开局时 = **2 × 人数**；chain.start 本来就认 0 为「没设」）
+    // 注意 [3, 16] 只是**面板档位**的上限：真正的链长上限是 2 × min(人数, CHAIN_LENGTH_MAX)，
+    // 由 chain.start()/beginGame() 按当时的人数再夹一次（链比 2×人数 长就会绕第二圈）。
     chainLength: intOrZero(src.chainLength, G.CHAIN_LENGTH_MIN, G.CHAIN_LENGTH_MAX),
     writeSeconds: secOrZero(src.writeSeconds),
     guessSeconds: secOrZero(src.guessSeconds),
@@ -188,6 +190,15 @@ function setupOptions() {
       classic: [G.MIN_PLAYERS, G.MAX_PLAYERS],
       chain: [G.CHAIN_MIN_PLAYERS, G.CHAIN_MAX_PLAYERS],
       skin: [G.SKIN_MIN_PLAYERS, G.SKIN_MAX_PLAYERS]
+    },
+    // 接龙链长的档位（v11）：前端**不要写死**，链长的一切都以这两个数为准 ——
+    //   默认 = 2 × 在线人数（每人连续两格：画自己拿到的 + 猜下一格）；
+    //   上限 = 2 × min(人数, CHAIN_LENGTH_MAX)，再往下限 3 兜底。
+    // 前端算档位：min 到 max(3, 2*min(在线人数, chainMax))，默认取 2*在线人数。
+    chainLength: {
+      min: G.CHAIN_LENGTH_MIN,
+      max: G.CHAIN_LENGTH_MAX,        // 是**人数**的封顶（真实链长上限 = 它的 2 倍）
+      perPlayer: 2                    // 默认 / 上限的倍数：链长 = perPlayer × 人数
     },
     repick: G.SETUP_REPICK.slice(),
     rounds: rounds

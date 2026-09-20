@@ -8,8 +8,15 @@
  * 拿到猜出的词再画…… 全部传完后一起看回放：一个词是怎么一步步跑偏的。
  *
  * 与 v1（旧 chain.js）的关键差异 —— 这一版是按 Draw & Guess 的 Whisper 玩法重写的：
- *   1. **链长 = 环上人数**（可设定 3 ~ 人数）。每条链恰好传遍全场，
- *      每个阶段每个人都恰好有自己的一格要做 —— 不再有「掉线顶替把格子派重复」的错乱。
+ *   1. **链长 = 2 × 人数**（可设定 3 ~ 2×人数）。每人占**连续两格**：
+ *      先画自己刚拿到的（词或上家的画），再猜下一格 —— 猜完立刻画，画完才交棒。
+ *      默认链长下每一格恰好 n 个 cell，每个人都恰好有自己的一格要做 ——
+ *      不再有「掉线顶替把格子派重复」的错乱。4 人房的 8 步见 authorOffset()。
+ *      ★ v12「大房间分组」：人多了就把玩家**均分成若干组**，每条链只在**组内**传一圈
+ *        （组内链长 = 2 × 该组人数）—— 不让人等太久、链条也不拉太长。见 planGroups()。
+ *        4~6 人 = 1 组（就是原来的全局环，行为一模一样）；7~10 人 = 2 组；
+ *        11~12 人 = 3 组；13~16 人 = 4 组。多组用**同一个全局 stepIndex 并行推进**：
+ *        第 k 格里每个组各自的成员同时做自己组的那一格。
  *   2. **产物是笔迹数据，不是 PNG**。DRAWING 格的 content = 作者的笔迹数组
  *      （points / color / size / tool……），猜词的人拿到笔迹在本地渲染，
  *      回放时也能按真实笔序重新演一遍。
@@ -19,6 +26,14 @@
  *      绝不搭 GAME_STATE 的广播快照 —— 那条每秒都在重发，塞几 MB 笔迹进去会卡死公网房）。
  *   4. **流程**：大厅（全员准备）→ 开场 → 写词 → 画/猜交替 → 回放 → 投票 → 结算 → 回大厅。
  *      投票有两票：每条链「首尾是否还对得上」+ 全场「最喜欢的一张画」。
+ *   5. **回放棒次（revealStep）由服务端持有**：每过 revealLegMs() 推进一格，
+ *      快照下发 revealStep / revealLegs / legHoldMs —— 四个端看到的永远是同一格。
+ *   6. **每一棒都自检「下一棒有人接」**：n 人必须拿到 n 个互不相同的 cell（v12 起是**按组**
+ *      断言：组内每人恰好一个 cell），断了就 console.error + 系统播报 + 强制推进
+ *      （见 assertChainIntact / checkChainOrForce）。
+ *   7. **每条链各投一次 ♥**（v12）：votesFav 是 userId -> Map(chainId -> step)，
+ *      投了下一条链的 ♥ 不会把上一条的票冲掉；最终「点赞最多的画」跨链统计，
+ *      并把那一格的笔迹（strokes）一起给前端，省得前端再回查。
  *
  * 时间与计分全部在服务端裁定：客户端只拿 deadline 做倒计时显示。
  */
@@ -54,6 +69,48 @@ const CHAIN_PHASE_LABEL = {
 
 /** 每一格的类型（与协议约定一致）：初始词 / 画 / 猜词 */
 const STEP = { WORD: 'WORD', DRAWING: 'DRAWING', GUESS: 'GUESS' };
+
+/**
+ * ★ v12 大房间分组的**人数 → 组数**表（用户明确要求）：
+ *
+ *   4~6 人   → 1 组（每人一条链，链传遍全场）—— 就是 v11 的行为，完全不变
+ *   7~10 人  → 2 组
+ *   11~12 人 → 3 组
+ *   13~16 人 → 4 组
+ *
+ * 超过 4 组不再细分（16 人封顶 → 每组 4 人，组内链长 8 格，与 4 人房同量级）。
+ * 组内传遍 = **不让一个人等太久、链条也不拉太长**：16 人若还是一条链传全场，
+ * 一局要 32 格 × 每格几十秒，等一轮就散了。
+ */
+const GROUP_TABLE = [
+  { min: 13, groups: 4 },
+  { min: 11, groups: 3 },
+  { min: 7, groups: 2 },
+  { min: 4, groups: 1 }
+];
+
+/** 人数 → 组数（表外的人数为兜底：少于 4 人 1 组，多于 16 人也按 4 组） */
+function groupCountFor(n) {
+  for (const row of GROUP_TABLE) if (n >= row.min) return row.groups;
+  return 1;
+}
+
+/**
+ * 把 n 个人**尽量均分**成 groupCountFor(n) 组，返回每组的**人数**数组。
+ *
+ * 除法取整、余数摊给前面的组（16 → 4/4/4/4；13 → 4/3/3/3；10 → 5/5；7 → 4/3）。
+ * 做成功 pure function 是为了让「分组表」本身可以被测试直接钉住
+ * （见 tools/test-chain-sim.js 的 [15] 分组表）。
+ */
+function groupSizesFor(n) {
+  const total = Math.max(0, Math.floor(Number(n)) || 0);
+  const groups = Math.min(groupCountFor(total), Math.max(1, total));
+  const base = Math.floor(total / groups);
+  const rest = total % groups;
+  const out = [];
+  for (let i = 0; i < groups; i++) out.push(base + (i < rest ? 1 : 0));
+  return out.filter(s => s > 0);
+}
 
 /** 单幅画笔迹的硬上限（防恶意刷爆内存 / 回放包；正常绘画远够不到） */
 const MAX_STROKES_PER_ART = 400;
@@ -170,6 +227,10 @@ class ChainGame {
     this.chainLength = 0;      // 每条链传几手（含初始词格）；开局时定死
 
     this.ring = [];            // 传递顺序（开局时打乱一次，一局内固定）
+    // ★ v12：分组。每组一个**独立的环**，链只在组内传（见 planGroups）。
+    //   [{ id:'g1', index:0, ring:[userId...], members:[userId...], chainIds:[...], chainLength:2*size }]
+    //   4~6 人房只有一组，ring 就是全场环 —— 与 v11 完全等价（回归靠这一点）。
+    this.groups = [];
     this.chains = [];          // [{ chainId, ownerPlayerId, ownerName, currentStep, steps[], status }]
     this.names = new Map();    // userId -> name（人走了榜单也要显示）
     this.scores = new Map();   // userId -> 分数（跨局累计）
@@ -188,10 +249,17 @@ class ChainGame {
 
     // 投票（VOTE 阶段）
     this.votesKeep = new Map();// userId -> Map(chainId -> bool) 每条链「对得上吗」
-    this.votesFav = new Map(); // userId -> { chainId, step } 最喜欢的一张画
+    // ★ v12：userId -> Map(chainId -> step) —— **每条链各投一次 ♥**。
+    //   以前是 userId -> { chainId, step }，一人只有一票，投了下一条链就把上一条冲掉，
+    //   「点赞最多的画」于是永远只数得到最后一条链的票。改成两层 Map 后跨链累积。
+    this.votesFav = new Map();
 
     // 回放（REVEAL 起）
     this.revealData = null;    // 完整链条（内容公开）
+    // ★ 回放的「棒次」由**服务端**持有并在快照里下发（v11）：
+    //   前端不再自己按定时器逐格翻 —— 各端时钟一抖，四个人看到的就不是同一格。
+    //   revealStep = 当前回放到第几格（0 起，全局一格一格推进，每格停 revealLegMs()）。
+    this.revealStep = 0;
     // ⚠ 按链串行投票：现在轮到第几条链、已经结算了哪几条（见 settleChain）
     this.voteChainIndex = 0;
     this.chainSettled = [];
@@ -224,11 +292,10 @@ class ChainGame {
 
   /** 第 k 格（0 起）的类型。
    *
-   *  0 = 写起词；1 = **画自己刚写的起词**；之后 猜/画 交替。
-   *  ⚠ 这是「写完自己先画自己的词，再往下传」那一版：
-   *    链主在第 0、1 两格连着做，往下传从第 2 格才开始。
-   *    所以一条链长这样：起词 → 画1 → 猜1 → 画2 → 猜2 …
-   *  与「传给下家画」的老版本的区别只在第 1 格归谁 —— 见 authorOffset。
+   *  0 = 写起词；奇数格 = **画**；偶数格（>0）= **猜**。
+   *  这是「每人猜完立刻画自己猜出来的词，然后才传给下一个人」那一版：
+   *    链长这样：起词 → 画1 → 猜1 → 画2 → 猜2 → 画3 → 猜3 → 画4 …
+   *  与旧版的区别只在「第 2 格归谁」—— 见 authorOffset。
    */
   stepTypeOf(k) {
     if (k === 0) return STEP.WORD;
@@ -236,25 +303,123 @@ class ChainGame {
     return (k % 2 === 1) ? STEP.DRAWING : STEP.GUESS;
   }
 
-  /** 第 k 格由「链主往后数第几个人」做。
+  /** 第 k 格由「链主往后数第几个人」做 —— 每人连续两格（画自己拿到的、再猜下一格）。
    *
-   *  第 0、1 格都是链主本人（写词 + 画自己的词），从第 2 格起一格往后挪一个人。
-   *  人数 = 链长 - 1 时，每一格仍然是「人人各有一格」的一一映射：
-   *    4 人 [A,B,C,D]，链长 5 →
-   *      起词 A/B/C/D · 画1 A/B/C/D · 猜1 B/C/D/A · 画2 C/D/A/B · 猜2 D/A/B/C
+   *  floor(k / 2)：k = 0,1 → 0；k = 2,3 → 1；k = 4,5 → 2；k = 6,7 → 3 …
+   *  即「链主先写起词并画它（第 0、1 格），传给下家；下家看画猜词并画自己猜的词
+   *  （第 2、3 格），再往下传」—— 每人拿到一格立刻就画，画完才交棒。
+   *
+   *  ⚠ 链长默认 = **2 × 人数**（见 start()）就是为了让这套映射刚好整圈走完：
+   *    4 人 [A,B,C,D]，链长 8 —— 这是用户点名的 8 步：
+   *      k=0 起词 A   k=1 画 A   k=2 猜 B   k=3 画 B
+   *      k=4 猜 C     k=5 画 C   k=6 猜 D   k=7 画 D
+   *    作者偏移 = [0,0,1,1,2,2,3,3]，作者序列 = A,A,B,B,C,C,D,D；
+   *    类型序列   = WORD,DRAWING,GUESS,DRAWING,GUESS,DRAWING,GUESS,DRAWING。
+   *    8 格正好把 4 个人各排到 2 格，于是「同一步里人人恰好一格」的一一映射成立
+   *    （链长 = 2×人数，且偶数，所以每一格都是恰好 n 个 cell，不多不少）。
    *
    *  ⚠ 认领（cellOf）和收格（finalizeStep）**必须**共用这一份映射。
    *    以前两边各写一遍 `(ownerIdx + k) % n`，只要改一处漏一处，就会出现
    *    「我照 A 的链写词、服务端把词记到 B 的链上」这种鬼故事。
    */
-  authorOffset(k) { return k <= 1 ? 0 : k - 1; }
+  authorOffset(k) { return Math.floor(k / 2); }
 
-  /** 第 k 格的作者 userId（chain 是链主那条链） */
+  /** 第 k 格的作者 userId（chain 是链主那条链）—— **在链主自己那一组里**数。
+   *
+   *  v12：链只在组内传。链主的组里，第 k 格的作者 = 组环上 (链主位置 + floor(k/2))；
+   *  一旦偏移超出**本组人数**（人少的组在统一链长的尾巴上会出现），返回 '' ——
+   *  那一格对这个组来说是「空」，由 finalizeStep 落一个 skipped 空壳，
+   *  这样「每条链的 steps 长度统一 = chainLength」这条不变式不会被破坏。
+   */
   authorOf(chain, k) {
-    const n = this.ring.length;
-    const ownerIdx = this.ring.indexOf(chain.ownerPlayerId);
-    if (!n || ownerIdx < 0) return '';
-    return this.ring[(ownerIdx + this.authorOffset(k)) % n];
+    const g = this.groupOfChain(chain);
+    if (!g || !g.ring.length) return '';
+    const ownerIdx = g.ring.indexOf(chain.ownerPlayerId);
+    if (ownerIdx < 0) return '';
+    const off = this.authorOffset(k);
+    if (off >= g.ring.length) return '';          // 组内已经走完一圈 → 空格
+    return g.ring[(ownerIdx + off) % g.ring.length];
+  }
+
+  /** 这一条链归哪一组（链主所在组）；找不到就 null */
+  groupOfChain(chain) {
+    if (!chain) return null;
+    if (chain.groupId) {
+      const byId = this.groups.find(g => g.id === chain.groupId);
+      if (byId) return byId;
+    }
+    for (const g of this.groups) if (g.ring.indexOf(chain.ownerPlayerId) >= 0) return g;
+    return null;
+  }
+
+  /** 这个人在哪一组（看客 / 不在本局 → null） */
+  groupOf(userId) {
+    if (!userId) return null;
+    for (const g of this.groups) if (g.members.indexOf(userId) >= 0) return g;
+    return null;
+  }
+
+  /** 全场最大的组多大 —— 统一链长 = 2 × 它（见 start()） */
+  maxGroupSize() {
+    let m = 0;
+    for (const g of this.groups) if (g.members.length > m) m = g.members.length;
+    return m;
+  }
+
+  /** 各组链长表（组内传遍 = 2 × 该组人数）—— 快照下发，前端要知道每个组跑几格 */
+  groupLengths() {
+    const out = {};
+    for (const g of this.groups) out[g.id] = 2 * g.members.length;
+    return out;
+  }
+
+  /** 第 k 格里**有活干的人**（组内偏移还没走完的人）。
+   *  组里已经走完一圈的成员在剩下的格子里就是空的 —— 不派活、不提交、也不摊空格。 */
+  activeUsers(k) {
+    const out = new Set();
+    if (!this.groups.length) { for (const uid of this.ring) out.add(uid); return out; }
+    const off = this.authorOffset(k);
+    for (const g of this.groups) {
+      if (off >= g.members.length) continue;
+      for (const uid of g.members) out.add(uid);
+    }
+    return out;
+  }
+
+  /** 我在第 k 格里负责的那条链 —— 只在我自己那一组的环里找 */
+  myCellChainId(userId, k) {
+    const g = this.groupOf(userId);
+    if (!g || !g.ring.length) return null;
+    const myIdx = g.ring.indexOf(userId);
+    if (myIdx < 0) return null;
+    const off = this.authorOffset(k);
+    if (off >= g.ring.length) return null;        // 组内走完一圈 → 这一格没我的事
+    const ownerIdx = ((myIdx - off) % g.ring.length + g.ring.length) % g.ring.length;
+    return g.chainIds[ownerIdx] || null;
+  }
+
+  /**
+   * 第 k 格该谁做：在**玩家自己那一组**的环上，从链主往后数 authorOffset(k) 个人。
+   *
+   * ⚠ 4~6 人房只有一组，ring 就是全场环 —— 与 v11 的 (myIdx - off) mod n 完全等价。
+   *   分组之后「某组的玩家不可能拿到别组的 cell」这条靠的就是这里只查本组。
+   */
+  cellOf(userId, k) {
+    const cid = this.myCellChainId(userId, k);
+    if (!cid) return null;
+    return this.chains.find(c => c.chainId === cid) || null;
+  }
+
+  /** 该用户此刻能不能改画布 */
+  lockedFor(userId) {
+    if (this.phase === CHAIN_PHASE.OFF || this.phase === CHAIN_PHASE.LOBBY) return false;
+    if (this.phase === CHAIN_PHASE.DRAW) {
+      // 作画：环里的人都能动笔（每人都有一格）；交过了就锁笔；看客锁笔
+      const chain = this.cellOf(userId, this.stepIndex);
+      if (!chain) return true;
+      return this.submitted.has(userId);
+    }
+    return true;   // INIT / WRITE / GUESS / REVEAL / VOTE / SCORE 一律不动笔
   }
 
   /** 玩家名单：非只读、非看客的在场成员（大厅准备与开局人数都以它为准） */
@@ -277,35 +442,23 @@ class ChainGame {
   isOwner(userId) { return !!(this.room.ownerId && this.room.ownerId === userId); }
 
   /**
-   * 第 k 格该谁做：链主往后数 k 个人（ring 是打乱过的玩家环）。
-   * 链 ring[i] 的第 k 格由 ring[(i+k) % n] 做 —— 所以「我」在第 k 格负责的链
-   * 就是 ring[(myIdx - k) mod n] 那个人开的链。人数=链长时这是个一一映射：
-   * 同一阶段里每个人都恰好有一格，绝不会被派两次（v1 的覆盖错乱在这里根治）。
+   * 备注：v11 那版「在全局环上算第 k 格」的 cellOf 已被上面的版本取代 ——
+   * 分组之后一律在**我那一组**的环里算（见 myCellChainId）。组内链长 = 2 × 该组人数时，
+   * 每一格都是组内恰好 size 个 cell 的一一映射，同一格绝不会被派两次、也不会有人没活干。
    */
-  cellOf(userId, k) {
-    const n = this.ring.length;
-    if (!n) return null;
-    const myIdx = this.ring.indexOf(userId);
-    if (myIdx < 0) return null;              // 看客 / 不在本局的环里
-    const off = this.authorOffset(k);
-    const ownerIdx = ((myIdx - off) % n + n) % n;
-    const chain = this.chains.find(c => c.ownerPlayerId === this.ring[ownerIdx]);
-    return chain || null;
-  }
-
-  /** 该用户此刻能不能改画布 */
-  lockedFor(userId) {
-    if (this.phase === CHAIN_PHASE.OFF || this.phase === CHAIN_PHASE.LOBBY) return false;
-    if (this.phase === CHAIN_PHASE.DRAW) {
-      // 作画：环里的人都能动笔（每人都有一格）；交过了就锁笔；看客锁笔
-      const chain = this.cellOf(userId, this.stepIndex);
-      if (!chain) return true;
-      return this.submitted.has(userId);
-    }
-    return true;   // INIT / WRITE / GUESS / REVEAL / VOTE / SCORE 一律不动笔
-  }
 
   blocksWrite(userId) { return this.lockedFor(userId); }
+
+  /**
+   * 这条链是哪一组的（快照 / 测试用的小工具）：返回 { id, index, size, ring, chainIds }
+   * 的精简视图；没有分组信息时回 null。
+   */
+  groupInfo(chainId) {
+    const c = this.chains.find(x => x.chainId === chainId);
+    const g = c ? this.groupOfChain(c) : null;
+    if (!g) return null;
+    return { id: g.id, index: g.index, size: g.members.length, ring: g.ring.slice(), chainIds: g.chainIds.slice() };
+  }
 
   /**
    * 这个人此刻手里攥着「别人还没看到的答案」吗？
@@ -319,7 +472,11 @@ class ChainGame {
   }
 
   /** 这一步的时长（客户端只拿来显示倒计时）。
-   *  房主在开局设置里定的每局覆盖值优先，否则用环境变量 / 协议默认。 */
+   *  房主在开局设置里定的每局覆盖值优先，否则用环境变量 / 协议默认。
+   *
+   *  ⚠ REVEAL 这一格特殊（v11）：这里返回的是**整条链放完的总时长**（房主配的「回放时间」），
+   *    而 phase 的 deadline 是**每一格**的（= revealLegMs()，见 enterReveal / tick）。
+   *    前端排回放动画应该用快照里的 legHoldMs / revealLegs，别拿 stepMs 当每格时长。 */
   stepMs() {
     if (this.phase === CHAIN_PHASE.INIT) return CFG.INIT_MS;
     if (this.phase === CHAIN_PHASE.WRITE) return this.writeMs || CFG.WRITE_MS;
@@ -334,6 +491,21 @@ class ChainGame {
     return 0;
   }
 
+  /**
+   * 回放时**每一格**定格多久（服务端说了算，快照里下发给前端排动画用）。
+   *
+   * 房主配的「回放时间」（revealSeconds）指的是**整条链放完**的总时长，
+   * 所以每格 = 总时长 / 格数，再兜一个 1500ms 的地板 ——
+   * 格数最多 32（16 人房），总时长最短 3 秒，不兜底就会「每格 90ms」闪成一片。
+   *
+   * 这就是用户说的「倍速处理」的服务端侧：倍速 = 总时长 / 格数，由服务端算好，
+   * 客户端只管拿 legHoldMs 排动画，不用自己推。
+   */
+  revealLegMs() {
+    const total = this.revealMs || CFG.REVEAL_MS;
+    return Math.max(P.GAME.CHAIN_REVEAL_LEG_MS_MIN, Math.floor(total / Math.max(1, this.chainLength)));
+  }
+
   /* ------------------------------------------------------------ 快照 */
 
   /**
@@ -346,7 +518,6 @@ class ChainGame {
   snapshotFor(userId) {
     const me = userId || '';
     const cell = this.isPlaying() ? this.cellOf(me, this.stepIndex) : null;
-    const myFav = this.votesFav.get(me) || null;
     const keepMap = this.votesKeep.get(me);
     const myKeep = {};
     if (keepMap) for (const [cid, agree] of keepMap) myKeep[cid] = !!agree;
@@ -354,6 +525,15 @@ class ChainGame {
     const cur = (this.phase === CHAIN_PHASE.REVEAL || this.phase === CHAIN_PHASE.VOTE)
       ? this.currentVoteChain() : null;
     const tally = this.chainVoteTally(cur ? cur.chainId : null);
+    // ★ v12：我的 ♥ 是**按链**记的 —— 快照要能回答「我在现在这条链上投过没有」，
+    //   所以带出 myFav（当前这条链的）+ myFavStep 一并给出，前端不用自己猜是哪个字段。
+    const favHere = this.myFav(me, cur ? cur.chainId : null);
+    const myGroup = this.groupOf(me);
+    const myGroupSize = myGroup ? myGroup.members.length : 0;
+    // 有活干的人数（组里已经走完一圈的成员不算）—— 进度显示用
+    const activeNow = this.activeUsers(this.stepIndex);
+    let stepDone = 0;
+    for (const uid of this.submitted) if (activeNow.has(uid)) stepDone += 1;
 
     return {
       mode: 'chain',
@@ -367,10 +547,45 @@ class ChainGame {
 
       round: this.roundNo,
       chainLength: this.chainLength,
-      // 进度骨架：第几格、这条格一共几件事、交了几件 —— 不含任何内容
+      // 传递顺序（打乱过、一局内冻结）。**不是秘密**：它只是「谁接着谁」，
+      // 前端回放时要按这个顺序把 A→B→C→D 标出来；测试也拿它验作者序列。
+      // 内容（词 / 笔迹）一个字节都不在这里。
+      // v12：多组时这里是**各组环首尾相接**的扁平表（兼容老的消费者）；
+      //      真正的分组看 groups / myGroup 两个字段。
+      ring: this.ring.slice(),
+      // ★ v12 分组：每组一个环、链只在组内传。members 带名字，chainIds 是该组的链
+      //   （顺序 = 该组 ring 的顺序）；chainLength = 2 × 该组人数（组内传遍）。
+      //   这是纯骨架信息（谁和谁一组、哪几条链），一个字的词 / 一笔画都没有。
+      groups: this.groups.map(g => ({
+        id: g.id,
+        index: g.index,
+        size: g.members.length,
+        chainLength: 2 * g.members.length,
+        ring: g.ring.slice(),
+        members: g.members.map(uid => ({ userId: uid, name: this.names.get(uid) || '某人' })),
+        chainIds: g.chainIds.slice()
+      })),
+      groupCount: this.groups.length,
+      myGroup: myGroup ? myGroup.id : '',
+      myGroupIndex: myGroup ? myGroup.index : -1,
+      groupSize: myGroupSize,
+      groupLengths: this.groupLengths(),
+      maxGroupSize: this.maxGroupSize(),
+      // ---- 回放棒次（服务端权威）----
+      // revealStep：整条链现在放到第几格（0 起）。REVEAL 期间每 revealLegMs() 加一；
+      //   VOTE 期间钉在最后一格（chainLength - 1）—— 投票时要看最终画面；
+      //   非回放/投票阶段暴露的是上一次的值（前端只在 REVEAL/VOTE 用它）。
+      // revealLegs：总格数 = chainLength，前端拿它排进度点 / 算总时长。
+      // legHoldMs ：每格定格时长（= revealLegMs()），前端按它排翻页动画。
+      revealStep: this.revealStep,
+      revealLegs: this.chainLength,
+      legHoldMs: this.revealLegMs(),
+      // 进度骨架：第几格、这一格全场**同时**有几件事、交了几件 —— 不含任何内容。
+      // v12：多组并行时同时进行的是「每个组各一条链」，所以 stepTotal = 最大的组多大
+      // （4 人 1 组 = 4，8 人 2 组 × 4 = 4，不是 8 —— 同一步里不会出现 8 条链）。
       stepIndex: this.isPlaying() || this.phase === CHAIN_PHASE.INIT ? this.stepIndex : 0,
-      stepTotal: this.chains.length,
-      stepDone: this.submitted.size,
+      stepTotal: this.maxGroupSize() || this.chains.length,
+      stepDone: stepDone,
 
       // 大厅 / 榜单（ready 只有大厅阶段有意义，其余阶段一律 false）
       players: this.playerStates(),
@@ -390,8 +605,14 @@ class ChainGame {
 
       // 我的投票（票是匿名的，只回给本人）
       myKeep: myKeep,
-      myFav: myFav,
-      favVotedCount: this.votesFav.size,
+      // ★ v12：myFav 是**当前这条链**上我投的那一格（{ chainId, step }），没投 = null；
+      //   myFavStep 是同一件事的裸值（前端画 ♥ 时少解一层）。
+      //   favVotedCount 是**我自己**投过 ♥ 的条数（不再是全场人数之和）——
+      //   一人一条链一票，那个数字拿来当进度条会随链数膨胀。
+      myFav: favHere,
+      myFavStep: favHere ? favHere.step : -1,
+      myFavMap: this.myFavMap(me),
+      favVotedCount: this.myFavCount(me),
 
       // 结算只在 SCORE 阶段下发
       voteResult: this.phase === CHAIN_PHASE.SCORE ? this.voteResult : null,
@@ -399,9 +620,11 @@ class ChainGame {
       // ---- 按链串行投票：全场跟着服务端看同一条链 ----
       // 前端只渲染 voteChainId 这一条；已投人数 / 总人数直接给出来，
       // 免得每个客户端各自去数（数法一不一致就会「我这儿显示 2/4、你那儿 3/4」）。
+      // v12：总人数 = **这条链那一组**的人数（跨组投票不参与统计，见 chainVoteTally）。
       voteChainIndex: this.voteChainIndex,
       voteChainId: cur ? cur.chainId : '',
-      voteTotal: this.ring.length,
+      voteGroupId: cur ? (this.groupOfChain(cur) || {}).id || '' : '',
+      voteTotal: tally.total,
       voteDone: tally.voted,
       voteAgree: tally.agree,
       chainCount: this.chains.length,
@@ -518,17 +741,25 @@ class ChainGame {
     this.guessMs = optSec(opts && opts.guessSeconds);
     this.revealMs = optSec(opts && opts.revealSeconds);
     this.voteMs = optSec(opts && opts.voteSeconds);
-    // 链长：默认 = 人数 + 1。**+1 是因为第 0、1 两格都是链主**（写起词 + 画自己的起词），
-    // 之后才一格换一个人 —— 这样链长 = 人数+1 时刚好「人人都轮到，谁也不重复」：
-    //   4 人 → 起词A 画1A 猜1B 画2C 猜2D
-    // 可设定，夹在 [3, 人数+1] 里（下限 3 保证至少「词 → 画 → 猜」是个完整回合）。
-    const maxLen = Math.min(players.length, P.GAME.CHAIN_LENGTH_MAX) + 1;
-    const wantLen = Math.floor(Number(opts && opts.chainLength)) || (players.length + 1);
-    this.chainLength = clampInt(wantLen, players.length + 1,
+    // 链长：默认 = **2 × 该组人数**（组内传遍）。每人占连续两格（画自己拿到的 + 猜下一格），
+    // 所以组内整圈走完正好 2×组人数 格 —— 4 人房就是用户点名的 8 步：
+    //   k=0 起词A k=1 画A k=2 猜B k=3 画B k=4 猜C k=5 画C k=6 猜D k=7 画D
+    // ★ v12：分组之后用**统一链长 = 2 × 最大的组**（用户倾向的简单口径）：
+    //   各组的「有效格数」仍然是各自的 2×组人数（组内传遍），人少的组走到自己的圈尾就没人有活，
+    //   尾巴上多出来的格子由 finalizeStep 落成 skipped 的空壳（steps 长度统一 = chainLength，
+    //   回放 / 投票 / 结算都不用为「这条链只有 6 格」再分支）。
+    //   16 人 → 4×4 组，链长 8；13 人 → 4/3/3/3，链长 8（3 人组第 7、8 格空）；
+    //   10 人 → 5/5，链长 10；7 人 → 4/3，链长 8。4~6 人 1 组时与 v11 完全一致。
+    // 夹在 [3, 2 × min(最大的组, CHAIN_LENGTH_MAX)] 里（CHAIN_LENGTH_MAX=16 → 组内最多 32 格）。
+    const maxGroup = Math.max(1, ...groupSizesFor(players.length));
+    const maxLen = 2 * Math.min(maxGroup, P.GAME.CHAIN_LENGTH_MAX);
+    const wantLen = Math.floor(Number(opts && opts.chainLength)) || (2 * maxGroup);
+    this.chainLength = clampInt(wantLen, 2 * maxGroup,
       P.GAME.CHAIN_LENGTH_MIN, Math.max(P.GAME.CHAIN_LENGTH_MIN, maxLen));
 
     this.chains = [];
     this.ring = [];
+    this.groups = [];
     this.stepIndex = 0;
     this.submitted = new Set();
     this.pendingText = new Map();
@@ -536,6 +767,7 @@ class ChainGame {
     this.votesKeep = new Map();
     this.votesFav = new Map();
     this.revealData = null;
+    this.revealStep = 0;              // 回放棒次指针也归零（新一局从第 0 格放）
     this.voteResult = null;
     this.voteChainIndex = 0;          // 按链串行投票：从第一条链开始
     this.chainSettled = [];
@@ -577,28 +809,25 @@ class ChainGame {
       return false;
     }
     // 链长跟着这一局的实际人数再夹一次（有人刚离开时设置值可能越界）。
-    // 上限是「人数 + 1」—— 第 0、1 格都是链主，见 start() 里的说明。
-    this.chainLength = clampInt(this.chainLength || (players.length + 1), players.length + 1,
+    // 上限是「2 × 最大的组」—— 每人连续两格，见 authorOffset() 的映射表。
+    const maxGroup = Math.max(1, ...groupSizesFor(players.length));
+    this.chainLength = clampInt(this.chainLength || (2 * maxGroup), 2 * maxGroup,
       P.GAME.CHAIN_LENGTH_MIN,
-      Math.max(P.GAME.CHAIN_LENGTH_MIN, Math.min(players.length, P.GAME.CHAIN_LENGTH_MAX) + 1));
+      Math.max(P.GAME.CHAIN_LENGTH_MIN, 2 * Math.min(maxGroup, P.GAME.CHAIN_LENGTH_MAX)));
 
     this.spectators.clear();          // 开新局：房间里的人都算玩家
     this.roundNo += 1;
-    this.ring = shuffle(players.map(p => p.userId));
     players.forEach(p => this.names.set(p.userId, p.name));
     players.forEach(p => { if (!this.scores.has(p.userId)) this.scores.set(p.userId, 0); });
 
-    // 每人一条链。链的「主人」就是写初始词的人。
-    this.chains = players.map((p, i) => ({
-      chainId: 'c' + (i + 1),
-      ownerPlayerId: p.userId,
-      ownerName: p.name,
-      currentStep: 0,
-      steps: [],
-      status: 'active'
-    }));
+    // ★ v12：分组 —— 按人数表均分，每组一个**独立打乱**的环。
+    //   链的编号仍然是全局连续的 'c1'…'cN'（投票是全局串行的，编号连续最好读）；
+    //   组内的 chainIds 数组 = 该组环序上每个成员的链，cellOf 只在这个数组里找。
+    //   this.ring = 各组环首尾相接的扁平表（兼容老消费者 + 断言用）。
+    this.planGroups(players);
 
     this.revealData = null;
+    this.revealStep = 0;              // 回放棒次指针归零
     this.voteResult = null;
     this.voteChainIndex = 0;          // 按链串行投票：从第一条链开始
     this.chainSettled = [];
@@ -620,7 +849,203 @@ class ChainGame {
     return true;
   }
 
+  /* ------------------------------------------------------------ 分组 */
+
+  /**
+   * ★ v12：把这一局的玩家分成若干组，每组一个**独立打乱的环**，并给每人开一条链。
+   *
+   * 算法（与用户给的分组表一致，见 groupSizesFor）：
+   *   1. players 按 playerList() 的顺序（房间成员顺序）取 userId；
+   *   2. 按人数表算出每组几人：从前到后**尽量均分**、余数摊给前面的组
+   *      （16 → 4/4/4/4；13 → 4/3/3/3；10 → 5/5；7 → 4/3）；
+   *   3. **每组各自 shuffle** 出组内环（不同组之间没有任何关系）；
+   *   4. 每人一条链（链主 = 他自己），chainId 全局连续编号；组内 chainIds 按组环顺序排。
+   *
+   * 组内传遍 = 链长 2 × 该组人数：8 人 2 组时链长是 8 而不是 16（墙体时长只跟组大小走）。
+   * this.ring 仍然维护成各组环首尾相接的扁平表 —— 4~6 人 1 组时它就等于原来的全局环。
+   */
+  planGroups(players) {
+    const ids = shuffle(players.map(p => p.userId));
+    const sizes = groupSizesFor(ids.length);
+    const groups = [];
+    let cursor = 0;
+    for (let i = 0; i < sizes.length; i++) {
+      const members = ids.slice(cursor, cursor + sizes[i]);
+      cursor += sizes[i];
+      groups.push({
+        id: 'g' + (i + 1),
+        index: i,
+        members: members,
+        ring: shuffle(members),         // 组内环：只在组内传（洗一次就够）
+        chainIds: [],
+        chainLength: 2 * members.length // 这个组的实际格数（组内传遍）
+      });
+    }
+    // 每人一条链；链编号全局连续，组内 chainIds 跟着组环顺序走
+    const chains = [];
+    let n = 0;
+    for (const g of groups) {
+      for (const uid of g.ring) {
+        n += 1;
+        const cid = 'c' + n;
+        chains.push({
+          chainId: cid,
+          groupId: g.id,
+          ownerPlayerId: uid,
+          ownerName: this.names.get(uid) || '某人',
+          currentStep: 0,
+          steps: [],
+          status: 'active'
+        });
+        g.chainIds.push(cid);
+      }
+    }
+    this.groups = groups;
+    this.chains = chains;
+    this.ring = groups.reduce((acc, g) => acc.concat(g.ring), []);
+    return this.groups;
+  }
+
   /* ------------------------------------------------------------ 格与阶段推进 */
+
+  /** 第 k 格的「交给」= 下一格（k+1）的作者；k 已是最后一格时回 '' */
+  nextAuthorOf(chain, k) {
+    if (k + 1 >= this.chainLength) return '';
+    return this.authorOf(chain, k + 1);
+  }
+
+  /** 日志里显示成「名字(id)」 —— 名字可能缺（人走了榜单还留着 id） */
+  whoLabel(userId) {
+    if (!userId) return '(无)';
+    return (this.names.get(userId) || '某人') + '(' + userId + ')';
+  }
+
+  /**
+   * ★ 链条完整性自检 —— 每推进一棒都跑一次（用户明确要求「加链条不断的断言」）。
+   *
+   * ★ v12 改成**按组**断言：
+   *   ① **组内人人各有一格**：每组里，这一格还有活的人（组内偏移 < 组人数）必须每人拿到
+   *      一条链，而且组内 size 个人拿到的是 size 条**不同**的链（不能有 null、不能重复）。
+   *      有重复 = 两个人的产物会写进同一条链；有 null = 有人这一棒没活干。
+   *   ② **作者落在本组的环里**：每条第 k 格的作者（还在组内圈里时）必须是**这一组**的人。
+   *   ③ 链的主人必须在他自己那一组的环上（链不能挂到别组去）。
+   *
+   * 返回 { ok, k, problems: [] }；不抛异常 —— 调用方**打完日志照样强制推进**，
+   * 绝不停在原地（停住等于整局死在这里，比传错更糟）。
+   */
+  assertChainIntact(k) {
+    const problems = [];
+    const n = this.ring.length;
+    if (!n || !this.chains.length) return { ok: true, k, problems };
+    if (!this.groups.length) {              // 没有分组信息（老快照 / 单测造的壳）→ 只查最小不变式
+      const owners = new Set(this.chains.map(c => c.ownerPlayerId));
+      const lack = this.ring.filter(uid => !owners.has(uid));
+      if (lack.length) problems.push('环上 ' + lack.length + ' 人没有链：' + lack.join(','));
+      return { ok: problems.length === 0, k, problems };
+    }
+    const off = this.authorOffset(k);
+    for (const g of this.groups) {
+      const size = g.members.length;
+      const active = off < size;            // 这个组在这一格还有活吗
+      // ③ 链主必须在**本组**环上
+      for (const cid of g.chainIds) {
+        const c = this.chains.find(x => x.chainId === cid);
+        if (!c) { problems.push('组 ' + g.id + ' 的链 ' + cid + ' 不见了'); continue; }
+        if (g.ring.indexOf(c.ownerPlayerId) < 0) {
+          problems.push('链 ' + cid + ' 的主人不在组 ' + g.id + ' 的环里');
+        }
+      }
+      // ① 组内人人各有一格（只在「这一格这个组还有活」时要求）
+      if (active) {
+        const seen = new Set();
+        for (const uid of g.ring) {
+          const cell = this.cellOf(uid, k);
+          if (!cell) { problems.push('组 ' + g.id + ' 第 ' + (k + 1) + ' 格 ' + uid + ' 没有链（链条断裂）'); continue; }
+          if (g.chainIds.indexOf(cell.chainId) < 0) {
+            problems.push('组 ' + g.id + ' 第 ' + (k + 1) + ' 格拿到了别组的链 ' + cell.chainId);
+            continue;
+          }
+          if (seen.has(cell.chainId)) {
+            problems.push('组 ' + g.id + ' 第 ' + (k + 1) + ' 格链 ' + cell.chainId + ' 被派给了多个人');
+            continue;
+          }
+          seen.add(cell.chainId);
+        }
+        if (seen.size !== size) {
+          problems.push('组 ' + g.id + ' 第 ' + (k + 1) + ' 格只覆盖了 ' + seen.size + '/' + size + ' 条链');
+        }
+        // ② 作者必须是本组的人
+        for (const cid of g.chainIds) {
+          const c = this.chains.find(x => x.chainId === cid);
+          if (!c) continue;
+          const who = this.authorOf(c, k);
+          if (!who || g.ring.indexOf(who) < 0) {
+            problems.push('链 ' + cid + '（组 ' + g.id + '）第 ' + (k + 1) + ' 格的作者不在本组环里（' + (who || '空') + '）');
+          }
+        }
+      }
+    }
+    return { ok: problems.length === 0, k, problems };
+  }
+
+  /** 自检没过的兜底修复：按**各组环**重排链条表（chainId 与组内 chainIds 一起重新编号），
+   *  让它重新满足「一人一链、链主人人不同、链只挂在自己组里」。
+   *
+   *  ⚠ 必须重编号：旧的 chainId 是按**上一次的顺序**发的，
+   *    只按主人复用旧对象的话，「组内 chainIds[i] ↔ 组环[i]」这条约定就断了，
+   *    cellOf 会把两条链算成同一条（本文件的自检就是抓这个的）。
+   *  正常路径下**永远走不到**这里 —— 它的存在只是保证「就算断了也不会把整局卡死」。 */
+  repairChains() {
+    if (!this.groups.length) {              // 没分组信息：退回 v11 的全局环重建
+      const byOwner = new Map(this.chains.map(c => [c.ownerPlayerId, c]));
+      this.chains = this.ring.map((uid, i) => {
+        const old = byOwner.get(uid);
+        if (old) { old.chainId = 'c' + (i + 1); return old; }
+        return {
+          chainId: 'c' + (i + 1), ownerPlayerId: uid, ownerName: this.names.get(uid) || '某人',
+          currentStep: 0, steps: [], status: 'active'
+        };
+      });
+      return;
+    }
+    const byOwner = new Map(this.chains.map(c => [c.ownerPlayerId, c]));
+    const out = [];
+    let n = 0;
+    for (const g of this.groups) {
+      g.chainIds = [];
+      for (const uid of g.ring) {
+        n += 1;
+        const cid = 'c' + n;
+        const old = byOwner.get(uid);
+        const c = old || {
+          ownerPlayerId: uid, ownerName: this.names.get(uid) || '某人',
+          currentStep: 0, steps: [], status: 'active'
+        };
+        c.chainId = cid;
+        c.groupId = g.id;
+        out.push(c);
+        g.chainIds.push(cid);
+      }
+    }
+    this.chains = out;
+    this.ring = this.groups.reduce((acc, g) => acc.concat(g.ring), []);
+  }
+
+  /**
+   * ★ 自检 + 兜底 + 播报。返回 true 表示**链条断了但已经强制推进**。
+   *
+   * 用户要求：「任何一条不满足：打日志 + 强制推进，绝不停在原地，
+   * 并在系统聊天里播一条『检测到传递异常，已强制推进』」。
+   */
+  checkChainOrForce(k) {
+    const r = this.assertChainIntact(k);
+    if (r.ok) return false;
+    console.error('[chain] 链条断裂 · 第 ' + (k + 1) + '/' + this.chainLength + ' 格 · '
+      + r.problems.join(' | '));
+    this.repairChains();
+    this.api.systemChat('检测到传递异常，已强制推进（第 ' + (k + 1) + ' 格）');
+    return true;
+  }
 
   /** 进入「第 k 格」：全场的格型一致（0=写词，奇数=作画，偶数=猜词） */
   enterStep(k) {
@@ -628,6 +1053,10 @@ class ChainGame {
     this.submitted = new Set();
     this.pendingText = new Map();
     this.stepChoices = new Map();
+
+    // ★ 进格之前先自检：断了就打日志 + 修复 + 播报，然后**照样往下走**。
+    this.checkChainOrForce(k);
+
     const type = this.stepTypeOf(k);
     this.phase = type === STEP.WORD ? CHAIN_PHASE.WRITE
       : type === STEP.DRAWING ? CHAIN_PHASE.DRAW : CHAIN_PHASE.GUESS;
@@ -650,17 +1079,53 @@ class ChainGame {
     this.deadline = Date.now() + this.stepMs();
     this.taskVersion += 1;
     this.api.sync();
+    this.logStep();
     this.announceStep();
+  }
+
+  /**
+   * ★ 每一棒的日志（用户要的）——只在 enterStep() 里打一次，绝不在 tick 里刷屏。
+   *
+   * 1 组（4~6 人）时的形状与 v11 一字不差（回归靠它）：
+   *   [chain] 第 3/8 格 · 阶段=DRAWING · 作者=乙(u2) · 交给=丙(u3) · 链数=4
+   * ★ v12 多组时在末尾追加**每一组各自**的这一棒（用户点名要的形状）：
+   *   [chain] 第 3/8 格 · 阶段=DRAWING · 作者=乙(u2) · 交给=丙(u3) · 链数=8 · 组1: 作者=乙(u2)→交给=丙(u3) · 组2: 作者=己(u6)→交给=庚(u7)
+   *   组里已经走完一圈的成员在这一格没活：那一组显示「(本组已完成)」。
+   */
+  logStep() {
+    const k = this.stepIndex;
+    const c0 = this.chains[0];
+    const who = c0 ? this.authorOf(c0, k) : '';
+    const nxt = c0 ? this.nextAuthorOf(c0, k) : '';
+    let line = '[chain] 第 ' + (k + 1) + '/' + this.chainLength + ' 格 · 阶段='
+      + this.stepTypeOf(k) + ' · 作者=' + this.whoLabel(who)
+      + ' · 交给=' + (nxt ? this.whoLabel(nxt) : '(回放)')
+      + ' · 链数=' + this.chains.length;
+    if (this.groups.length > 1) {
+      for (const g of this.groups) {
+        // 每组取这一组的链里「现在轮到的」那一条（组环第一位的链主就是这一格的作者，
+        // 与 authorOf 的偏移一一对应；组内走完一圈后 authorOf 回 ''）
+        const first = this.chains.find(c => c.groupId === g.id);
+        const gw = first ? this.authorOf(first, k) : '';
+        if (!gw) { line += ' · 组' + (g.index + 1) + ': (本组已完成)'; continue; }
+        const gn = this.nextAuthorOf(first, k);
+        line += ' · 组' + (g.index + 1) + ': 作者=' + this.whoLabel(gw)
+          + '→交给=' + (gn ? this.whoLabel(gn) : '(回放)');
+      }
+    }
+    console.log(line);
   }
 
   announceStep() {
     const label = CHAIN_PHASE_LABEL[this.phase] || '';
     const secs = Math.round(this.stepMs() / 1000);
-    const n = this.chains.length;
+    // v12：同一步里同时进行的是「每个组各一条链」—— 并行人数 = 最大的组多大
+    const n = this.maxGroupSize() || this.chains.length;
     const type = this.stepTypeOf(this.stepIndex);
     const what = type === STEP.WORD ? '写初始词' : type === STEP.DRAWING ? '照词作画' : '看画猜词';
+    const gs = this.groups.length > 1 ? ('（' + this.groups.length + ' 组并行）') : '';
     this.api.systemChat('第 ' + (this.stepIndex + 1) + ' / ' + this.chainLength
-      + ' 手 · ' + what + '（' + n + ' 人并行，' + secs + ' 秒）—— ' + label);
+      + ' 手 · ' + what + '（' + n + ' 人并行' + gs + '，' + secs + ' 秒）—— ' + label);
   }
 
   /** 交格子。WORD/GUESS 带文本；DRAWING 只是「画好了」的信号（笔迹收格时从笔迹表抓） */
@@ -683,8 +1148,10 @@ class ChainGame {
     }
     this.submitted.add(userId);
     this.api.sync();
-    // 全场交齐 → 立刻收格（不等 deadline）
-    if (this.submitted.size >= this.ring.length) this.finalizeStep();
+    // 全场交齐 → 立刻收格（不等 deadline）。
+    // ★ v12：只等**这一格有活的人**（组内已经走完一圈的成员在这一格没活，
+    //   他们不提交也不该把收格卡住）。
+    if (this.submitted.size >= this.activeUsers(this.stepIndex).size) this.finalizeStep();
     return { ok: true };
   }
 
@@ -702,9 +1169,18 @@ class ChainGame {
     const now = Date.now();
 
     for (const chain of this.chains) {
-      const n = this.ring.length;
-      const ownerIdx = this.ring.indexOf(chain.ownerPlayerId);
-      const who = ownerIdx >= 0 ? this.ring[(ownerIdx + this.authorOffset(k)) % n] : '';
+      const who = this.authorOf(chain, k);
+      // ★ v12：人少的组在统一链长的尾巴上没有活（authorOf 回 '')——那一格落一个
+      //   skipped 的空壳，保持「每条链 steps.length 都等于 chainLength」这条不变式，
+      //   回放 / 投票 / 结算就不必为「这条链只有 6 格」再分支。
+      if (!who) {
+        chain.steps[k] = {
+          playerId: '', type: type, content: (type === STEP.DRAWING) ? [] : '',
+          auto: false, timestamp: now, skipped: true
+        };
+        chain.currentStep = k + 1;
+        continue;
+      }
       const did = this.submitted.has(who);
       let content;
       let auto = false;
@@ -741,8 +1217,12 @@ class ChainGame {
       chain.currentStep = k + 1;
     }
 
+    // 超时播报：只报「这一格真的有活、但没交」的人（组内已经走完一圈的人不算超时，
+    // 否则 13 人 4/3/3/3 这种局面会在最后两格刷一屏假的「超时」）。
+    const activeNow = this.activeUsers(k);
     const skipped = [];
     for (const uid of this.ring) {
+      if (!activeNow.has(uid)) continue;
       if (!this.submitted.has(uid)) skipped.push(this.names.get(uid) || '某人');
     }
     if (skipped.length && type !== STEP.WORD) {
@@ -770,6 +1250,13 @@ class ChainGame {
 
     // 作画结束：把画布清干净（笔迹已经收进链条，不再留在共享画布上）
     if (this.phase === CHAIN_PHASE.DRAW) this.api.resetCanvas();
+
+    // ★★ 每一棒收完 → 推进到下一格之前，断言「下一棒有人接」。
+    //    判据 = 下一格里环上每个人都能拿到一条链（n 人 → n 个不重复的 cell），
+    //    且下一格的作者都落在环里。断了就打日志 + 修复 + 播报，然后**照样推进**
+    //    —— 用户明确要求绝不停在原地。（enterStep 里还会再自检一次，
+    //    所以就算这里放过去了，下一格开局也会兜住。）
+    if (k + 1 < this.chainLength) this.checkChainOrForce(k + 1);
 
     if (k + 1 >= this.chainLength) return this.enterReveal();
     this.enterStep(k + 1);
@@ -852,8 +1339,14 @@ class ChainGame {
     return this.chains[this.voteChainIndex] || null;
   }
 
-  /** 全部格子收完 → 组装回放数据并广播（内容从此公开）。
-   *  每条链重入一次：第一次建数据，后面几次只是把镜头挪到下一条。 */
+  /**
+   * 全部格子收完 → 组装回放数据并广播（内容从此公开）。
+   * 每条链重入一次：第一次建数据，后面几次只是把镜头挪到下一条。
+   *
+   * ★ v11：回放棒次由**服务端**持有（this.revealStep）。进这里时把指针拨回第 0 格，
+   *   deadline = 当前这一格的 deadline；之后 tick() 每过 revealLegMs() 推进一格。
+   *   前端只拿 snapshotFor() 里的 revealStep / revealLegs / legHoldMs 排动画。
+   */
   enterReveal() {
     this.stepIndex = this.chainLength;
     if (!(this.voteChainIndex >= 0)) { this.voteChainIndex = 0; this.chainSettled = []; }
@@ -863,16 +1356,20 @@ class ChainGame {
     }
     if (!this.revealData) {
       this.revealData = this.chains.map(c => this.chainRevealRow(c));
-      this.votesFav = new Map();          // 最喜欢的一张画：整局只投一次，跨链累积
+      // ★ v12：最喜欢的一张画 = **每条链各投一次**（votesFav 是两层 Map），
+      //   整局累积、跨链统计。以前那一票会被下一条链覆盖，是这次修掉的 bug。
+      this.votesFav = new Map();
     }
     this.revealVersion += 1;
+    this.revealStep = 0;                  // ★ 从第一格开始放
     this.phase = CHAIN_PHASE.REVEAL;
-    this.deadline = Date.now() + this.stepMs();
+    this.deadline = Date.now() + this.revealLegMs();
     this.api.sync();
     this.api.revealAll(this.revealData, this.revealVersion);
     const n = this.chains.length;
     this.api.systemChat('第 ' + (this.voteChainIndex + 1) + ' / ' + n + ' 条链回放 —— '
-      + '看完就轮到大家投票');
+      + '共 ' + this.chainLength + ' 格，每格 ' + Math.round(this.revealLegMs() / 100) / 10 + ' 秒'
+      + '（棒次由服务端同步，看完就轮到大家投票）');
   }
 
   /** 投「这条链首尾还对得上吗」——只收**当前那条链**的票 */
@@ -890,7 +1387,14 @@ class ChainGame {
     return { ok: true };
   }
 
-  /** 投「最喜欢的一张画」（一人一票，可改）——同样只限当前这条链 */
+  /**
+   * 投「最喜欢的一张画」—— **每条链各投一次**（同一人可改自己在这一条链上的那一票）。
+   *
+   * ⚠ v12 修的 bug：以前 votesFav 是 userId -> { chainId, step }，一人只有一票，
+   *   串行投票走到下一条链时上一条链的 ♥ 就被覆盖掉了 —— 「点赞最多的画」于是
+   *   只统计得到最后一条链。现在按链存（userId -> Map(chainId -> step)），跨链累积。
+   * 仍然只限**当前正在看的那条链**（串行的前提：全场看的是同一条）。
+   */
   favVote(userId, chainId, stepIdx) {
     if (this.phase !== CHAIN_PHASE.VOTE && this.phase !== CHAIN_PHASE.REVEAL) {
       return { ok: false, message: '现在不是看画的时候' };
@@ -902,23 +1406,64 @@ class ChainGame {
     const st = cur.steps[k];
     if (!st || st.type !== STEP.DRAWING) return { ok: false, message: '那一格不是一幅画' };
     if (!Array.isArray(st.content) || !st.content.length) return { ok: false, message: '那是一张空画' };
-    this.votesFav.set(userId, { chainId: cur.chainId, step: k });
+    let m = this.votesFav.get(userId);
+    if (!m) { m = new Map(); this.votesFav.set(userId, m); }
+    m.set(cur.chainId, k);                    // ★ 只写当前这条链那一格，别的链的票留着
     this.api.sync();
     return { ok: true };
   }
 
+  /** 我在某条链（chainId 为空 = 当前这条）上投的 ♥ = { chainId, step } / null */
+  myFav(userId, chainId) {
+    const m = this.votesFav.get(userId);
+    if (!m) return null;
+    let cid = chainId || '';
+    if (!cid) { const cur = this.currentVoteChain(); cid = cur ? cur.chainId : ''; }
+    if (!cid || !m.has(cid)) return null;
+    return { chainId: cid, step: m.get(cid) };
+  }
+
+  /** 我投过 ♥ 的**所有**链：{ chainId: step }（快照给前端画小 ♥ 用） */
+  myFavMap(userId) {
+    const out = {};
+    const m = this.votesFav.get(userId);
+    if (m) for (const [cid, step] of m) out[cid] = step;
+    return out;
+  }
+
+  /** 我投过 ♥ 的条数（进度显示用；不是全场票数之和） */
+  myFavCount(userId) {
+    const m = this.votesFav.get(userId);
+    return m ? m.size : 0;
+  }
+
+  /**
+   * 这一条链的**合法投票人**（v12 按组收紧）。
+   *
+   * 分组之后「这条链首尾对不对得上」只跟**它那一组**的成员有关：别的组既没参与
+   * 这条链的传递，也没看过中间过程 —— 让他们投是噪声（而且各组按链轮流看，
+   * 轮到 A 组的链时 B 组本来也没在屏幕上看）。所以票只统计同组的人。
+   * 找不到分组信息（老的壳 / 单测造的假链）就退回「全场」——4~6 人 1 组时两者等价。
+   */
+  votersFor(chainId) {
+    const c = this.chains.find(x => x.chainId === chainId);
+    const g = c ? this.groupOfChain(c) : null;
+    if (g && g.members.length) return new Set(g.members);
+    return new Set(this.ring);
+  }
+
   /** 当前这条链的实时票数（前端显示「已投 x / y」用） */
   chainVoteTally(chainId) {
-    const ringSet = new Set(this.ring);
+    const voters = this.votersFor(chainId);
     let agree = 0, against = 0, voted = 0;
     for (const [uid, m] of this.votesKeep) {
-      if (!ringSet.has(uid)) continue;
+      if (!voters.has(uid)) continue;
       const v = m.get(chainId);
       if (v === undefined) continue;
       voted += 1;
       if (v) agree += 1; else against += 1;
     }
-    return { agree, against, voted, total: this.ring.length };
+    return { agree, against, voted, total: voters.size };
   }
 
   /** 当前这条链投完 → 结算它，然后把镜头交给下一条链（或最终结算） */
@@ -948,7 +1493,7 @@ class ChainGame {
     this.phase = CHAIN_PHASE.SCORE;
     this.deadline = Date.now() + (more ? CFG.CHAIN_SCORE_MS : CFG.SCORE_MS);
     this.voteResult = more
-      ? { partial: true, chains: this.chainSettled.slice(), fav: [], favTie: false }
+      ? { partial: true, chains: this.chainSettled.slice(), fav: [], favTie: false, favRanking: [] }
       : this.finalVoteResult();
     this.api.sync();
     return { ok: true };
@@ -965,35 +1510,60 @@ class ChainGame {
   }
 
   /** 最终结算：各链结果 + 「最喜欢的一张画」（跨链计票，独赢 3 / 平票各 1） */
+  /**
+   * 最终结算：各链结果 + 「点赞最多的画」（跨链统计，独赢 3 / 平票各 1）。
+   *
+   * ★ v12 的两件事：
+   *   ① votesFav 现在是「一人 × 每条链一票」，所以要**两层遍历**把跨链的票全部数进来
+   *      （以前只数得到最后一条链 —— 就是这次修掉的 bug）。跨组的票不计（见 votersFor）。
+   *   ② `fav` 里除了名次还给**那一格的笔迹**（strokes）与链主名（ownerName），
+   *      前端直接把 strokes 铺在主画布上渲染大图，不用再回查回放数据。
+   *      平票时 `fav` 返回多条并置 `favTie: true`，另外给一个按票数降序的 `favRanking`
+   *      （每一项都带 strokes，前端想画「第 2、第 3 名」也不用二次请求）。
+   */
   finalVoteResult() {
-    const ringSet = new Set(this.ring);
-    const tally = new Map(); // 'chainId:step' -> count
-    for (const [uid, fav] of this.votesFav) {
-      if (!ringSet.has(uid) || !fav) continue;
-      const key = fav.chainId + ':' + fav.step;
-      tally.set(key, (tally.get(key) || 0) + 1);
-    }
-    let top = 0;
-    for (const n of tally.values()) if (n > top) top = n;
-    const winners = [];
-    if (top > 0) {
-      for (const [key, n] of tally) {
-        if (n !== top) continue;
-        const ci = key.indexOf(':');
-        const chainId = key.slice(0, ci), k = Number(key.slice(ci + 1));
-        const chain = this.chains.find(c => c.chainId === chainId);
-        const st = chain && chain.steps[k];
-        if (!st || st.type !== STEP.DRAWING) continue;
-        winners.push({
-          chainId, step: k, playerId: st.playerId,
-          playerName: this.names.get(st.playerId) || '某人', votes: n
-        });
+    const tally = new Map(); // 'chainId:step' -> votes
+    for (const [uid, favMap] of this.votesFav) {
+      if (!favMap || !favMap.size) continue;
+      for (const [chainId, step] of favMap) {
+        const voters = this.votersFor(chainId);
+        if (!voters.has(uid)) continue;                 // 跨组的票不算
+        const c = this.chains.find(x => x.chainId === chainId);
+        const st = c && c.steps[step];
+        if (!st || st.type !== STEP.DRAWING) continue;  // 那一格不是画（或早被清掉）
+        if (!Array.isArray(st.content) || !st.content.length) continue;
+        const key = chainId + ':' + step;
+        tally.set(key, (tally.get(key) || 0) + 1);
       }
-      winners.forEach(w => {
-        this.scores.set(w.playerId, (this.scores.get(w.playerId) || 0)
-          + (winners.length === 1 ? P.GAME.CHAIN_FAV_POINTS : P.GAME.CHAIN_FAV_TIE_POINTS));
+    }
+    // 名次表：票数降序（同票按链序、再按格序，保证各端看到的名次一样）
+    const chainIndex = new Map(this.chains.map((c, i) => [c.chainId, i]));
+    const ranked = [];
+    for (const [key, votes] of tally) {
+      const ci = key.indexOf(':');
+      const chainId = key.slice(0, ci), k = Number(key.slice(ci + 1));
+      const c = this.chains.find(x => x.chainId === chainId);
+      const st = c && c.steps[k];
+      if (!c || !st) continue;
+      ranked.push({
+        chainId,
+        chainIndex: chainIndex.has(chainId) ? chainIndex.get(chainId) : -1,
+        step: k,
+        playerId: st.playerId,
+        playerName: this.names.get(st.playerId) || '某人',
+        votes,
+        strokes: st.content,                            // ★ 那一格的笔迹，前端直接铺主画布
+        ownerName: this.names.get(c.ownerPlayerId) || c.ownerName
       });
     }
+    ranked.sort((a, b) => b.votes - a.votes || a.chainIndex - b.chainIndex || a.step - b.step);
+
+    const top = ranked.length ? ranked[0].votes : 0;
+    const winners = top > 0 ? ranked.filter(r => r.votes === top) : [];
+    winners.forEach(w => {
+      this.scores.set(w.playerId, (this.scores.get(w.playerId) || 0)
+        + (winners.length === 1 ? P.GAME.CHAIN_FAV_POINTS : P.GAME.CHAIN_FAV_TIE_POINTS));
+    });
     const rows = this.chainSettled && this.chainSettled.length
       ? this.chainSettled.slice()
       : (this.revealData || []).slice();
@@ -1006,12 +1576,21 @@ class ChainGame {
     this.api.systemChat(kept.length
       ? '这一局有 ' + kept.length + ' 条链首尾对上了：' + kept.map(w => w.ownerName).join('、')
       : '这一局全军覆没 —— 没有一条链安全到达终点');
-    return { partial: false, chains: rows, fav: winners, favTie: winners.length > 1 };
+    return {
+      partial: false,
+      chains: rows,
+      fav: winners,
+      favTie: winners.length > 1,
+      favRanking: ranked
+    };
   }
 
   /** 当前这条链看完了 → 进投票。每条链都走一遍这里（服务端说了算，全场看同一条）。 */
   enterVote() {
     this.phase = CHAIN_PHASE.VOTE;
+    // ★ 投票时棒次钉在**最后一格**：大家要看着最终画面决定「对得上吗」，
+    //   不能让各端自己停在半路上。
+    this.revealStep = Math.max(0, this.chainLength - 1);
     this.deadline = Date.now() + this.stepMs();
     this.api.sync();
     const n = this.chains.length;
@@ -1027,10 +1606,12 @@ class ChainGame {
     this.stepIndex = 0;
     this.chains = [];
     this.ring = [];
+    this.groups = [];
     this.submitted = new Set();
     this.pendingText = new Map();
     this.stepChoices = new Map();
     this.revealData = null;
+    this.revealStep = 0;
     this.votesKeep = new Map();
     this.votesFav = new Map();
     this.voteResult = null;
@@ -1066,7 +1647,18 @@ class ChainGame {
       this.enterStep(0);
       return { ok: true };
     }
-    if (this.phase === CHAIN_PHASE.REVEAL) { this.enterVote(); return { ok: true }; }
+    if (this.phase === CHAIN_PHASE.REVEAL) {
+      // ★ 房主「立刻推进」在回放里 = 推进**一格**；已经在最后一格才进投票。
+      //   以前这里是一步跳到投票 —— 那样房主一点就再也看不到后面几格了。
+      if (this.revealStep + 1 < this.chainLength) {
+        this.revealStep += 1;
+        this.deadline = Date.now() + this.revealLegMs();
+        this.api.sync();
+      } else {
+        this.enterVote();
+      }
+      return { ok: true };
+    }
     if (this.phase === CHAIN_PHASE.VOTE) { return this.settleChain(); }
     if (this.phase === CHAIN_PHASE.SCORE) {
       // 还有链没放 → 回放下一条；全放完了 → 回大厅
@@ -1088,7 +1680,16 @@ class ChainGame {
       return this.finalizeStep();
     }
     if (this.phase === CHAIN_PHASE.INIT) return this.enterStep(0);
-    if (this.phase === CHAIN_PHASE.REVEAL) return this.enterVote();
+    // ★ 回放：deadline = **当前这一格**的 deadline。每过 revealLegMs() 推进一格；
+    //   到最后一格、并且它那一格的定格时间也过去了 → 进投票。
+    //   （这条 if 会随着 deadline 被不断往后推而反复进来，不再是「整段一个 deadline」。）
+    if (this.phase === CHAIN_PHASE.REVEAL) {
+      if (this.revealStep + 1 >= this.chainLength) return this.enterVote();
+      this.revealStep += 1;
+      this.deadline = nowMs + this.revealLegMs();
+      this.api.sync();
+      return;
+    }
     if (this.phase === CHAIN_PHASE.VOTE) return this.settleChain();
     // SCORE 有两种：一条链的小结算（后面还有链 → 回放下一條）、以及最终结算（→ 回大厅）
     if (this.phase === CHAIN_PHASE.SCORE) {
@@ -1101,12 +1702,14 @@ class ChainGame {
     this.phase = CHAIN_PHASE.OFF;
     this.deadline = 0;
     this.ring = [];
+    this.groups = [];
     this.chains = [];
     this.stepIndex = 0;
     this.submitted = new Set();
     this.pendingText = new Map();
     this.stepChoices = new Map();
     this.revealData = null;
+    this.revealStep = 0;
     this.votesKeep = new Map();
     this.votesFav = new Map();
     this.voteResult = null;
@@ -1151,7 +1754,8 @@ class ChainGame {
       if (!this.submitted.has(member.userId)) {
         this.submitted.add(member.userId);
         this.api.systemChat(this.names.get(member.userId) || member.name + ' 离开了，TA 这一格按空处理');
-        if (this.ring.length && this.submitted.size >= this.ring.length) {
+        // v12：只等「这一格有活的人」（组内已走完一圈的成员不占位）
+        if (this.ring.length && this.submitted.size >= this.activeUsers(this.stepIndex).size) {
           this.finalizeStep();
           return;
         }
@@ -1262,6 +1866,8 @@ module.exports = {
   CHAIN_PHASE_LABEL,
   STEP,
   CFG,
+  groupCountFor, // v12 分组表：人数 → 组数（测试直接钉它）
+  groupSizesFor, // v12 分组表：人数 → 各组人数（尽量均分）
   answerMatch,   // 导出供自检脚本直接验证「首尾算不算对得上」
   simplify,      // 上面这条依赖的归一化（测试要看中间值）
   norm

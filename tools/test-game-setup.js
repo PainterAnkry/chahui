@@ -145,9 +145,13 @@ console.log('\n[1] 每局覆盖：三个玩法的 start(opts) 真的收下了');
   eq('chain stepMs(GUESS) = 8s', c.stepMs(), 8000);
   c.enterReveal();
   eq('chain 回放 phase', c.phase, CHAIN_PHASE.REVEAL);
-  deadlineNear('chain 回放 deadline = 9s', c.deadline, 9000);
+  // ★ v11：回放的 deadline 是**当前这一格**的，不是整段 —— 每格 = 总时长 / 链长
+  deadlineNear('chain 回放 deadline = 每格（9s / 4 格 = 2.25s）', c.deadline, 2250);
+  eq('chain 回放总时长仍可查（stepMs 报的是整段）', c.stepMs(), 9000);
+  eq('chain revealLegMs = 9000 / 4 = 2250', c.revealLegMs(), 2250);
   c.enterVote();
   eq('chain 投票 phase', c.phase, CHAIN_PHASE.VOTE);
+  eq('★ 投票时棒次钉在最后一格', c.revealStep, Math.max(0, c.chainLength - 1));
   deadlineNear('chain 投票 deadline = 10s', c.deadline, 10000);
 
   // ---- 画皮 ----
@@ -277,9 +281,10 @@ console.log('\n[3] 夹取边界（太小 / 太大 / 非法 / 负数）');
   const rr = mk(); rr.start({ rounds: 999 }); eq('classic rounds=999 → MAX_ROUNDS', rr.rounds, G.MAX_ROUNDS);
   const rr2 = mk(); rr2.start({ rounds: 0 }); eq('classic rounds=0 → 沿用原夹取（1）', rr2.rounds, 1);
   const sk = ss({ rounds: 999 }); eq('skin rounds=999 → SKIN_MAX_ROUNDS', sk.maxRounds, G.SKIN_MAX_ROUNDS);
-  const cl = cs({ chainLength: 999 }); eq('chain chainLength=999 → CHAIN_LENGTH_MAX+1 以内', cl.chainLength, Math.min(4, G.CHAIN_LENGTH_MAX) + 1);
+  // ★ v11：链长默认 = 2 × 人数，上限 = 2 × min(人数, CHAIN_LENGTH_MAX)
+  const cl = cs({ chainLength: 999 }); eq('chain chainLength=999 → 2 × min(人数, MAX) = 8', cl.chainLength, 2 * Math.min(4, G.CHAIN_LENGTH_MAX));
   const cl2 = cs({ chainLength: 1 }); eq('chain chainLength=1 → CHAIN_LENGTH_MIN', cl2.chainLength, G.CHAIN_LENGTH_MIN);
-  const cl3 = cs({ chainLength: 0 }); eq('chain chainLength=0 → 默认（人数+1）', cl3.chainLength, 5);
+  const cl3 = cs({ chainLength: 0 }); eq('chain chainLength=0 → 默认（2 × 人数 = 8）', cl3.chainLength, 8);
 
   // 秒数字段的公共工具
   eq('secOrZero(0) = 0', PREFS.secOrZero(0), 0);
@@ -584,6 +589,11 @@ console.log('\n[8] /api/share 的新增内容 + setup 档位');
   eq('classic 上限取自 P.GAME.MAX_PLAYERS', setup.players.classic[1], G.MAX_PLAYERS);
   eq('chain 上限取自 P.GAME.CHAIN_MAX_PLAYERS', setup.players.chain[1], G.CHAIN_MAX_PLAYERS);
   eq('skin 上限取自 P.GAME.SKIN_MAX_PLAYERS', setup.players.skin[1], G.SKIN_MAX_PLAYERS);
+  // ★ v11：链长档位也一并下发（默认 / 上限都是 perPlayer × 人数）
+  eq('setup.chainLength.min = CHAIN_LENGTH_MIN', setup.chainLength.min, G.CHAIN_LENGTH_MIN);
+  eq('setup.chainLength.max = CHAIN_LENGTH_MAX', setup.chainLength.max, G.CHAIN_LENGTH_MAX);
+  eq('setup.chainLength.perPlayer = 2（链长 = 2 × 人数）', setup.chainLength.perPlayer, 2);
+  ok('★ 4 人房默认链长 = 2 × 4 = 8', setup.chainLength.perPlayer * 4 === 8);
   ok('秒数档位都在 [3, 600] 或 0 之内（除 0 外没有一个越界）',
     setup.seconds.every(v => v === 0 || (v >= G.SETUP_SECONDS_MIN && v <= G.SETUP_SECONDS_MAX)));
 

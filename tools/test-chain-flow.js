@@ -7,11 +7,15 @@
  * 守的是用户明确提的那几条 UI 要求：
  *   [1] 「照这个词作画」的卡片显示**自己**刚写的词；文案说明是「你自己要照它作画」
  *   [2] 待猜的画在**主画布区域**；输入条在画布下方；两者**同时可见**；没有「2 字以上」的限制文案
- *   [4] 回放也在主画布上，不弹遮罩；**不能跨链翻**（服务端指定当前链）
+ *   [4] 回放也在主画布上，不弹遮罩；**不能跨链翻**（服务端指定当前链）；
+ *       回放是「上窄带 / 中间只放画 / 下窄带」三段，逐笔动画，词**不是**画布上的大字
  *   [5] 「结束游戏」本地立即回主菜单（不等服务端）
  *   [6] 房主自己也要写词（房主也有候选词）
  *   [7] 画布下方给出 起词 → 最终猜词、「这两个匹配吗？」、√ / ×、「已投 x / y」
- *   [8] 一条链的小结算只在横条里报结果、**不弹奖杯**；最终结算才弹
+ *   [8] 一条链的小结算只在窄带里报结果、**不弹奖杯**；最终结算**先亮「点赞最多的画」**、
+ *       点「看奖杯榜 →」（或几秒后自动）才弹奖杯榜
+ *   [9] 回放期间没有任何面板压住画布可视区
+ *   [10] v12：♥ 是「每条链各一票」—— 横条上那句「你已给 N 条链投过 ♥」是文字证据
  *
  * v10 起三个玩法合并成一个开局面板（#gameMask），开局路径变成：
  *   #btnGame → #gmChain →（参数就在这一层）#btnGameStart → 全员 #btnChainReady → …
@@ -212,19 +216,28 @@ const waitAllPhase = async (pages, want, ms) => {
     const canvasEl = await p.evaluate(() => {
       const img = document.querySelector('#chainCanvasImg');
       const layer = document.querySelector('#chainCanvasLayer');
+      const ct = document.querySelector('#chainCanvasText');
       return {
         layerVisible: !!layer && !layer.classList.contains('hidden'),
-        srcLen: (img && img.src || '').length
+        srcLen: (img && img.src || '').length,
+        // 词必须是**窄带里的一行**，不是画布上的大字
+        topText: (document.querySelector('#cclTopText') || {}).textContent || '',
+        canvasText: ct ? (ct.textContent || '') : '',
+        canvasTextShown: !!(ct && !ct.classList.contains('hidden'))
       };
     });
-    const nb = await p.locator('#chainCanvasLayer').boundingBox().catch(() => null);
+    // ⚠ 量的是**画面的可视矩形**（#chainCanvasImg），不是整块画布层：
+    //   层里还套着上/下两条窄带，拿层去比面板会永远「重叠」。
+    const nb = await p.locator('#chainCanvasImg').boundingBox().catch(() => null);
     const ib = await p.locator('#chainInputMask').boundingBox().catch(() => null);
     const inVp = b => !!b && b.y >= 0 && b.y + b.height <= vp.height + 1 && b.height > 0;
     const overlap = (a, b) => !!a && !!b && !(a.y + a.height <= b.y || b.y + b.height <= a.y);
     return {
       layer: canvasEl.layerVisible, srcLen: canvasEl.srcLen,
+      topText: canvasEl.topText, canvasText: canvasEl.canvasText, canvasTextShown: canvasEl.canvasTextShown,
       canvasInVp: inVp(nb), inputVisible: !!ib && ib.height > 0, inputInVp: inVp(ib),
       overlap: overlap(nb, ib),
+      // 猜词期画面上不许有任何大字
       canvasBox: nb && { y: Math.round(nb.y), h: Math.round(nb.height) },
       inputBox: ib && { y: Math.round(ib.y), h: Math.round(ib.height) }
     };
@@ -232,6 +245,11 @@ const waitAllPhase = async (pages, want, ms) => {
   console.log('  ' + JSON.stringify(guessUi[0]));
   ok('★ 待猜的画显示在主画布层里（画布层可见且有真实图像）',
     guessUi.every(u => u.layer && u.srcLen > 500), guessUi.map(u => u.srcLen));
+  ok('★ 猜词期画面上**没有**大字（词只出现在窄带里）',
+    guessUi.every(u => u.canvasText === '' && !u.canvasTextShown),
+    guessUi.map(u => u.canvasText).filter(Boolean));
+  ok('★ 画面顶上的窄带写着「看画猜词…」', guessUi.every(u => /看画猜词|上一格/.test(u.topText)),
+    guessUi.map(u => u.topText).slice(0, 1));
   ok('★ 输入条可见', guessUi.every(u => u.inputVisible), guessUi.map(u => u.inputVisible));
   ok('★ 画和输入条同时在视口内', guessUi.every(u => u.canvasInVp && u.inputInVp),
     guessUi.map(u => ({ c: u.canvasInVp, i: u.inputInVp })));
@@ -260,6 +278,8 @@ const waitAllPhase = async (pages, want, ms) => {
   let sawReveal = false, sawVote = false;
   const revChecks = {}, voteChecks = {}, partialRows = [], trophies = [];
   let revealBarBox = null, voteBarText = '', voteSnap = null;
+  // v12 最终结算的新顺序：先亮「点赞最多的画」→ 点「看奖杯榜 →」才弹榜
+  let finalFavUi = null, trophyAfterClick = null, favStateText = '';
   let guard = 0;
   while (guard++ < 40) {
     const ph = await phase(host);
@@ -301,6 +321,53 @@ const waitAllPhase = async (pages, want, ms) => {
           const r = b.getBoundingClientRect();
           return { y: Math.round(r.y), h: Math.round(r.height), vh: window.innerHeight };
         });
+        // 上-中-下三块：上窄带「<作者> 画了：<词>」/ 中间只放画 / 下窄带「<下一格的人> 猜的是：<词>」
+        revChecks.bands = await host.evaluate(() => {
+          const t = (document.querySelector('#cclTopText') || {}).textContent || '';
+          const b = (document.querySelector('#cclBottomText') || {}).textContent || '';
+          const img = document.querySelector('#chainCanvasImg');
+          const ct = document.querySelector('#chainCanvasText');
+          const tr = document.querySelector('#cclTop'), br = document.querySelector('#cclBottom');
+          const ib = img && !img.classList.contains('hidden') ? img.getBoundingClientRect() : null;
+          const box = r => r && { y: Math.round(r.y), h: Math.round(r.height), x: Math.round(r.x), w: Math.round(r.width) };
+          return {
+            top: t.replace(/\s+/g, ' ').trim(), bottom: b.replace(/\s+/g, ' ').trim(),
+            topH: tr ? Math.round(tr.getBoundingClientRect().height) : 0,
+            botH: br ? Math.round(br.getBoundingClientRect().height) : 0,
+            canvasText: ct ? (ct.textContent || '') : '',
+            img: box(ib), topBox: tr ? box(tr.getBoundingClientRect()) : null,
+            botBox: br ? box(br.getBoundingClientRect()) : null
+          };
+        });
+        // 逐笔动画：这一格动画期间采样两次画布内容，必须不一样
+        revChecks.anim = await host.evaluate(() => new Promise(res => {
+          const out = [];
+          const t0 = performance.now();
+          const timer = setInterval(() => {
+            const a = window.ChaApp.state.cr.anim;
+            const img = document.querySelector('#chainCanvasImg');
+            out.push({ step: a.steps | 0, frame: a.frame | 0, src: (img && img.src || '').length, item: window.ChaApp.state.cr.item });
+            if (performance.now() - t0 > 2500) { clearInterval(timer); res(out); }
+          }, 30);
+        }));
+        // 每一格的画面可视矩形 vs 所有可见面板：不许重叠
+        revChecks.overlap = await host.evaluate(() => {
+          const img = document.querySelector('#chainCanvasImg');
+          const ir = (img && !img.classList.contains('hidden')) ? img.getBoundingClientRect() : null;
+          const rows = [];
+          if (ir) {
+            ['#chainReplayBar', '#chainInputMask', '#chainTask', '#chainProgress', '#gameHud',
+              '#chainLobby', '#gameScore', '.game-lock-tip'].forEach(s => {
+              const el = document.querySelector(s);
+              if (!el || el.classList.contains('hidden')) return;
+              const r = el.getBoundingClientRect();
+              if (r.width < 4 || r.height < 4) return;
+              const hit = !(ir.bottom <= r.top || r.bottom <= ir.top || ir.right <= r.left || r.right <= ir.left);
+              rows.push({ sel: s, hit, panel: { y: Math.round(r.y), h: Math.round(r.height) }, img: { y: Math.round(ir.y), h: Math.round(ir.height) } });
+            });
+          }
+          return rows;
+        });
       }
       await nudge();                       // 立刻结算 → 进投票
       continue;
@@ -318,8 +385,14 @@ const waitAllPhase = async (pages, want, ms) => {
           const g = window.ChaApp.state.game || {};
           const c = (window.ChaApp.state.chainReveal || []).find(x => x.chainId === g.voteChainId);
           if (!c) return false;
-          const t = document.querySelector('#chainReplayBar').textContent;
-          return t.indexOf(c.firstWord) >= 0;
+          // 首尾对照现在在画布**下沿窄带**的结果行里（不在贴底控制条里 —— 控制条只放按钮）
+          const v = document.querySelector('#rpVerdict');
+          const t = v ? v.textContent : '';
+          return t.indexOf(c.firstWord) >= 0 && t.indexOf(c.lastWord) >= 0;
+        });
+        voteChecks.verdictText = await host.evaluate(() => {
+          const v = document.querySelector('#rpVerdict');
+          return v ? v.textContent.replace(/\s+/g, ' ').trim() : '';
         });
         voteChecks.btns = await visible(host, '#rpVoteOk') && await visible(host, '#rpVoteBad');
         voteChecks.enabled = !(await host.evaluate(() => {
@@ -332,6 +405,8 @@ const waitAllPhase = async (pages, want, ms) => {
       await sleep(600);
       voteChecks.doneAfter = (await gst(host)).voteDone;
       voteChecks.marked = /已投/.test(await host.textContent('#rpVoteOk'));
+      // ★ v12：♥ 是**按链**记的 —— 横条上那句「你已给 N 条链投过 ♥」就是新语义的文字证据
+      if (!favStateText) favStateText = (await host.textContent('#rpFavState')) || '';
       await nudge();                       // 结算这条链
       continue;
     }
@@ -339,8 +414,33 @@ const waitAllPhase = async (pages, want, ms) => {
       const s = await gst(host);
       const partial = !!(s.voteResult && s.voteResult.partial);
       partialRows.push(partial);
+      if (!partial) {
+        // ★ 用户要的顺序：**全部链结算完 → 先亮「点赞最多的画」→ 再弹奖杯榜**。
+        //   所以这一刻 trophyMask 必须还**没弹**，画布上要么是一幅真画、要么如实说「没人点 ♥」。
+        finalFavUi = await host.evaluate(() => {
+          const img = document.querySelector('#chainCanvasImg');
+          const bar = document.querySelector('#favBar');
+          const btn = document.querySelector('#favToTrophy');
+          return {
+            trophy: !document.querySelector('#trophyMask').classList.contains('hidden'),
+            layerOn: !document.querySelector('#chainCanvasLayer').classList.contains('hidden'),
+            imgOn: !!img && !img.classList.contains('hidden') && (img.getAttribute('src') || '').length > 500,
+            text: ((document.querySelector('#cclTopText') || {}).textContent || '').replace(/\s+/g, ' ').trim(),
+            barOn: !!bar && !bar.classList.contains('hidden'),
+            btnOn: !!btn && !btn.classList.contains('hidden'),
+            btnText: btn ? btn.textContent.trim() : ''
+          };
+        });
+        trophies.push(finalFavUi.trophy);        // 必须是 false（还没弹）
+        await host.evaluate(() => { const b = document.querySelector('#favToTrophy'); if (b) b.click(); });
+        for (let i = 0; i < 24; i++) {
+          if (await visible(host, '#trophyMask')) break;
+          await sleep(50);
+        }
+        trophyAfterClick = await visible(host, '#trophyMask');
+        break;
+      }
       trophies.push(await visible(host, '#trophyMask'));
-      if (!partial) break;
       await nudge();                       // → 下一条链
       continue;
     }
@@ -357,12 +457,39 @@ const waitAllPhase = async (pages, want, ms) => {
       && revChecks.order[2] === 'GUESS' && revChecks.order[3] === 'DRAWING',
     JSON.stringify(revChecks.order));
 
+  /* ---------- 上-中-下 三块 + 逐笔动画 ---------- */
+  console.log('\n[4b] 回放的上-中-下：两条窄带 + 中间只放画');
+  const bands = revChecks.bands || {};
+  console.log('  上窄带: ' + JSON.stringify(bands.top));
+  console.log('  下窄带: ' + JSON.stringify(bands.bottom));
+  ok('★ 上窄带是「<作者> 画了：<词>」形态', /画了：/.test(bands.top || ''), bands.top);
+  ok('★ 下窄带是「<下一格的人> 猜的是：<词>」形态', /猜的是：/.test(bands.bottom || ''), bands.bottom);
+  ok('★ 两条窄带都是窄条（高 ≤ 40px）', bands.topH > 0 && bands.topH <= 40 && bands.botH > 0 && bands.botH <= 40,
+    { top: bands.topH, bottom: bands.botH });
+  ok('★ 上窄带在画面之上、下窄带在画面之下（中间整块留给画）',
+    !!bands.img && !!bands.topBox && !!bands.botBox
+      && bands.topBox.y + bands.topBox.h <= bands.img.y + 1
+      && bands.botBox.y >= bands.img.y + bands.img.h - 1,
+    { top: bands.topBox, img: bands.img, bot: bands.botBox });
+  ok('★ 画布上没有大字（#chainCanvasText 恒空）', bands.canvasText === '', bands.canvasText);
+  const panelHit = (revChecks.overlap || []).filter(x => x.hit);
+  ok('★ 回放期间没有任何面板压住画面（40px 安全条内不算）', panelHit.length === 0, panelHit);
+  const animSeq = revChecks.anim || [];
+  const steps = [...new Set(animSeq.map(x => x.step))];
+  console.log('  逐笔动画采样: ' + JSON.stringify(animSeq.filter((x, i) => i % 6 === 0).slice(0, 8)));
+  ok('★ 逐笔动画：同一格里画布内容分多次叠上去（step ≥ 2）',
+    steps.length >= 2 && Math.max.apply(null, steps) >= 2, { steps: steps });
+  ok('★ 逐笔动画：帧号随时间增长（一笔一笔画出来，不是一次性贴图）',
+    (revChecks.anim || []).some(x => x.frame >= 2), (revChecks.anim || []).map(x => x.frame).filter((v, i, a) => a.indexOf(v) === i));
+
   console.log('\n[7] 画布下方的投票条');
   ok('走到了投票阶段', sawVote);
   console.log('  投票条: ' + voteBarText.slice(0, 110));
+  console.log('  结果行: ' + JSON.stringify(voteChecks.verdictText));
   ok('★ 给出「起词 → 最终猜词」的对照', voteChecks.firstLast === true,
-    voteBarText.slice(0, 90));
-  ok('★ 问了「这两个匹配吗？」', /这两个匹配吗/.test(voteBarText));
+    voteChecks.verdictText || voteBarText.slice(0, 90));
+  ok('★ 问了「这两个匹配吗？」', /这两个匹配吗/.test(voteBarText) || /这个匹配吗/.test(voteChecks.verdictText || ''));
+  ok('★ 结果行给出 √ / × 判定', /(√|×)/.test(voteChecks.verdictText || ''));
   ok('★ √ 和 × 两个按钮都在且可点', voteChecks.btns === true);
   ok('★ 两个按钮都不是灰白不可点', voteChecks.enabled === true);
   ok('★ 显示「已投 x / y」', /已投/.test(voteBarText) && voteSnap && voteSnap.voteTotal === 4,
@@ -372,16 +499,30 @@ const waitAllPhase = async (pages, want, ms) => {
     JSON.stringify({ i: voteSnap && voteSnap.voteChainIndex, id: voteSnap && voteSnap.voteChainId }));
   ok('★ 投 √ 之后已投人数增长', voteChecks.doneAfter >= 1, voteChecks.doneAfter);
   ok('★ 投过的一侧标出「已投」', voteChecks.marked === true);
-  console.log('\n[8] 逐链串行：小结算不弹奖杯，最终才弹');
+  // ★ v12：♥ 不再是「一人一票被覆盖」，而是**每条链各一次** —— 横条上那句就是文字证据
+  ok('★ ♥ 的进度文案是「你已给 N 条链投过 ♥（每条链一次）」（新语义）',
+    /条链投过 ♥/.test(favStateText) && /每条链一次/.test(favStateText), favStateText);
+  console.log('\n[8] 逐链串行：小结算不弹奖杯；最终结算**先亮点赞最多的画**、再弹奖杯榜');
   const small = partialRows.filter(Boolean);
   console.log('  小结算 ' + small.length + ' 次，奖杯弹窗出现情况: ' + JSON.stringify(trophies));
   ok('★ 确实经过了一条链一条链的小结算', small.length >= 1, small.length);
-  ok('★ 小结算**不弹奖杯**弹窗（trophies 里除了最后一次都是 false）',
-    trophies.slice(0, -1).every(x => x === false), JSON.stringify(trophies));
+  ok('★ 小结算**不弹奖杯**弹窗（这一局一次都没弹过，最终结算那一刻也没弹）',
+    trophies.every(x => x === false), JSON.stringify(trophies));
   ok('★ 最后才进入最终结算（partial = false）',
     partialRows.length > 0 && partialRows[partialRows.length - 1] === false,
     JSON.stringify(partialRows));
-  ok('★ 最终结算才弹奖杯弹窗', trophies[trophies.length - 1] === true, JSON.stringify(trophies));
+  console.log('  最终结算第一屏: ' + JSON.stringify(finalFavUi && {
+    layer: finalFavUi.layerOn, img: finalFavUi.imgOn, bar: finalFavUi.barOn, text: finalFavUi.text
+  }));
+  ok('★ 最终结算**先在主画布上亮「点赞最多的画」**（画布层亮着 + 有说明行 + 有按钮），此刻奖杯榜还没弹',
+    !!finalFavUi && finalFavUi.layerOn === true && finalFavUi.barOn === true
+      && finalFavUi.btnOn === true && /看奖杯榜/.test(finalFavUi.btnText)
+      && finalFavUi.trophy === false,
+    finalFavUi && { layer: finalFavUi.layerOn, bar: finalFavUi.barOn, btn: finalFavUi.btnText, trophy: finalFavUi.trophy });
+  ok('★ 那一屏要么铺出一幅真画、要么如实写「这一局没人点 ♥」（这条用例没投 ♥，所以是后者）',
+    !!finalFavUi && (finalFavUi.imgOn === true || /没人点 ♥/.test(finalFavUi.text)),
+    finalFavUi && { img: finalFavUi.imgOn, text: finalFavUi.text });
+  ok('★ 点「看奖杯榜 →」之后才弹奖杯榜', trophyAfterClick === true);
 
   console.log('\n[5] 结束游戏：本地立即回主菜单');
   const t0 = Date.now();

@@ -80,7 +80,20 @@
     // v9 起回放是「逐格播」而不是「一屏摊开」——所以客户端要一个自己的小状态机。
     // v10：chain 只跟着服务端的 voteChainIndex / voteChainId 走（一条链一条链串行），
     //      客户端不能自己翻到别的链上去 —— chainId 用来判断「服务端换链了没有」。
-    cr: { chain: 0, chainId: '', item: 0, playing: false, speed: 1, timer: null },
+    cr: {
+      chain: 0, chainId: '', item: 0, playing: false, speed: 1, timer: null,
+      // 服务端回放游标（revealStep）：变了才切格 —— 「现在第几格」以服务端为准
+      serverStep: null,
+      // 逐笔动画状态：生成号 gen —— 换格时 +1，旧的帧回调 / 兜底定时器对不上就自己退出
+      anim: {
+        chain: -1, item: -1, gen: 1, raf: 0, tickTimer: 0, safety: 0, strokes: null, done: 0, frame: 0,
+        startAt: 0, animMs: 0, dur: 0, finished: false, landedAt: 0, framesAll: 0, pics: [], steps: 0
+      },
+      // 猜词期画布上的那幅画是猜题流程摆的（回放别去动它的词条窄带）
+      externalImg: false,
+      // 用户回放前快捷条是不是展开的（回放期间自动收起来，结束要还原）
+      qbWasOpen: null
+    },
     chainInputSubmitted: false, // 输入框已提交（挡住重复提交 + 显示「已提交」）
     chainTaskToast: '',       // 「轮到你…」通知去重（同一圈同一步只弹一次）
     themes: null,             // 主题列表（{id,name}），从 /api/share 或快照拿
@@ -5394,10 +5407,29 @@
   function tunnelStatusText() {
     var t = S.tunnel || {};
     if (t.phase === 'downloading') {
-      return '正在下载公网组件 ' + Math.round((t.percent || 0) * 100) + '%（只下一次，之后就不用等了）';
+      // ⚠ 别再用 `percent || 0` —— 主进程拿不到总大小时会**故意**给 percent = null
+      //   （标注 indeterminate），那时 `|| 0` 会把它显示成「0% 卡住」，
+      //   而实际上字节正在流。主进程现在会直接给一句现成的文案（progressText）。
+      if (t.progressText) return t.progressText;
+      if (t.indeterminate || t.percent == null) {
+        var mb = (Number(t.bytes) || 0) / 1048576;
+        var sp = Number(t.speed) || 0;
+        return '正在下载公网组件 ' + mb.toFixed(1) + ' MB'
+          + (sp > 0 ? '（' + (sp / 1048576).toFixed(1) + ' MB/s）' : '')
+          + '（只下一次，之后就不用等了）';
+      }
+      return '正在下载公网组件 ' + Math.round(t.percent * 100) + '%（只下一次，之后就不用等了）';
     }
     if (t.phase === 'starting') return '正在建立隧道…';
     if (t.phase === 'on') return '已开启';
+    return '';
+  }
+
+  /** 下载太慢/失败时给用户的兜底提示：主进程会把「缓存目录完整路径」放在 t.hint 里 */
+  function tunnelHintText() {
+    var t = S.tunnel || {};
+    if (t.phase === 'downloading' && t.hint) return t.hint;
+    if (t.phase === 'error' && t.hint) return t.hint;
     return '';
   }
 
@@ -5458,7 +5490,9 @@
       btn.disabled = true;
       btn.textContent = '请稍候…';
       st.className = 'srv-state';
-      st.textContent = tunnelStatusText();
+      // 慢/卡时把「缓存目录在哪 / 可以手动放」一起给出来（有 hint 才追加）
+      var hint = tunnelHintText();
+      st.textContent = tunnelStatusText() + (hint ? ' · ' + hint : '');
     } else {
       btn.textContent = '开启公网联机';
       st.className = 'srv-state off';
@@ -5487,7 +5521,8 @@
         '<span class="hint">（外网的朋友打开这个地址就能加入）</span>' +
         (d ? ' <button class="btn tiny ghost" id="btnTunnelOff">关闭公网联机</button>' : '');
     } else if (t.phase === 'downloading' || t.phase === 'starting') {
-      inner = '<span class="hint">' + esc(tunnelStatusText()) + '</span>';
+      inner = '<span class="hint">' + esc(tunnelStatusText()) + '</span>'
+        + (tunnelHintText() ? '<span class="hint">' + esc(tunnelHintText()) + '</span>' : '');
     } else if (d) {
       inner = '<button class="btn tiny primary" id="btnTunnelOn">开启公网联机</button>' +
         '<span class="hint">（一键穿透，不用装任何东西；外网的朋友点链接就能进来）</span>' +
@@ -6950,7 +6985,18 @@
     $('#rpNextItem').addEventListener('click', function () { crStepItem(1); });
     $('#rpSpeed').addEventListener('change', function () {
       S.cr.speed = Number(this.value) || 1;
-      if (S.cr.playing) crScheduleNext();    // 播放中改速度：立刻按新节奏走
+      // 改了倍速 = 这一格的总时长变了：重排节奏，正在播的那一格按新时长继续（不重头画）
+      if (S.cr.playing) crScheduleNext();
+      renderChainReveal(true);
+    });
+    // 把控制条折起来（只剩播放 / 翻格那几颗），画面立刻长高一截
+    $('#rpFold').addEventListener('click', function () {
+      var bar = $('#chainReplayBar');
+      if (!bar) return;
+      var folded = bar.classList.toggle('folded');
+      this.textContent = folded ? '▸' : '▾';
+      this.title = folded ? '展开控制条' : '收起控制条（画面会变大）';
+      syncChainCanvasPad();
     });
     $('#rpVoteBad').addEventListener('click', function () { voteKeep(false); });
     $('#rpVoteOk').addEventListener('click', function () { voteKeep(true); });
@@ -6983,6 +7029,8 @@
     });
 
     /* ---- 奖杯结算 ---- */
+    // 「点赞最多的画」横条上那颗按钮：点了立刻进奖杯榜（不用等自动那一下）
+    $('#favToTrophy').addEventListener('click', favToTrophy);
     $('#btnTrophyClose').addEventListener('click', closeTrophy);
     $('#btnTrophyStop').addEventListener('click', function () { endChainGame(); });
     $('#btnTrophyAgain').addEventListener('click', function () {
@@ -8441,21 +8489,59 @@
    *
    * 用户的实测反馈：猜词时那幅画缩在左下角 232px 的小窗里，根本看不清；
    * 回放更糟 —— 全屏遮罩把画布整个盖住，等于「看回放的时候看不见画」。
-   * 现在这一层铺在主画布上：画用 <img>（object-fit: contain），
-   * 词 / 空格用居中的大字文本。层本身 pointer-events:none，不影响作画。
+   * 现在这一层铺在主画布上：画用 <img>（object-fit: contain），层本身 pointer-events:none。
+   *
+   * v11：层里是「上窄带 / 画 / 下窄带」三段 flex 列（见 index.html 注释）——
+   * 词**不再用大字画在画布上**（用户问题 2），一律走上下两条 38px 的窄带。
    */
 
-  /** 该给底部横条留多高 —— 横条是「贴底」的，画布层不能钻到它底下 */
+  /** 底部控制条的实际高度 → CSS 变量 --cb-h（其他贴底浮层靠它让位）。
+   *  ⚠ 画布层自己**不用**再留 paddingBottom：上下窄带是 flex 列里的固定行，
+   *    中间的画只吃剩下的高度，物理上不会被压住。
+   *  ⚠ 上沿同理：快捷条折行 / HUD 变高时 --qb-h 会变，窄带顶部跟着 #gameHud
+   *    的实际底边往下让（不然窗口一窄，上窄带就钻到 HUD 底下被盖住）。
+   *  ⚠ 下沿：`.game-lock-tip`（"回放中 —— 画布暂时不能动"）是贴底居中悬浮的，
+   *    它比横条还靠上，会压住画面下缘 —— 所以它露着的时候给它留出高度。 */
   function syncChainCanvasPad() {
     var h = 0;
-    ['#chainInputMask', '#chainReplayBar'].forEach(function (sel) {
+    ['#chainInputMask', '#chainReplayBar', '#favBar'].forEach(function (sel) {
       var el = $(sel);
       if (!el || el.classList.contains('hidden')) return;
       var r = el.getBoundingClientRect();
       if (r.height > h) h = r.height;
     });
     var layer = $('#chainCanvasLayer');
-    if (layer) layer.style.paddingBottom = (h > 0 ? Math.round(h) + 26 : 14) + 'px';
+    if (layer) {
+      var top = 78;
+      var hud = $('#gameHud');
+      if (hud && !hud.classList.contains('hidden')) {
+        var hr = hud.getBoundingClientRect();
+        if (hr.height > 0) top = Math.max(top, Math.round(hr.bottom + 8));
+      }
+      // .game-lock-tip 贴在 bottom:14px 处，所以它占掉的是「14 + 自身高度」那一条
+      var tip = $('#gameLockTip');
+      var bottom = 10;
+      if (tip) {
+        var th = tip.offsetHeight;
+        var stageEl = $('#stage');
+        var tipBottom = 14;
+        if (stageEl) {
+          var sr = stageEl.getBoundingClientRect();
+          var tr = tip.getBoundingClientRect();
+          if (tr.height > 0) tipBottom = Math.max(0, Math.round(sr.bottom - tr.bottom));
+        }
+        if (th > 0) bottom = Math.round(th + tipBottom + 8);
+      }
+      layer.style.paddingTop = top + 'px';
+      layer.style.paddingBottom = bottom + 'px';
+      // <img> 是「原尺寸显示 + 这里按实测可用高度封顶」（CSS 的 max-height:100% 在
+      // flex 子项上不可靠，会把窄带顶开）—— 封住了它就不可能压到窄带 / 锁定提示。
+      var img = $('#chainCanvasImg');
+      if (img) {
+        var avail = Math.round(layer.clientHeight - top - bottom - 4);
+        if (avail > 60) img.style.maxHeight = avail + 'px';
+      }
+    }
     // 顺手告诉 CSS：横条开着的时候，原本贴底的浮层（题面 / 进度 / 锁定提示）要抬起来
     var stage = $('#stage');
     if (stage) {
@@ -8468,6 +8554,26 @@
       //   所以这里在 body 上再挂一个同样的开关给它用。
       document.body.classList.toggle('chain-bar-on', h > 0);
     }
+    // 改了 padding 之后 <img> 的可用高度变了，浏览器不一定会自己重排 —— 读一次强制回流
+    var im = $('#chainCanvasImg');
+    if (im && !im.classList.contains('hidden')) void im.getBoundingClientRect();
+  }
+
+  /** 上下两条窄带的文字（回放专用）。
+   *  band==='' 表示「别动这一条」（GUESS 那条由猜题流程自己写）。 */
+  function setChainCanvasBands(top, bottom) {
+    var t = $('#cclTopText'), b = $('#cclBottomText');
+    if (t && top !== null && top !== undefined) t.innerHTML = top;
+    if (b && bottom !== null && bottom !== undefined) b.innerHTML = bottom;
+    var topEl = $('#cclTop'), botEl = $('#cclBottom');
+    if (topEl && top !== null && top !== undefined) topEl.classList.toggle('hidden', !top);
+    if (botEl && bottom !== null && bottom !== undefined) botEl.classList.toggle('hidden', !bottom);
+  }
+
+  /** 窄带右侧那个倒计时：回放 / 投票时露出来，猜词时收掉（猜词条里自己有一个） */
+  function setRpTimerVisible(on) {
+    var el = $('#rpTimer');
+    if (el) el.classList.toggle('hidden', !on);
   }
 
   /** 这一格是一幅画 */
@@ -8475,7 +8581,7 @@
     var layer = $('#chainCanvasLayer');
     if (!layer) return;
     layer.classList.remove('hidden');
-    setCclTag(tag);
+    setCclTag('');                       // 画布上不再挂任何标签
     var txt = $('#chainCanvasText');
     if (txt) { txt.textContent = ''; txt.classList.add('hidden'); }
     var img = $('#chainCanvasImg');
@@ -8492,16 +8598,19 @@
     syncChainCanvasPad();
   }
 
-  /** 这一格是一个词（起词 / 猜词）/ 一句说明 */
+  /** 这一格是一个词（起词 / 猜词）/ 一句说明。
+   *  ⚠ v11 起**不再往画布上写大字** —— 词只出现在上下两条窄带里，
+   *  这里只把说明挂到窄带上（用户问题 2：大字漂在画面上挡画）。 */
   function showChainCanvasText(text, tag) {
     var layer = $('#chainCanvasLayer');
     if (!layer) return;
     layer.classList.remove('hidden');
-    setCclTag(tag);
+    setCclTag('');
     var img = $('#chainCanvasImg');
     if (img) { img.removeAttribute('src'); img.classList.add('hidden'); }
     var txt = $('#chainCanvasText');
-    if (txt) { txt.textContent = text || ''; txt.classList.remove('hidden'); }
+    if (txt) { txt.textContent = ''; txt.classList.add('hidden'); }   // 画布上永远没有文字
+    if (!S.cr.externalImg) setChainCanvasBands(esc(text || ''), null);
     syncChainCanvasPad();
   }
 
@@ -8514,12 +8623,25 @@
 
   function hideChainCanvas() {
     var layer = $('#chainCanvasLayer');
+    // ⚠ 回放 / 投票阶段这一层归 renderChainReveal 管：状态同步每秒钟来好几次，
+    //   每次都会走一遍 renderChainTask()（那一刻 chainStepActive() 是 false），
+    //   以前这里会把回放正演到一半的逐笔动画直接掐掉 —— 实测就是「一格只画出 1 帧」的元凶。
+    //   （先判后停：连 crStopAnim 都不能碰，否则定时器一被清掉动画就永远停在第一帧。）
+    var bar = $('#chainReplayBar');
+    if (bar && !bar.classList.contains('hidden')) return;
+    // ★ 最终结算的「点赞最多的画」也占着这一层：状态同步每秒都会走一遍 renderChainTask()，
+    //   不挡住的话，刚铺上去的那幅大图会被一秒清一次（表现为「闪一下就没了」）。
+    if (FAV.active) return;
+    crStopAnim();
     if (!layer || layer.classList.contains('hidden')) return;
     layer.classList.add('hidden');
     var img = $('#chainCanvasImg');
-    if (img) img.removeAttribute('src');
+    if (img) { img.removeAttribute('src'); img.style.maxHeight = ''; }
     var txt = $('#chainCanvasText');
     if (txt) txt.textContent = '';
+    setChainCanvasBands('', '');
+    setRpTimerVisible(false);
+    S.cr.externalImg = false;
     syncChainCanvasPad();
   }
 
@@ -8584,13 +8706,26 @@
       label.textContent = '这幅画画的是什么？';
       if (S.chainInputSubmitted) {
         body.innerHTML = '<div class="ct-done">✓ 已提交，等其他人</div>';
+        S.cr.externalImg = false;
         hideChainCanvas();
         return;
       }
-      // 要猜的那幅画铺在主画布上（不再挤在这张小卡片里），卡片只留操作
+      // 要猜的那幅画铺在主画布上（不再挤在这张小卡片里）；
+      // 题面那一行也走画布**下沿的窄带**（不再往画面中间写大字），卡片只留操作。
+      S.cr.externalImg = true;
+      setRpTimerVisible(false);
       var img = chainTaskImage(t);
-      if (img) showChainCanvasImage(img, '看画猜词 · 上面这幅画画的是什么？');
-      else showChainCanvasText('（上一格是空的 —— 上家没交）', '看画猜词');
+      var lay0 = $('#chainCanvasLayer');
+      if (lay0) lay0.classList.remove('hidden');
+      var im0 = $('#chainCanvasImg');
+      if (img) {
+        showChainCanvasImage(img, '');
+      } else if (im0) {
+        im0.removeAttribute('src');
+        im0.classList.add('hidden');
+      }
+      setChainCanvasBands(img ? '看画猜词 · 上面这幅画画的是什么？' : '（上一格是空的 —— 上家没交）', '');
+      syncChainCanvasPad();
       body.innerHTML = '<div class="ct-note">上面这幅画画的是什么？猜一个词 —— ' +
         '猜错也没关系，就是要看它跑偏成什么样。</div>' +
         '<button class="btn primary ct-guess" style="margin-top:8px;width:100%">回答</button>';
@@ -8701,6 +8836,105 @@
     updateChainInputPreview();
   }
 
+  /* ---- 分组（v12）----
+   *
+   * 服务端的规矩（见 server/src/chain.js groupCountFor）：
+   *   4~6 人 = 1 组（等于以前，什么分组都没有）；7~10 = 2 组；11~12 = 3 组；13~16 = 4 组；
+   *   每组一个环、组内传遍，链长 = 2 × 该组人数。
+   *
+   * 前端只做两件事：
+   *   ① 把「为什么你只跟这几个人互传」讲清楚（大厅 + 进度面板各一行）
+   *   ② **1 组时一个字都不显示** —— 那是老玩法，多出来的文案只会是噪音
+   *
+   * 大厅阶段服务端还没分组（groups 是开局时才 planGroups 出来的），
+   * 所以这里额外支持「按人数预告」：知道会分成几组、本组大概几人，
+   * 但**不编造第几组**（分到哪一组是开局随机洗的，猜出来就是骗人）。
+   */
+
+  /** 人数 → 组数（与 server/src/chain.js 的 groupCountFor 同一张表，用于大厅预告） */
+  function expectedGroupCount(n) {
+    n = n | 0;
+    if (n >= 13) return 4;
+    if (n >= 11) return 3;
+    if (n >= 7) return 2;
+    return 1;
+  }
+
+  /**
+   * 从快照里取「我这一组」的信息。**全字段容错**：拿不到就返回 null（= 不显示分组）。
+   * @returns {null|{count:number,index:number,size:number,length:number,total:number,known:boolean}}
+   */
+  function chainGroupInfo(g) {
+    if (!g) return null;
+    var players = (g.players || []).filter(function (p) { return !p.spectating; });
+    var total = players.length;
+    var count = Number(g.groupCount);
+    if (!isFinite(count) || count <= 0) count = 0;
+    var groups = Array.isArray(g.groups) ? g.groups : [];
+    if (!count && groups.length) count = groups.length;
+    // 1 组 = 没有分组：一律不显示（这是用户明确要的「别出声」）
+    if (count < 2) return null;
+    if (!total) {
+      total = groups.reduce(function (a, x) { return a + (Number(x && x.size) || 0); }, 0);
+    }
+    var idx = Number(g.myGroupIndex);
+    if (!isFinite(idx) || idx < 0) idx = -1;
+    var mine = idx >= 0 ? (groups[idx] || null) : null;
+    var size = mine ? Number(mine.size) : Number(g.groupSize);
+    if (!isFinite(size) || size <= 0) {
+      size = total > 0 ? Math.max(1, Math.round(total / count)) : 0;
+    }
+    // 本组链长：优先看这一组自己的 chainLength，其次 groupLengths[idx]，最后退回 2 × 本组人数
+    var len = mine ? Number(mine.chainLength) : NaN;
+    if (!isFinite(len) || len <= 0) {
+      var gl = Array.isArray(g.groupLengths) ? Number(g.groupLengths[idx]) : NaN;
+      if (isFinite(gl) && gl > 0) len = gl;
+    }
+    if (!isFinite(len) || len <= 0) len = size > 0 ? size * 2 : 0;
+    return {
+      count: count,
+      index: idx >= 0 ? idx + 1 : 0,      // 0 = 还不知道自己是第几组（大厅）
+      known: idx >= 0,
+      size: size,
+      length: len,
+      total: total
+    };
+  }
+
+  /** 分组说明的两种措辞：大厅（可能还不知道第几组）与进度面板（一定知道） */
+  function groupTextLobby(info) {
+    if (!info) return '';
+    var head = (info.total > 0 ? info.total + ' 人' : '全场') + '分成 <b>' + info.count +
+      ' 组</b>，各自传各自的链';
+    if (info.known) {
+      return head + ' —— 你在<b>第 ' + info.index + ' / ' + info.count + ' 组</b>（本组 ' +
+        info.size + ' 人 · 本组链长 ' + info.length + ' 手）';
+    }
+    // 大厅：分组是开局随机洗的，这里只说规模，不编第几组
+    return head + ' —— 开局后才知道你在第几组（本组约 ' + info.size + ' 人 · 链长约 ' + info.length + ' 手）';
+  }
+  function groupTextHud(info) {
+    if (!info) return '';
+    if (info.known) {
+      return '第 <b>' + info.index + ' / ' + info.count + ' 组</b> · 本组 ' + info.size +
+        ' 人 · 本组链长 ' + info.length + ' 手';
+    }
+    return info.count + ' 组并行 · 本组约 ' + info.size + ' 人';
+  }
+
+  /** 把一行分组文案写进某个节点（info 为空 = 收起来 + 清空，绝不留半截文字） */
+  function paintGroupLine(sel, html) {
+    var el = $(sel);
+    if (!el) return;
+    if (html) {
+      el.innerHTML = html;
+      el.classList.remove('hidden');
+    } else {
+      el.innerHTML = '';
+      el.classList.add('hidden');
+    }
+  }
+
   /* ---- 链条进度面板（多链并行：全场同一格，只报「第几手 / 交了几份」，不含内容） ---- */
 
   function renderChainProgress() {
@@ -8714,6 +8948,8 @@
       return;
     }
     box.classList.remove('hidden');
+    // 分组说明（v12）：多组时告诉玩家「你只跟本组的人互传」，1 组时整行收掉
+    paintGroupLine('#cpGroups', groupTextHud(chainGroupInfo(g)));
     var list = $('#cpList');
     var len = Math.max(1, g.chainLength || 1);
     var k = g.stepIndex | 0;
@@ -8742,12 +8978,25 @@
     if (!box) return;
     var g = S.game;
     var show = !!(isChainMode() && g && g.phase === 'lobby');
+    // ⚠ 分组那一行要跟着大厅一起收：大厅关着的时候它是死的
+    if (!show) { paintGroupLine('#clGroups', ''); }
     box.classList.toggle('hidden', !show);
     if (!show) return;
     var players = g.players || [];
     var playing = players.filter(function (p) { return !p.spectating; });
     var cnt = $('#clCount');
     if (cnt) cnt.textContent = playing.length + ' 人（需 ≥ ' + (g.minPlayers || 4) + '）';
+    // 分组说明：服务端分了组就报真的（「你在第 X / Y 组」）；
+    // 大厅阶段还没分组，就按人数预告「会分成几组、本组大概几人」。
+    var ginfo = chainGroupInfo(g);
+    if (!ginfo) {
+      var exp = expectedGroupCount(playing.length);
+      if (exp >= 2) {
+        var each = Math.max(1, Math.round(playing.length / exp));
+        ginfo = { count: exp, index: 0, known: false, size: each, length: each * 2, total: playing.length };
+      }
+    }
+    paintGroupLine('#clGroups', groupTextLobby(ginfo));
     var html = '';
     players.forEach(function (p) {
       html += '<span class="cl-player' + (p.spectating ? ' spec' : '') + (p.ready ? ' ready' : '') + '">' +
@@ -8790,6 +9039,96 @@
     if (S.cr.timer) { clearTimeout(S.cr.timer); S.cr.timer = null; }
   }
 
+  /* ---- 回放：逐笔动画 ----
+   *
+   * 服务端给的 legHoldMs = 这一格的**总时长**（动画 + 定格）。这里把它拆开：
+   *   动画占用 min(60% × 总时长, 8000ms)，剩下的时间用来定格看结果（最少 250ms）。
+   *   倍速选择器（0.5×~4×）再乘一层：总时长 = legHoldMs / speed。
+   * 所以「服务端腿短 → 动画自动加速、腿长 → 慢放」，两端都有上下限，不会一帧画完或卡住。
+   *
+   * 逐笔的实现：**不用 renderStrokesPNG 那种「一次渲完整张」**，而是自己维护一张离屏
+   * 小画布（最长边 760px —— toDataURL 是同步的，全尺寸每帧编码会卡），每帧只把这一批
+   * 新笔迹用 engine.replayStampOne 叠上去（增量绘制，不重画前面的笔），再 toDataURL 喂给
+   * #chainCanvasImg。所以帧与帧之间的画**一定不一样** —— 看得见一笔一笔长出来。
+   */
+  var CR_ANIM = { minTotal: 600, maxTotal: 12000, minAnim: 700, maxAnim: 8000, hold: 250, targetFrames: 18 };
+
+  /** 服务端下发的回放游标（可能还没落地 —— 拿不到就返回 null，退回本地逐格播放） */
+  function crServerStep() {
+    var g = S.game;
+    if (!g) return null;
+    var v = g.revealStep;
+    return (typeof v === 'number' && isFinite(v) && v >= 0) ? Math.floor(v) : null;
+  }
+  function crServerLegs() {
+    var g = S.game;
+    if (!g) return 0;
+    var v = g.revealLegs;
+    if (typeof v === 'number' && isFinite(v) && v > 0) return Math.floor(v);
+    var n = Number(v);
+    return (isFinite(n) && n > 0) ? Math.floor(n) : 0;
+  }
+  /** 这一格的总时长（含定格）—— 服务端 legHoldMs / 本地倍速，带上下限 */
+  function crLegTotalMs() {
+    var g = S.game;
+    var base = Number(g && g.legHoldMs);
+    if (!isFinite(base) || base <= 0) base = 3600;
+    base = base / (S.cr.speed || 1);
+    return Math.max(CR_ANIM.minTotal, Math.min(CR_ANIM.maxTotal, Math.round(base)));
+  }
+  function crLegAnimMs(total) {
+    var a = Math.round(total * 0.6);
+    a = Math.max(CR_ANIM.minAnim, Math.min(CR_ANIM.maxAnim, a));
+    return Math.min(a, Math.max(0, total - CR_ANIM.hold));
+  }
+  function crStopAnim() {
+    var a = S.cr.anim;
+    if (a) {
+      a.gen++;
+      if (a.raf) cancelAnimationFrame(a.raf);
+      if (a.tickTimer) clearInterval(a.tickTimer);
+      if (a.safety) clearTimeout(a.safety);
+      a.raf = 0;
+      a.tickTimer = 0;
+      a.safety = 0;
+    }
+  }
+  /** 一格切换时清掉上一格的画面缓存（逐笔是现画的，留着只会占内存） */
+  function crDropLegCaches(item) {
+    if (!item) return;
+    try { delete item._png; delete item._frames; } catch (e) { /* 无所谓 */ }
+  }
+  /** 逐笔动画用的离屏画布：按引擎尺寸等比缩到最长边 ≤ 900px。
+   *  900 是「画出来不糊」与「每帧 toDataURL 不卡」之间的折中（显示宽度约 700~900px）。 */
+  function crAnimCanvas() {
+    var a = S.cr.anim;
+    var W = (engine && engine.width) || 1280;
+    var H = (engine && engine.height) || 800;
+    var sc = Math.min(1, 900 / Math.max(W, H));
+    var w = Math.max(64, Math.round(W * sc));
+    var h = Math.max(64, Math.round(H * sc));
+    if (a.cv && a.w === w && a.h === h) return a.cv;
+    var cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    a.cv = cv; a.ctx = cv.getContext('2d');
+    a.w = w; a.h = h;
+    a.scale = sc;
+    return cv;
+  }
+
+  /** 把离屏画布抹成白底（= 这一格还没开始画的画面）并显示出来 */
+  function crResetAnimCanvas() {
+    var a = S.cr.anim;
+    if (!a.ctx) crAnimCanvas();
+    if (a.ctx) {
+      a.ctx.setTransform(1, 0, 0, 1, 0, 0);
+      a.ctx.fillStyle = '#fff';
+      a.ctx.fillRect(0, 0, a.w, a.h);
+    }
+    a.canvasBlank = true;
+    crShowImage(a.cv ? a.cv.toDataURL('image/png') : '');
+  }
+
   /** 回放数据就位（GAME_REVEAL 到达 / 迟到补发）。开着的播放器保持当前页。 */
   function applyChainReveal(chains) {
     S.chainReveal = chains || [];
@@ -8802,8 +9141,11 @@
    *  v10：不再用 #replayMask 那个全屏遮罩 —— 当前格摊在 #chainCanvasLayer（主画布区），
    *  控制条 / 首尾对照 / 投票都收进贴底的 #chainReplayBar。
    *  另外：**只演服务端指定的那一条链**（voteChainId），跨链翻页整个去掉。
+   *
+   *  v11：格内是**逐笔动画**（见 crStartAnim）；「现在第几格」以服务端 revealStep 为准
+   *  （拿不到就退回本地逐格播放）。上下两条窄带写「谁画了什么 / 谁猜的是什么」。
    */
-  function renderChainReveal() {
+  function renderChainReveal(skipChrome) {
     var g = S.game;
     var list = S.chainReveal;
     var show = !!(g && (g.phase === 'chain_reveal' || g.phase === 'chain_vote') && list && list.length);
@@ -8816,71 +9158,114 @@
     var switched = (S.cr.chain !== ci) || (S.cr.chainId !== chain.chainId);
     if (switched) {
       crClearTimer();
+      crStopAnim();
       S.cr.chain = ci;
       S.cr.chainId = chain.chainId;
       // 回放：从头逐格演，自动播；投票：停在最后一格，让人盯着首尾做判断
       S.cr.playing = (g.phase === 'chain_reveal');
       S.cr.item = (g.phase === 'chain_vote') ? Math.max(0, items.length - 1) : 0;
+      S.cr.serverStep = crServerStep();
     }
+
+    // 棒次跟着服务端走：revealStep 变了就切到那一格（并重新播动画）。
+    // 服务端还没下这个字段时 crServerStep() 返回 null —— 这条整段跳过，用本地逐格播放。
+    var srv = crServerStep();
+    var srvLegs = crServerLegs();
+    var stepChanged = false;
+    if (srv !== null && srv !== S.cr.serverStep) {
+      S.cr.serverStep = srv;
+      if (srv !== S.cr.item) { S.cr.item = srv; stepChanged = true; }
+    }
+    if (srvLegs && g.phase === 'chain_reveal' && S.cr.item >= srvLegs - 1) S.cr.playing = false;
+
     S.cr.item = Math.max(0, Math.min(S.cr.item | 0, Math.max(0, items.length - 1)));
 
     var bar = $('#chainReplayBar');
     if (bar) bar.classList.remove('hidden');
-    setChainCtlVisible(true);
-    $('#rpTitle').textContent = g.phase === 'chain_vote' ? '投票' : '回放';
+    setReplayChrome(true);
+    if (!skipChrome) {
+      setChainCtlVisible(true);
+      $('#rpTitle').textContent = g.phase === 'chain_vote' ? '投票' : '回放';
 
-    // 头部：第几条链 / 起词人（跨链的小点去掉了 —— 看哪条链由服务端说了算）
-    var n = list.length;
-    $('#rpIndex').textContent = (ci + 1) + ' / ' + n;
-    var head = $('#rpChainHead');
-    head.innerHTML = '第 ' + (ci + 1) + ' 条链 · 起词人 <b>' + esc(chain.ownerName || '某人') + '</b>' +
-      (chain.ownerPlayerId === S.me.userId ? '<span class="rp-mine">我的</span>' : '');
-    head.classList.remove('rp-in');
-    void head.offsetWidth;          // 强制回流，动画才能重播
+      // 头部：第几条链 / 起词人（跨链的小点去掉了 —— 看哪条链由服务端说了算）
+      var n = list.length;
+      $('#rpIndex').textContent = (ci + 1) + ' / ' + n;
+      var head = $('#rpChainHead');
+      head.innerHTML = '第 ' + (ci + 1) + ' 条链 · 起词人 <b>' + esc(chain.ownerName || '某人') + '</b>' +
+        (chain.ownerPlayerId === S.me.userId ? '<span class="rp-mine">我的</span>' : '');
+      head.classList.remove('rp-in');
+      void head.offsetWidth;          // 强制回流，动画才能重播
+      renderRpPills(items);
+    }
 
-    // 控制条里的小点：每格一个，点小点跳格（链内翻格保留）
+    // 首尾对照：REVEAL 阶段演到最后一格才揭晓（提前亮出来就剧透了）；
+    // VOTE 阶段常驻 —— 投票时要盯着「起词 → 最后猜出来的词」判断对得上吗。
+    if (!skipChrome) {
+      renderRpVerdict(g, chain, items);
+      renderChainVoteArea(chain);
+      syncRpPlayBtn();
+    }
+
+    // 这一格的内容（词条 / 逐笔动画）—— 换格 / 换链 / 改速度时都要重来一遍
+    crMarkExternal(false);
+    setRpTimerVisible(true);
+    var a = S.cr.anim;
+    var prevItem = a.item;
+    var sameLeg = !switched && !stepChanged && a.chain === ci && a.item === S.cr.item;
+    var el = sameLeg ? (Date.now() - a.startAt) : 0;
+    crApplyLeg(ci, S.cr.item, items[S.cr.item] || null, el);
+
+    if (!skipChrome) {
+      syncChainCanvasPad();
+      updateGameTimer();
+    }
+    // ⚠ 只有在**真的翻了一格**（含服务端推进 / 换链）时才重排节奏。
+    //   以前这里是「每次状态同步都 crScheduleNext」—— 定时器被一路重置，
+    //   本地播放永远等不到自己那一拍（服务端推得快时表现为「定格时间忽长忽短」）。
+    if (S.cr.playing && g.phase === 'chain_reveal' &&
+      (switched || stepChanged || prevItem !== S.cr.item)) crScheduleNext();
+  }
+
+  /** 控制条里的小点：每格一个，点小点跳格（链内翻格保留） */
+  function renderRpPills(items) {
     var pills = '';
     for (var q = 0; q < items.length; q++) {
       pills += '<i class="rp-pill' + (q === S.cr.item ? ' on' : (q < S.cr.item ? ' past' : '')) +
         '" data-item="' + q + '"></i>';
     }
-    $('#rpPills').innerHTML = pills;
+    var box = $('#rpPills');
+    if (box) box.innerHTML = pills;
+  }
 
-    // 首尾对照：REVEAL 阶段演到最后一格才揭晓（提前亮出来就剧透了）；
-    // VOTE 阶段常驻 —— 投票时要盯着「起词 → 最后猜出来的词」判断对得上吗。
+  /** 走完最后一格 / 投票阶段才揭晓的首尾对照 + 「这个匹配吗？」+ √ × */
+  function renderRpVerdict(g, chain, items) {
     var verdict = $('#rpVerdict');
-    if (verdict) {
-      var atEnd = S.cr.item >= items.length - 1;
-      if (g.phase === 'chain_vote' || atEnd) {
-        verdict.innerHTML =
-          '<span class="rv-a">' + esc(chain.firstWord || '（空）') + '</span>' +
-          '<span class="rv-arrow"><i class="rv-line"></i>' +
-          '传了 ' + Math.max(0, items.length - 1) + ' 手' +
-          '<i class="rv-line"></i></span>' +
-          '<span class="rv-b">' + esc(chain.lastWord || '（空）') + '</span>' +
-          '<span class="rv-tag ' + (chain.matched ? 'ok">首尾对得上' : 'bad">首尾对不上') + '</span>';
-        verdict.classList.toggle('ok', !!chain.matched);
-        verdict.classList.toggle('bad', !chain.matched);
-      } else {
-        verdict.innerHTML = '';
-        verdict.classList.remove('ok', 'bad');
-      }
+    if (!verdict) return;
+    var atEnd = S.cr.item >= items.length - 1;
+    if (g.phase === 'chain_vote' || atEnd) {
+      // 用户要的三行：起词 → 最终猜词 / 这个匹配吗？/ √ ×
+      verdict.innerHTML =
+        '<span class="rv-a">起词 <b>' + esc(chain.firstWord || '（空）') + '</b></span>' +
+        '<b class="rv-arrow">→</b>' +
+        '<span class="rv-b">最终猜词 <b>' + esc(chain.lastWord || '（空）') + '</b></span>' +
+        '<span class="rv-tag ' + (chain.matched ? 'ok">√ 对得上' : 'bad">× 对不上') + '</span>' +
+        '<span class="rv-ask">这个匹配吗？</span>';
+      verdict.classList.toggle('ok', !!chain.matched);
+      verdict.classList.toggle('bad', !chain.matched);
+    } else {
+      verdict.innerHTML = '';
+      verdict.classList.remove('ok', 'bad');
     }
-
-    renderChainItem(items[S.cr.item], S.cr.item);
-    renderChainVoteArea(chain);
-    syncRpPlayBtn();
-    syncChainCanvasPad();
-    updateGameTimer();
-    if (switched && S.cr.playing) crScheduleNext();
   }
 
   /** 收起回放条（回放数据没了 / 阶段过去了 / 最终结算交给奖杯弹窗） */
   function hideChainReplayBar() {
     crClearTimer();
+    crStopAnim();
     S.cr.playing = false;
     var bar = $('#chainReplayBar');
     if (bar) bar.classList.add('hidden');
+    setReplayChrome(false);
     syncChainCanvasPad();
   }
 
@@ -8898,34 +9283,201 @@
     return Math.max(0, Math.min(S.cr.chain | 0, list.length - 1));
   }
 
-  /** 单格内容：词 / 画 / 猜词 —— 摊在主画布上的 #chainCanvasLayer 里 */
-  function renderChainItem(item, idx) {
-    var tag = item
-      ? ('第 ' + (idx + 1) + ' 格 · ' +
-        (item.type === 'WORD' ? '起词' : item.type === 'DRAWING' ? '作画' : '猜词') +
-        ' · ' + (item.playerName || '某人'))
-      : '第 ' + (idx + 1) + ' 格';
-    if (!item) { showChainCanvasText('（这一格是空的）', tag); return; }
-    if (item.type === 'DRAWING') {
-      var url = crItemPNG(item);
-      if (url) showChainCanvasImage(url, tag);
-      else showChainCanvasText('（' + (item.playerName || '某人') + ' 没有交画）', tag);
-      return;
+  /* ---- 单格：上/下两条窄带的文案 ---- */
+
+  /** 猜题流程摆的画（回放别去动它的词条窄带） */
+  function crMarkExternal(on) { S.cr.externalImg = !!on; }
+
+  /** 一行「<作者> 画了：<词>」。
+   *  上=本格作者 + 本格拿到的题面（= 上一格的 content）；
+   *  下=下一格猜词的人 + 他猜出来的词（下一格不是猜词格时给一句说明）。 */
+  function crLegLabels(items, k) {
+    var it = items[k];
+    var prev = k > 0 ? items[k - 1] : null;
+    if (!it) return { top: '', bottom: '' };
+    var who = esc(it.playerName || '某人');
+    var top;
+    if (it.type === 'WORD') {
+      top = '<b>' + who + '</b> 起词：<span class="ccl-w">' + esc(it.content || '（空）') + '</span>';
+    } else if (it.type === 'DRAWING') {
+      var w = prev ? (prev.content || '') : '';
+      top = '<b>' + who + '</b> 画了：<span class="ccl-w">' + esc(w || '（空）') + '</span>';
+    } else {
+      var q = prev ? (prev.content || '') : '';
+      top = '<b>' + who + '</b> 猜的是：<span class="ccl-w">' + esc(q || '（空）') + '</span>';
     }
-    // WORD / GUESS 都是词 —— 大字摆在画布中央
-    showChainCanvasText(item.content || '（没交）', tag);
+    var nx = items[k + 1];
+    var bottom = '';
+    if (nx && nx.type === 'GUESS') {
+      bottom = '<b>' + esc(nx.playerName || '某人') + '</b> 猜的是：<span class="ccl-w">' +
+        esc(nx.content || '（空）') + '</span>';
+    } else if (nx) {
+      // 下一格是作画（最后一格后面没有了也算）—— 这一行没有「猜」可报
+      bottom = '<span class="ccl-note">下一格：<b>' + esc(nx.playerName || '某人') + '</b> ' +
+        (nx.type === 'DRAWING' ? '照这个词作画' : '写起词') + '</span>';
+    }
+    return { top: top, bottom: bottom };
   }
 
-  /** DRAWING 格的笔迹 → dataURL（结果缓存在格对象上，翻来翻去不重复渲染） */
-  function crItemPNG(item) {
-    if (!item || item.type !== 'DRAWING') return '';
-    if (item._png !== undefined) return item._png;
+  /* ---- 逐笔动画 ---- */
+
+  /** 让第 (ci, k) 格成为「当前格」，并按已播时长 el 把它放到该有的进度上。
+   *  同一格没播完就再进来（一次状态同步）→ 从 el 接着画，不重头来。 */
+  function crApplyLeg(ci, k, item, el) {
+    var a = S.cr.anim;
+    var items = (S.chainReveal && S.chainReveal[ci] && S.chainReveal[ci].steps) || [];
+    var lab = crLegLabels(items, k);
+    var total = crLegTotalMs();
+    var animMs = crLegAnimMs(total);
+    var strokes = (item && item.type === 'DRAWING' && Array.isArray(item.content)) ? item.content : null;
+
+    if (a.chain === ci && a.item === k && !a.finished) {
+      a.dur = total; a.animMs = animMs;
+      if (el >= animMs || !strokes || !strokes.length) { crFinishAnim(); return; }
+      return;                                     // 动画正在跑，别打断
+    }
+    if (a.chain === ci && a.item === k && a.finished) {
+      // 这一格刚才已经演完了（一次状态同步又进来）—— 只补词条，画面别动，
+      // 否则每次状态同步都会把定格画面重画一遍。
+      setChainCanvasBands(lab.top, lab.bottom);
+      return;
+    }
+
+    // 换格：停掉上一格，从头开始
+    crStopAnim();
+    a.gen++;
+    crDropLegCaches(item);
+    a.chain = ci; a.item = k;
+    a.strokes = strokes;
+    a.done = 0; a.frame = 0;
+    a.pics = [];                  // 这一格逐笔画出来的每一帧（自测看这个）
+    a.steps = 0;
+    a.startAt = Date.now() - Math.max(0, el | 0);
+    a.finished = false;
+    a.dur = total;
+    a.animMs = animMs;
+    setChainCanvasBands(lab.top, lab.bottom);
+
+    if (!item) { crShowImage(''); a.finished = true; return; }
+
+    // GUESS 格在回放里不铺大字（词在上窄带里）——
+    // 画面留白，把注意力交给上一条窄带说的「他猜的是什么」。
+    if (item.type !== 'DRAWING') { crShowImage(''); a.finished = true; return; }
+
+    if (!strokes || !strokes.length) {
+      setChainCanvasBands(lab.top + ' <span class="ccl-note">（这一格没有交画）</span>', lab.bottom);
+      crShowImage('');
+      a.finished = true;
+      return;
+    }
+
+    crResetAnimCanvas();                               // 白底先顶上，免得露出上一格
+    if (el >= animMs) { crFinishAnim(); return; }      // 页面被切走又切回来：直接给定格画面
+    crStartLoop();
+    // 兜底：定时器万一被节流（后台标签页），也不能卡在「画了一半」
+    a.safety = setTimeout(crFinishAnim, Math.max(60, animMs - el + 200));
+  }
+
+  /** 每帧只把「这一帧该出现的新笔」叠上去（增量，不重画前面的）。
+   *
+   *  节奏按**时间**算，不按帧数算：这样服务端给的 legHoldMs 短 → 每笔之间的间隔自动变短，
+   *  长 → 变慢，而「一笔一笔长出来」这件事始终成立。
+   *
+   *  ⚠ 两条踩过的坑：
+   *  1) 不能写成「每帧至少推进一笔」—— rAF 一秒能跑 60 帧，那样 3 笔的画面会在 30ms
+   *     内画完，看起来就是一次性贴上去。
+   *  2) 不能只靠 requestAnimationFrame 驱动 —— 接龙回放里服务端每秒都会推 GAME_STATE，
+   *     每次状态同步都可能 cancel 掉在飞的那一帧（实测：一格只画出 1 帧就没了）。
+   *     所以用 40ms 的 **setInterval** 当主驱动，rAF 只是「顺手多画一帧」的补充。
+   *  帧数上限 18：每帧一次 toDataURL 是同步的，笔特别多时按时间均分。 */
+  function crStartLoop() {
+    var a = S.cr.anim;
+    if (a.tickTimer) return;
+    a.tickTimer = setInterval(crAnimTick, 40);
+    a.raf = requestAnimationFrame(crAnimTick);
+  }
+
+  function crStopLoop() {
+    var a = S.cr.anim;
+    if (a.raf) { cancelAnimationFrame(a.raf); a.raf = 0; }
+    if (a.tickTimer) { clearInterval(a.tickTimer); a.tickTimer = 0; }
+  }
+
+  function crAnimTick() {
+    var a = S.cr.anim;
+    if (!a || !a.strokes) return;
+    var el = Date.now() - a.startAt;
+    crDrawTo(el);
+    if (el >= a.animMs) crFinishAnim();
+  }
+
+  /** 按「已经过了多少毫秒」决定现在该出现几笔 */
+  function crDrawTo(el) {
+    var a = S.cr.anim;
+    if (!a || !a.strokes || !a.strokes.length) return;
+    var n = a.strokes.length;
+    var frames = Math.min(n, 18);
+    var per = a.animMs / frames;                       // 每「帧」代表的画面上限
+    var want = Math.max(1, Math.ceil(el / per));       // 至少给 1 笔，第一帧别是纯白
+    want = Math.min(n, want);
+    if (want > a.done) crDrawUpTo(want);
+  }
+
+  /** 收尾：把剩下的笔一次画完、定格（并把生成号推进，旧的帧回调自己退出） */
+  function crFinishAnim() {
+    var a = S.cr.anim;
+    if (!a || a.finished) return;     // 已经是定格状态：别再推 gen / 改 startAt
+    crStopLoop();
+    if (a.strokes && a.strokes.length) crDrawUpTo(a.strokes.length);
+    if (a.safety) { clearTimeout(a.safety); a.safety = 0; }
+    a.finished = true;
+    a.gen++;                      // 还在飞的 rAF / 兜底定时器下次进来就对不上 gen，自己退出
+    a.startAt = Date.now();       // 重新计时 = 定格时间从「画完」这一刻算起
+    a.landedAt = Date.now();      // 本地兜底节奏：这一格「最短定格」从这一刻起算
+    a.framesAll = (a.framesAll | 0) + (a.frame | 0);   // 累计「逐笔画出过多少帧」（自测看这个）
+  }
+
+  /** 把「总共 upTo 笔」画进离屏画布，再喂给 #chainCanvasImg（逐笔 = 每帧都不一样） */
+  function crDrawUpTo(upTo) {
+    var a = S.cr.anim;
+    if (!a || !a.ctx || !a.strokes) return;
+    var strokes = a.strokes;
+    var upto = Math.max(a.done, Math.min(strokes.length, upTo | 0));
+    a.ctx.setTransform(a.scale || 1, 0, 0, a.scale || 1, 0, 0);
+    for (var i = a.done; i < upto; i++) {
+      var s = strokes[i];
+      try { engine.replayStampOne(a.ctx, a.cv, s); } catch (e) { /* 单笔坏了别拖垮整幅 */ }
+    }
+    a.done = upto;
+    a.canvasBlank = false;
+    a.frame++;
     var url = '';
-    try {
-      if (Array.isArray(item.content) && item.content.length) url = engine.renderStrokesPNG(item.content, '#fff');
-    } catch (e) { url = ''; }
-    if (url) item._png = url;   // 同上：渲失败别钉死，换一格再回来还能重试
-    return url;
+    try { url = a.cv.toDataURL('image/png'); } catch (e) { url = ''; }
+    if (url) {
+      // 记下「这一格实际显示过的每一张画面」的指纹（自测/自检用：pics 长度 = 逐笔帧数）
+      var h = 0;
+      for (var k = 0; k < url.length; k += 97) h = (h * 31 + url.charCodeAt(k)) | 0;
+      var fp = url.length + ':' + h;
+      if (!a.pics) a.pics = [];
+      if (a.pics[a.pics.length - 1] !== fp) a.pics.push(fp);
+      a.steps = (a.steps | 0) + 1;      // 这一格「又长出新笔」的次数（逐笔动画的硬指标）
+      crShowImage(url);
+    }
+  }
+
+  /** 把一张图（或空）摆到画布层中间那一格 */
+  function crShowImage(url) {
+    var layer = $('#chainCanvasLayer');
+    if (layer) layer.classList.remove('hidden');
+    var img = $('#chainCanvasImg');
+    if (!img) return;
+    if (url) {
+      img.src = url;
+      img.classList.remove('hidden');
+    } else {
+      img.removeAttribute('src');
+      img.classList.add('hidden');
+    }
   }
 
   function isChainVote() { return !!(S.game && S.game.phase === 'chain_vote'); }
@@ -8935,6 +9487,24 @@
     var f = S.game && S.game.myFav;
     var chain = S.chainReveal && S.chainReveal[ci];
     return !!(f && chain && f.chainId === chain.chainId && f.step === si);
+  }
+
+  /** 我一共给几条链投过 ♥（v12 是「一人 × 每条链一票」）。
+   *  服务端字段名是 favVotedCount；老名字 myFavCount 也认；都没有就从 myFavMap 数。 */
+  function favVotedCountOf(g) {
+    if (!g) return 0;
+    var v = g.favVotedCount;
+    if (typeof v !== 'number' || !isFinite(v)) v = g.myFavCount;
+    if (typeof v === 'number' && isFinite(v)) return Math.max(0, v | 0);
+    var m = g.myFavMap;
+    if (m && typeof m === 'object') { try { return Object.keys(m).length; } catch (e) { return 0; } }
+    return 0;
+  }
+
+  /** 这条链上我投过 ♥ 没有（只认服务端的 myFav，投过就高亮/标「已投」） */
+  function chainFavMine(chain) {
+    var f = S.game && S.game.myFav;
+    return !!(f && chain && f.chainId === chain.chainId);
   }
 
   /** 投票区（只在 VOTE 阶段出现）：当前链的「起词 → 最后猜出来的词」+ √ / × + 已投人数 */
@@ -8974,21 +9544,37 @@
     }
 
     // 「最喜欢的一张画」：画格现在铺在主画布上（层不吃指针），
-    // 所以 ♥ 按钮挪到这条横条里，只当前格是画的时候才露出来
+    // 所以 ♥ 按钮挪到这条横条里，只当前格是画的时候才露出来。
+    // ★ v12：♥ 是**按链**记的 —— 每条链各能投一次。这里只看「当前这条链」投过没有
+    //   （S.game.myFav 就是服务端按当前链给的），投过就高亮 + 标「已投」。
     var favBtn = $('#rpFavBtn');
     var item = chain.steps && chain.steps[S.cr.item];
     var canFav = !!(item && item.type === 'DRAWING' && Array.isArray(item.content) && item.content.length);
     if (favBtn) {
       favBtn.classList.toggle('hidden', !canFav);
       var mine = canFav && isMyFav(S.cr.chain, S.cr.item);
-      favBtn.textContent = mine ? '♥ 已选这张' : '♡ 最喜欢这张';
+      var chainVoted = chainFavMine(chain);
+      favBtn.textContent = mine ? '♥ 已投 · 这张' : '♡ 最喜欢这张';
       favBtn.classList.toggle('primary', !!mine);
+      favBtn.classList.toggle('voted', !!mine);
+      favBtn.title = chainVoted
+        ? '这条链你已经投过 ♥ 了（每条链一次，可以再挑别的链）'
+        : '把这张选为本条链里你最喜欢的画（每条链各一次）';
     }
 
+    // 我一共投过几条链（不是全场进度）—— 让人知道「还能投」。
+    // ⚠ 链长是奇数时最后一格是「猜词」，而 ♥ 只出现在画格上 —— 服务端把投票的棒次
+    //   钉在最后一格（要对着最终画面判「对得上吗」），所以这里只能说一句「用 ⏮ 翻到画上」，
+    //   不能自作主张把棒次挪走（那会让「起词 → 最终猜词」那行结果提前消失）。
     var favState = $('#rpFavState');
     if (favState) {
-      var total = Math.max(1, (g.players || []).filter(function (p) { return !p.spectating; }).length);
-      favState.textContent = (g.favVotedCount | 0) + '/' + total + ' 人已选出最喜欢的画';
+      var n = favVotedCountOf(g);
+      var totalChains = Number(g.chainCount);
+      if (!isFinite(totalChains) || totalChains <= 0) totalChains = (S.chainReveal || []).length;
+      var txt = '你已给 ' + n + ' 条链投过 ♥' +
+        (totalChains > 0 ? '（共 ' + totalChains + ' 条 · 每条链一次）' : '（每条链一次）');
+      if (!canFav) txt += ' · 用 ⏮ 翻到一幅画上再点 ♥';
+      favState.textContent = txt;
     }
   }
 
@@ -9009,7 +9595,8 @@
     }
   }
 
-  /** fav 票：全场最喜欢的一张画（一人一票，点同一张 = 不变） */
+  /** fav 票：本条链里我最喜欢的一张画（v12：**每条链各一票**，同一张再点 = 不变；
+   *  同一链里换一张 = 改票，服务端按 (chainId → step) 覆盖）。 */
   function sendFavVote(ci, si) {
     var g = S.game;
     var chain = S.chainReveal && S.chainReveal[ci];
@@ -9038,48 +9625,52 @@
   }
 
   /** 「一条链的小结算」（chain_score 且 voteResult.partial===true）：
-   *  不弹奖杯 —— 只在画布下方的横条里报这一条链的 √ / × 和过没过。 */
+   *  不弹奖杯 —— 把 √ / × 与过没过写进画布**下沿那条窄带**里
+   *  （以前是浮在画布上的一行，现在不占画面了）。 */
   function renderChainScoreMini() {
     var g = S.game;
-    var row = $('#chainScoreRow');
+    var score = $('#cclScore');
     var bar = $('#chainReplayBar');
-    if (!row || !bar) return;
+    if (!score || !bar) return;
     var settled = (g && g.settled) || [];
     var r = settled[settled.length - 1];
-    if (!r) { row.classList.add('hidden'); return; }
+    if (!r) { score.classList.add('hidden'); return; }
     bar.classList.remove('hidden');
-    row.classList.remove('hidden');
+    setReplayChrome(true);
+    crStopAnim();
+    crMarkExternal(false);
     setChainCtlVisible(false);
     $('#rpTitle').textContent = '结算';
     $('#rpIndex').textContent = (Math.max(1, (g.voteChainIndex | 0))) + ' / ' + (g.chainCount | 0);
     $('#rpChainHead').innerHTML = '「' + esc(r.firstWord || '（空）') + '」这条链已结算';
-    $('#rpVerdict').innerHTML = '';
-    $('#rpVerdict').classList.remove('ok', 'bad');
+    renderRpPills([]);
+    var verdict = $('#rpVerdict');
+    if (verdict) { verdict.innerHTML = ''; verdict.classList.remove('ok', 'bad'); }
     var vote = $('#rpVote');
     if (vote) vote.classList.add('hidden');
     var favBtn = $('#rpFavBtn');
     if (favBtn) favBtn.classList.add('hidden');
-    row.innerHTML = '<b>√ ' + (r.agree | 0) + ' / × ' + (r.against | 0) + '</b> ' +
+    // 画布中间那一格交给下一条链的回放（马上接上），这里只在窄带里报这一条的结果
+    crShowImage('');
+    setRpTimerVisible(false);
+    score.innerHTML = '<b>√ ' + (r.agree | 0) + ' / × ' + (r.against | 0) + '</b> ' +
       '<span class="cs-flow">' + esc(r.firstWord || '（空）') + ' → ' + esc(r.lastWord || '（空）') + '</span> ' +
       (r.won
         ? '<span class="cs-won">对上了 —— 起词人 ' + esc(r.ownerName || '某人') + ' 拿一个奖杯 🏆</span>'
         : '<span class="cs-lost">没过半，这条不算</span>');
-    // 画布上留一条首尾对照，别让视图空着（下一條链的回放马上接上）
-    showChainCanvasText((r.firstWord || '（空）') + ' → ' + (r.lastWord || '（空）'),
-      '第 ' + (g.voteChainIndex | 0) + ' 条链 · √ ' + (r.agree | 0) + ' / × ' + (r.against | 0) +
-      (r.won ? ' · 起词人拿一个奖杯' : ' · 没过半'));
-    var pills = $('#rpPills');
-    if (pills) pills.innerHTML = '';
+    score.classList.remove('hidden');
+    setChainCanvasBands('<span class="ccl-note">第 ' + (g.voteChainIndex | 0) + ' 条链已结算</span>', null);
     syncChainCanvasPad();
   }
 
-  /** 最终结算：小结算那条横条收掉，交给奖杯弹窗 */
+  /** 最终结算 / 离开小结算：那条结果收掉，交给奖杯弹窗 */
   function hideChainScoreMini() {
-    var row = $('#chainScoreRow');
-    if (row) row.classList.add('hidden');
+    var score = $('#cclScore');
+    if (score) { score.classList.add('hidden'); score.innerHTML = ''; }
   }
 
-  /** 翻一格（⏮ / ⏭ 与小点跳格共用）。播放中手动翻格后继续按节奏走 */
+  /** 翻一格（⏮ / ⏭ 与小点跳格共用）。播放中手动翻格后继续按节奏走。
+   *  ⚠ 手动翻格只是「本地看一眼」——服务端下一次下发 revealStep 时仍以它为准。 */
   function crStepItem(d) {
     var chain = S.chainReveal && S.chainReveal[S.cr.chain];
     if (!chain) return;
@@ -9093,11 +9684,10 @@
     }
     S.cr.item = next;
     SFX.play('cellReveal');
-    renderChainReveal();
-    if (S.cr.playing) crScheduleNext();
+    renderChainReveal();     // 里面已经按新格重排了节奏，别在这再排一次（会重置计时）
   }
 
-  /** 自动播放：按速度每格停一拍；到底自动停 */
+  /** 自动播放：按这一格的总时长（服务端 legHoldMs / 倍速）停一拍；到底自动停 */
   function crPlay() {
     var chain = S.chainReveal && S.chainReveal[S.cr.chain];
     if (!chain || !(chain.steps || []).length) return;
@@ -9106,13 +9696,16 @@
     if (S.cr.item >= (chain.steps || []).length - 1) S.cr.item = 0;   // 到底了就从头演
     syncRpPlayBtn();
     renderChainReveal();
-    crScheduleNext();
   }
 
   function crScheduleNext() {
     crClearTimer();
     if (!S.cr.playing) return;
-    var per = Math.max(600, 2400 / (S.cr.speed || 1));
+    var a = S.cr.anim;
+    // 服务端一般会先推进（此时这条本地定时器只是兜底）；万一服务端没跟上，
+    // 也要保证「动画演完 + 定格」至少走满这一格的总时长再翻。
+    var wait = crLegTotalMs();
+    if (a && a.finished && a.landedAt) wait = Math.max(wait, a.landedAt + crLegTotalMs() - Date.now());
     S.cr.timer = setTimeout(function () {
       if (!S.cr.playing) return;
       var chain = S.chainReveal && S.chainReveal[S.cr.chain];
@@ -9121,13 +9714,223 @@
       S.cr.item += 1;
       SFX.play('cellReveal');
       renderChainReveal();
-      crScheduleNext();
-    }, per);
+    }, crLegTotalMs());
   }
 
   function syncRpPlayBtn() {
     var b = $('#rpPlay');
     if (b) b.textContent = S.cr.playing ? '⏸ 暂停' : '▶ 播放';
+  }
+
+  /* ---- 最终结算第一步：「点赞最多的画」（v12） ----
+   *
+   * 用户明确要的**顺序**：全部链结算完（chain_score 且 voteResult.partial === false）
+   *   → ① 先在主画布上把「点赞最多的画」铺出来（一行「<作者> 画的 · N 票」）
+   *   → ② 再弹奖杯榜。
+   *
+   * 所以 ① 是个**能停住**的界面：
+   *   - 画下面有一条横条（#favBar），上面是「看奖杯榜 →」按钮；
+   *   - 同时 FAV_SHOW.autoMs 之后**自动**进奖杯榜 —— 两种路都要能用（用户特意强调的）。
+   *   - 平票（favTie）时把并列的那几幅**轮播**：每 FAV_SHOW.tieMs 换一幅，横条上点出第几幅。
+   *   - 一幅都没有（没人点 ♥）时给一句「这一局没人点 ♥」，几秒后照样进榜，绝不卡住。
+   *
+   * 渲染用的是现成能力：engine.renderStrokesPNG(strokes, '#fff') → 喂 #chainCanvasImg。
+   * 展示用静态图（不是逐笔动画）—— 结算页要的是「看清楚这幅画」，不是再看一遍过程。
+   *
+   * ⚠ 容错：favRanking 缺了就看 fav；strokes 缺了就回查 S.chainReveal；两个都没有就画不出来，
+   *   这时**跳过那一项**，不退化成「一直等在那儿」。
+   */
+  var FAV = { active: false, rows: [], idx: 0, tie: false, timer: 0, auto: 0, url: '' };
+  var FAV_SHOW = { autoMs: 7000, tieMs: 3600, emptyMs: 2600 };
+
+  /** 一项「点赞最多的画」的笔迹：优先用服务端随 fav 一起给的 strokes，
+   *  老服务端 / 假快照没带的话回查回放数据里那一格的 content。 */
+  function favRowStrokes(row) {
+    if (!row) return null;
+    if (Array.isArray(row.strokes) && row.strokes.length) return row.strokes;
+    var list = S.chainReveal || [];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].chainId !== row.chainId) continue;
+      var st = (list[i].steps || [])[row.step];
+      if (st && Array.isArray(st.content) && st.content.length) return st.content;
+    }
+    return null;
+  }
+
+  /** 从 voteResult 里挑出「要展示的那几幅」：
+   *  平票 = 并列最高票的全部；不平票 = 只有 favRanking[0]（= 用户说的那一幅）。
+   *  返回的行都带可渲染的 strokes 与「作者 / 票数」。 */
+  function favWinnerRows(vr) {
+    if (!vr) return [];
+    var rank = Array.isArray(vr.favRanking) ? vr.favRanking : [];
+    var src = rank.length ? rank : (Array.isArray(vr.fav) ? vr.fav : []);
+    var rows = [];
+    src.forEach(function (r) {
+      if (!r || (r.votes | 0) <= 0) return;
+      var st = favRowStrokes(r);
+      if (!st || !st.length) return;                    // 这一项读不到画：跳过，别摆空框
+      rows.push({
+        chainId: r.chainId, step: r.step,
+        playerName: r.playerName || r.ownerName || '某人',
+        votes: r.votes | 0, strokes: st, _png: r._png
+      });
+    });
+    if (!rows.length) return rows;
+    var top = rows[0].votes;                            // favRanking 是票数降序的
+    var tied = rows.filter(function (r) { return r.votes === top; });
+    // 平票（favTie 明确给 true，或降序表里确实并列）→ 并列的全要；否则只要第一幅
+    return (vr.favTie === true || tied.length > 1) ? tied : [rows[0]];
+  }
+
+  /** 一行说明：「<作者> 画的 · N 票」（用户指定的措辞） */
+  function favCaption(row) {
+    if (!row) return '♥ 点赞最多的画';
+    return '♥ 点赞最多的画 · <b>' + esc(row.playerName) + '</b> 画的 · <b>' + row.votes + ' 票</b>';
+  }
+
+  /** 把当前这一幅（FAV.idx）铺到主画布上，并把说明写进上下窄带 + 横条 */
+  function paintFavRow() {
+    if (!FAV.active || !FAV.rows.length) return;
+    FAV.idx = Math.max(0, Math.min(FAV.idx | 0, FAV.rows.length - 1));
+    var row = FAV.rows[FAV.idx];
+    // 一幅画只渲一次：renderStrokesPNG 是同步全尺寸的，状态同步每秒都进来，别每帧重渲
+    if (row._png === undefined) {
+      var u = '';
+      try { u = engine.renderStrokesPNG(row.strokes, '#fff'); } catch (e) { u = ''; }
+      row._png = u || '';
+    }
+    if (row._png) {
+      var img = $('#chainCanvasImg');
+      // src 没变就别重设（重设会让 <img> 闪一下白）
+      if (!img || img.classList.contains('hidden') || img.getAttribute('src') !== row._png) {
+        crShowImage(row._png);
+      }
+    } else {
+      crShowImage('');
+    }
+    FAV.url = row._png || '';
+    var layer = $('#chainCanvasLayer');
+    if (layer) layer.classList.remove('hidden');
+    setChainCanvasBands(favCaption(row), FAV.rows.length > 1
+      ? '<span class="ccl-note">平票 ' + FAV.rows.length + ' 幅并列 —— 轮播第 ' +
+        (FAV.idx + 1) + ' / ' + FAV.rows.length + ' 幅</span>'
+      : '<span class="ccl-note">全部链都已结算 —— 下面可以去看奖杯榜</span>');
+    var title = $('#favTitle');
+    if (title) title.innerHTML = favCaption(row);
+    var note = $('#favNote');
+    if (note) note.textContent = FAV.rows.length > 1 ? '平票 ' + FAV.rows.length + ' 幅（自动轮播）' : '';
+    var dots = $('#favDots');
+    if (dots) {
+      var h = '';
+      if (FAV.rows.length > 1) {
+        for (var i = 0; i < FAV.rows.length; i++) h += '<i class="fb-dot' + (i === FAV.idx ? ' on' : '') + '"></i>';
+      }
+      dots.innerHTML = h;
+    }
+    syncChainCanvasPad();
+  }
+
+  function stopFavTimers() {
+    if (FAV.timer) { clearInterval(FAV.timer); FAV.timer = 0; }
+    if (FAV.auto) { clearTimeout(FAV.auto); FAV.auto = 0; }
+  }
+
+  /** 收起这条界面（不动画布）—— 定时器、横条、圆点一起收干净 */
+  function closeFavShow() {
+    stopFavTimers();
+    FAV.active = false;
+    FAV.rows = [];
+    FAV.idx = 0;
+    FAV.tie = false;
+    FAV.url = '';
+    var bar = $('#favBar');
+    if (bar) bar.classList.add('hidden');
+    var dots = $('#favDots');
+    if (dots) dots.innerHTML = '';
+    var note = $('#favNote');
+    if (note) note.textContent = '';
+  }
+
+  /** 离开「最终结算」：连主画布上那幅画一起收掉。
+   *  ⚠ 画布层本身只在「确实没别人用它」时才收 —— 小结算（renderChainScoreMini）
+   *  还要借这一层摆结果行，先收掉的话那一行会闪一下。 */
+  function exitFavShow() {
+    if (!FAV.active) return;
+    closeFavShow();
+    var img = $('#chainCanvasImg');
+    if (img) { img.removeAttribute('src'); img.classList.add('hidden'); img.style.maxHeight = ''; }
+    setChainCanvasBands('', '');
+    var bar = $('#chainReplayBar');
+    if (!bar || bar.classList.contains('hidden')) {
+      var layer = $('#chainCanvasLayer');
+      if (layer) layer.classList.add('hidden');
+    }
+    syncChainCanvasPad();
+  }
+
+  /** 打开「点赞最多的画」。可以传一个假的 voteResult 进来（自测/控制台用），
+   *  不传就读 S.game.voteResult。返回是否真的打开了。 */
+  function openFavShow(vr) {
+    var g = S.game;
+    var res = vr || (g && g.voteResult);
+    if (!res || res.partial === true) return false;
+    closeFavShow();
+    FAV.active = true;
+    FAV.rows = favWinnerRows(res);
+    FAV.idx = 0;
+    FAV.tie = FAV.rows.length > 1;
+
+    var bar = $('#favBar');
+    if (bar) bar.classList.remove('hidden');
+    // 上一条链投票时留在下窄带里的「起词 → 最终猜词」要清掉，否则和这里的说明挤在一起
+    var verdict = $('#rpVerdict');
+    if (verdict) { verdict.innerHTML = ''; verdict.classList.remove('ok', 'bad'); }
+    hideChainScoreMini();
+    var layer = $('#chainCanvasLayer');
+    if (layer) layer.classList.remove('hidden');
+
+    if (!FAV.rows.length) {
+      // 没人点 ♥：一句话说清，然后**照样**进奖杯榜（用户要求「别卡住」）
+      crShowImage('');
+      setChainCanvasBands('<b>♥ 点赞最多的画</b> · <span class="ccl-note">这一局没人点 ♥</span>',
+        '<span class="ccl-note">没有 ♥ —— 马上进奖杯榜</span>');
+      var t = $('#favTitle');
+      if (t) t.innerHTML = '<b>♥ 点赞最多的画</b> · 这一局没人点 ♥';
+      var n = $('#favNote');
+      if (n) n.textContent = '这一局没人点 ♥';
+      var d = $('#favDots');
+      if (d) d.innerHTML = '';
+      syncChainCanvasPad();
+      FAV.auto = setTimeout(function () {
+        if (!FAV.active) return;
+        stopFavTimers();
+        openTrophy();
+      }, FAV_SHOW.emptyMs);
+      return true;
+    }
+
+    paintFavRow();
+    if (FAV.tie) {
+      FAV.timer = setInterval(function () {
+        if (!FAV.active || FAV.rows.length < 2) return;
+        FAV.idx = (FAV.idx + 1) % FAV.rows.length;
+        paintFavRow();
+      }, FAV_SHOW.tieMs);
+    }
+    FAV.auto = setTimeout(function () {
+      if (!FAV.active) return;
+      stopFavTimers();          // 自动跳之后就别再轮播了（奖杯榜已经盖在上面）
+      openTrophy();
+    }, FAV_SHOW.autoMs);
+    return true;
+  }
+
+  /** 横条上那颗「看奖杯榜 →」（点了立刻进，不用等自动那一下） */
+  function favToTrophy() {
+    if (!FAV.active) return;
+    stopFavTimers();
+    SFX.play('tap');
+    openTrophy();
   }
 
   /* ---- 奖杯结算 ---- */
@@ -9153,15 +9956,35 @@
       '<b>' + (won.length ? '🎉 ' + won.length + ' 条链安全到达终点' : '这一局全军覆没') + '</b>' +
       '<span class="tr-flow">首尾一致且多数人不反对的链，起词的人拿一个奖杯</span></div>';
 
-    // 「最喜欢的画」：独家最高票 +3，平票各 +1（分已在服务端算好，这里只展示）
+    // 「点赞最多的画」：独家最高票 +3，平票各 +1（分已在服务端算好，这里只展示）。
+    // ★ v12：这一条要**自带作者 + 票数**，还顺手放一张缩略图 ——
+    //   上面的「先亮画」那一步会被自动跳过去，奖杯榜里必须能重新看到它。
+    var favThumb = function (r) {
+      if (!r) return '';
+      var u = r._png;
+      if (u === undefined) {
+        var st = favRowStrokes(r);
+        u = '';
+        if (st && st.length) { try { u = engine.renderStrokesPNG(st, '#fff'); } catch (e) { u = ''; } }
+        r._png = u || '';
+      }
+      return u ? '<img class="tr-fav-thumb" src="' + u + '" alt="' + esc(r.playerName || '') + ' 的画">' : '';
+    };
     if (fav.length === 1) {
-      html += '<div class="tr-row won"><b>♥ 最受欢迎的画</b>' +
-        '<span class="tr-flow">' + esc(fav[0].playerName) + '（' + esc(favChainTitle(fav[0])) + '）· ' + fav[0].votes + ' 票 · +3 分</span></div>';
+      html += '<div class="tr-row won tr-fav">' + favThumb(fav[0]) +
+        '<span class="tr-flow"><b>♥ 点赞最多的画</b> · <b>' + esc(fav[0].playerName || '某人') +
+        '</b> 画的 · <b>' + (fav[0].votes | 0) + ' 票</b>（' + esc(favChainTitle(fav[0])) + '）· +3 分</span></div>';
     } else if (fav.length > 1) {
-      html += '<div class="tr-row won"><b>♥ 最受欢迎的画（平票）</b>' +
-        '<span class="tr-flow">' + fav.map(function (r) {
-          return esc(r.playerName) + '（' + esc(favChainTitle(r)) + '）';
+      html += '<div class="tr-row won tr-fav"><span class="tr-fav-thumbs">' +
+        fav.map(favThumb).join('') + '</span>' +
+        '<span class="tr-flow"><b>♥ 点赞最多的画（平票 ' + fav.length + ' 幅）</b> · ' +
+        fav.map(function (r) {
+          return '<b>' + esc(r.playerName || '某人') + '</b> 画的（' + (r.votes | 0) + ' 票）';
         }).join('、') + ' · 各 +1 分</span></div>';
+    } else {
+      // 没人点 ♥ 也要有这一条：让人知道「这个奖这一局没人拿」
+      html += '<div class="tr-row"><b>♥ 点赞最多的画</b>' +
+        '<span class="tr-flow">这一局没人点 ♥ —— 这个奖空着</span></div>';
     }
 
     var rows = '';
@@ -9509,9 +10332,12 @@
   /** 接龙相关的所有 UI 一起收起来（切模式 / 结束游戏时用） */
   function closeChainUi() {
     crClearTimer();           // 播放器的翻格定时器必须停，否则会在关掉的面板上乱翻
+    closeFavShow();           // 先收「点赞最多的画」的状态，下面 hideChainCanvas() 才会真的清画布
     ['#chainInputMask', '#chainReplayBar', '#chainLobby', '#trophyMask',
-      '#chainTask', '#chainProgress', '#chainCanvasLayer']
+      '#chainTask', '#chainProgress', '#favBar', '#chainCanvasLayer']
       .forEach(function (id) { var el = $(id); if (el) el.classList.add('hidden'); });
+    paintGroupLine('#clGroups', '');
+    paintGroupLine('#cpGroups', '');
     hideChainScoreMini();
     hideChainCanvas();
     S.chainTask = null;
@@ -9521,6 +10347,8 @@
     S.cr.chain = 0;
     S.cr.chainId = '';
     S.cr.item = 0;
+    S.cr.serverStep = null;      // 下一局的回放游标从服务端重新拿
+    crStopAnim();
   }
 
   /* ---- 接龙状态应用 ---- */
@@ -9539,6 +10367,7 @@
       S.cr.chainId = '';
       S.cr.item = 0;
       S.cr.playing = false;
+      S.cr.serverStep = null;
       hideChainReplayBar();
       hideChainScoreMini();
     }
@@ -9554,22 +10383,27 @@
       hideChainReplayBar();
     }
 
-    // 结算（两条路：一条链的小结算就地在横条上说；全部结算完才弹奖杯）
+    // 结算（三条路：一条链的小结算就地在横条上说；全部结算完**先亮画**、再进奖杯榜）
     if (phase === 'chain_score') {
       var partial = !!(g.voteResult && g.voteResult.partial === true);
       if (partial) {
         // 小结算：只有这一条链的结果，别弹奖杯挡住下一条链的回放
         closeTrophy();
+        exitFavShow();
         hideChainScoreMini();
         renderChainScoreMini();
       } else {
-        hideChainReplayBar();     // 最终结算交给奖杯弹窗
+        hideChainReplayBar();     // 最终结算：主画布交给「点赞最多的画」
         hideChainScoreMini();
-        if (prevPhase !== 'chain_score') openTrophy();
+        // ★ 用户要的顺序：全部链结算完 → 先亮「点赞最多的画」→ 再弹奖杯榜。
+        //   奖杯榜要等「看奖杯榜 →」（#favToTrophy）或 FAV_SHOW.autoMs 之后的自动跳 —— 两种都能用。
+        if (!FAV.active) openFavShow(g.voteResult);
+        else paintFavRow();       // 卡在结算里反复同步时，兜一下画面（不重开、不重置计时）
       }
     } else {
       closeTrophy();
       hideChainScoreMini();
+      exitFavShow();
     }
 
     // 输入框只在猜词阶段开着
@@ -11010,6 +11844,26 @@
   }
 
   /** 快捷条折行 / 收起 / 自定义显隐都会变高 —— HUD 和回合卡挂在它下面，得跟着挪 */
+  /** 回放 / 投票开着的时候，把画布上沿那两条常驻浮层压小：
+   *  快捷条收成一个小箭头（省下上百 px），HUD 只留「阶段+倒计时 / 结束游戏 / 计分」。
+   *  用户自己的快捷条展开状态记在 S.cr.qbWasOpen 里，回放一结束就恢复。
+   *  —— 这是「面板不占画面」的关键：不然上窄带只能一路被顶到画面中间。 */
+  function setReplayChrome(on) {
+    var stage = $('#stage');
+    if (stage) stage.classList.toggle('replay-chrome', !!on);
+    var open = false;
+    var bar = $('#quickBar');
+    if (bar) open = !bar.classList.contains('collapsed');
+    if (on) {
+      if (S.cr.qbWasOpen === null || S.cr.qbWasOpen === undefined) S.cr.qbWasOpen = open;
+      if (open) setQuickBarCollapsed(true, false);
+    } else if (S.cr.qbWasOpen !== null && S.cr.qbWasOpen !== undefined) {
+      if (S.cr.qbWasOpen && bar && bar.classList.contains('collapsed')) setQuickBarCollapsed(false, false);
+      S.cr.qbWasOpen = null;
+    }
+    syncQbH();
+  }
+
   function syncQbH() {
     var bar = $('#quickBar');
     if (!bar) return;
@@ -12642,6 +13496,14 @@
     crPlay: crPlay, crStepItem: crStepItem,
     favCurrentItem: favCurrentItem, endChainGame: endChainGame,
     openTrophy: openTrophy, closeTrophy: closeTrophy,
+    // 最终结算第一步「点赞最多的画」：给测试/控制台喂假 voteResult 的入口
+    openFavShow: openFavShow, closeFavShow: closeFavShow, paintFavRow: paintFavRow,
+    favWinnerRows: favWinnerRows, favToTrophy: favToTrophy, favState: function () { return FAV; },
+    // 分组（v12）：纯函数 + 两个渲染入口，测试可以直接喂假快照
+    chainGroupInfo: chainGroupInfo, expectedGroupCount: expectedGroupCount,
+    groupTextLobby: groupTextLobby, groupTextHud: groupTextHud,
+    favVotedCountOf: favVotedCountOf,
+    renderChainLobby: renderChainLobby, renderChainProgress: renderChainProgress,
     setGameDialogMode: setGameDialogMode,
     // 三合一开局面板：渲染 / 组装 payload / 结束本局（测试与控制台用）
     renderGameDialog: renderGameDialog, gameSetupPayload: gameSetupPayload,

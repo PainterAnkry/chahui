@@ -2690,26 +2690,30 @@ body.panel-dragging * { cursor: grabbing !important; }
    题面面板、链条进度、写词输入、回放投票、奖杯结算
    ========================================================================== */
 
-/* ---- 我这一步的题面（写词候选 / 要画的词 / 要猜的那幅画）---- */
+/* ---- 我这一步的题面（写词候选 / 要画的词 / 要猜的那幅画）----
+   用户问题 1：这块以前是左下角 232px 的小卡片，画布一窄就压在画上。
+   现在压成**画布下沿的一条窄条**（半透明白底 + 毛玻璃，≤ 140px 高、可折叠），
+   只放必要信息（这一步是什么 / 词或候选 / 提交按钮），画面主体留空。 */
 .chain-task {
   position: absolute;
-  left: 12px;
-  bottom: 12px;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
   z-index: 34;
-  width: 232px;
-  max-width: 40vw;
-  background: rgba(255, 255, 255, .97);
+  max-height: 138px;
+  overflow: auto;
+  background: rgba(255, 255, 255, .86);
   border: 1px solid #d5dce6;
   border-radius: 12px;
-  box-shadow: 0 6px 20px rgba(20, 30, 50, .14);
-  overflow: hidden;
+  box-shadow: 0 6px 20px rgba(20, 30, 50, .12);
+  backdrop-filter: blur(6px);
 }
 .chain-task .ct-head {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 8px 6px 11px;
-  background: var(--accent-soft);
+  padding: 3px 8px 3px 11px;
+  background: rgba(238, 244, 253, .8);
   border-bottom: 1px solid var(--accent-line);
 }
 .chain-task .ct-step {
@@ -2717,7 +2721,13 @@ body.panel-dragging * { cursor: grabbing !important; }
   font-size: 12.5px;
   color: var(--accent);
 }
-.chain-task .ct-body { padding: 10px 11px 12px; }
+.chain-task .ct-body {
+  padding: 6px 11px 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
 .chain-task.collapsed .ct-body { display: none; }
 
 .ct-word {
@@ -2744,42 +2754,51 @@ body.panel-dragging * { cursor: grabbing !important; }
   font-weight: 600;
   padding: 6px 0;
 }
-.ct-choices { display: flex; flex-direction: column; gap: 6px; }
+/* 候选词：窄条里**横着排**（以前是竖着的一列，会把条撑高） */
+.ct-choices { display: flex; flex-direction: row; flex-wrap: wrap; gap: 6px; }
 .ct-choice {
   text-align: left;
-  padding: 7px 10px;
+  padding: 5px 10px;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--panel-2);
   cursor: pointer;
+  white-space: nowrap;
 }
 .ct-choice:hover { border-color: var(--accent-line); background: var(--accent-soft); }
+/* 窄条里的整行说明 / 提交按钮也压小一号 */
+.chain-task .ct-note { font-size: 11px; line-height: 1.5; }
+.chain-task .ct-word { display: inline-block; margin: 0; }
+.chain-task .ct-done { padding: 0; }
+.chain-task .ct-submit { margin-left: auto; }
 
-/* ---- 链条进度（每条链走到第几格，不含内容）---- */
+/* ---- 链条进度（每条链走到第几格，不含内容）----
+   同样压成右上角的小窗 + 半透明，不往画面中央去 */
 .chain-progress {
   position: absolute;
-  right: 12px;
-  bottom: 12px;
+  right: 8px;
+  bottom: 8px;
   z-index: 33;
-  width: 208px;
-  max-height: 40vh;
+  width: 186px;
+  max-height: 30vh;
   overflow: auto;
-  background: rgba(255, 255, 255, .95);
+  background: rgba(255, 255, 255, .86);
   border: 1px solid #d5dce6;
   border-radius: 12px;
   box-shadow: 0 6px 20px rgba(20, 30, 50, .1);
+  backdrop-filter: blur(5px);
 }
 .chain-progress .cp-head {
-  padding: 6px 11px;
-  font-size: 11.5px;
+  padding: 4px 10px;
+  font-size: 11px;
   font-weight: 600;
   color: var(--text-dim);
   border-bottom: 1px solid var(--line-soft);
   position: sticky;
   top: 0;
-  background: rgba(255, 255, 255, .97);
+  background: rgba(255, 255, 255, .92);
 }
-.chain-progress .cp-list { padding: 6px 8px 8px; }
+.chain-progress .cp-list { padding: 4px 6px 6px; }
 .cp-row {
   display: flex;
   align-items: center;
@@ -2991,6 +3010,32 @@ body.panel-dragging * { cursor: grabbing !important; }
 .cl-ready { width: 100%; }
 .cl-hint { font-size: 11px; color: var(--text-dim); margin-top: 6px; }
 
+/* 分组说明（v12）：大厅里那一行「N 人分成 M 组…你在第 X 组」。
+   只在**多组**（7 人以上）时露出来；1 组时节点一直 hidden —— 免得给人添噪音。 */
+.cl-groups {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  background: var(--panel-2);
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  padding: 5px 7px;
+  margin-bottom: 8px;
+}
+.cl-groups b { color: var(--accent); }
+.cl-groups.hidden { display: none; }
+
+/* 进度面板里那一行「你在第 X / Y 组 · 本组 N 人」 */
+.cp-groups {
+  padding: 4px 10px 5px;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--line-soft);
+}
+.cp-groups b { color: var(--accent); }
+.cp-groups.hidden { display: none; }
+
 /* 进度点上「现在这一格」：呼吸一下，一眼看出全场在第几手 */
 .cp-dot.now { background: var(--text); animation: cpNow 1.2s ease-in-out infinite; }
 @keyframes cpNow {
@@ -3061,6 +3106,18 @@ body.panel-dragging * { cursor: grabbing !important; }
   100% { transform: scale(1); }
 }
 
+/* 回放 / 投票开着时（stage.replay-chrome，见 app.js 的 setReplayChrome）：
+   把画布上沿那两条常驻浮层压到最小 —— 快捷条只留小箭头，HUD 只留
+   「阶段 + 倒计时 / 结束游戏 / 计分」。上窄带于是能贴到很靠上的位置，
+   中间那一格画面拿到尽可能多的高度。 */
+#stage.replay-chrome #gameHud .gh-word,
+#stage.replay-chrome #gameHud .gh-round,
+#stage.replay-chrome #gameHud #ghScore,
+#stage.replay-chrome #gameHud #ghSound,
+#stage.replay-chrome #gameHud .gh-vol,
+#stage.replay-chrome #gameHud #ghNext { display: none; }
+#stage.replay-chrome #gameHud { gap: 8px; padding: 4px 10px; }
+
 /* 尊重系统的「减少动态效果」偏好 —— 前庭敏感的人看连续滑动会不适 */
 @media (prefers-reduced-motion: reduce) {
   .rp-in, .rp-vote .btn.pulse, .cp-dot.now { animation: none !important; }
@@ -3096,6 +3153,19 @@ body.panel-dragging * { cursor: grabbing !important; }
 .tr-row .tr-flag { font-size: 11.5px; }
 .tr-row.won .tr-flag { color: var(--ok); font-weight: 600; }
 .tr-row.lost .tr-flag { color: var(--danger); }
+/* 「点赞最多的画」那一行：缩略图 + 作者 + 票数（平票时缩略图并排几个） */
+.tr-row.tr-fav { align-items: center; }
+.tr-fav-thumbs { display: flex; gap: 4px; flex: none; }
+.tr-fav-thumb {
+  width: 58px;
+  height: 42px;
+  object-fit: contain;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  flex: none;
+}
+.tr-row.tr-fav .tr-flow { white-space: normal; }
 
 /* ---- 玩法切换（你画我猜 / 接龙） ---- */
 .seg {
@@ -3515,54 +3585,96 @@ body.panel-dragging * { cursor: grabbing !important; }
   z-index: 11;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 14px 14px 108px;   /* 底部留出横条的位置，JS 按横条实测高度改写 */
+  align-items: stretch;
+  /* 上窄带贴顶、下窄带贴底，中间的画吃掉剩下的全部高度 */
+  justify-content: flex-start;
+  gap: 4px;
+  /* 上边留出快捷条 + #gameHud 的位置（两者都是 absolute，层看不见它们的实际高度，
+     所以这里用一个宽松的常数 —— 宁可窄一点，也不让窄带钻到 HUD 底下） */
+  padding: 78px 12px 10px;
   overflow: hidden;
   pointer-events: none;       /* 不吃指针：不影响作画，也不抢画布上的操作 */
 }
-.chain-canvas-layer .ccl-tag {
+
+/* ---- 上 / 下两条窄带（回放的「上：谁画了什么」「下：谁猜的是什么」）----
+   固定 38px 高、一行不折行、半透明白底 —— 是 flex 列里的固定行，
+   中间的 <img> 用 flex:1 只吃剩下的高度，所以**永远不会被这两条压住**。 */
+.chain-canvas-layer .ccl-band {
   flex: none;
-  font-size: 12px;
-  color: var(--text-dim);
-  background: rgba(255, 255, 255, .94);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 12px;
+  font-size: 13px;
+  color: var(--text);
+  background: rgba(255, 255, 255, .82);
   border: 1px solid var(--line-soft);
-  border-radius: 12px;
-  padding: 3px 10px;
-  max-width: 100%;
+  border-radius: 10px;
+  backdrop-filter: blur(5px);
+  overflow: hidden;
+}
+.chain-canvas-layer .ccl-band.hidden { display: none; }
+.chain-canvas-layer .ccl-band .ccl-text {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.chain-canvas-layer .ccl-band .ccl-text b {
+  color: var(--accent);
+  font-weight: 600;
+}
+.chain-canvas-layer .ccl-band .ccl-text .ccl-w {
+  font-weight: 600;
+  letter-spacing: 1px;
+}
+.chain-canvas-layer .ccl-band .spacer { flex: 0 1 auto; min-width: 6px; }
+.chain-canvas-layer .ccl-band .pick-timer { flex: none; }
+.chain-canvas-layer .ccl-band .ccl-note { color: var(--text-dim); }
+/* 走完最后一格才出现的「起词 → 最终猜词 / 这个匹配吗？/ √ ×」——
+   贴在**下沿那条窄带里**，不再另起一个浮在画面中央的面板。 */
+.chain-canvas-layer .rp-verdict {
+  flex: none;
+  margin: 0;
+  padding: 0 10px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  background: rgba(255, 255, 255, .9);
+  border: 1px solid var(--line-soft);
+  border-radius: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  flex-wrap: nowrap;
+}
+/* 「这个匹配吗？」——问句跟在 √/× 后面，不单独起一行 */
+.rp-verdict .rv-ask {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  padding-left: 8px;
+  border-left: 1px solid var(--line-soft);
+}
 .chain-canvas-layer .ccl-img {
+  flex: 1 1 auto;
   min-height: 0;
   max-width: 100%;
   max-height: 100%;
+  align-self: center;
   object-fit: contain;
   background: #fff;
   border: 1px solid var(--line);
   border-radius: 8px;
   box-shadow: 0 10px 30px rgba(20, 30, 50, .16);
 }
-.chain-canvas-layer .ccl-text {
-  min-height: 0;
-  max-width: 100%;
-  text-align: center;
-  font-size: clamp(22px, 4.6vw, 54px);
-  font-weight: 600;
-  letter-spacing: 3px;
-  line-height: 1.3;
-  color: var(--text);
-  word-break: break-word;
-  overflow-wrap: anywhere;
-  background: rgba(255, 255, 255, .94);
-  border: 1px solid var(--line-soft);
-  border-radius: 14px;
-  padding: 14px 22px;
-}
+/* 空占位（老节点，永远 hidden 且为空）：画布上不再有任何大字 */
+.chain-canvas-layer .ccl-empty { display: none; }
 
-/* ---- 底部横条（猜词输入 / 回放控制 / 投票 / 小结算）---- */
+/* ---- 底部横条（猜词输入 / 回放控制 / 投票）----
+   都是「贴边悬浮」的窄条：半透明白底 + 毛玻璃，只放必要信息，不占画面中央。 */
 .chain-bar {
   position: absolute;
   left: 0;
@@ -3573,9 +3685,9 @@ body.panel-dragging * { cursor: grabbing !important; }
   flex-direction: column;
   gap: 6px;
   padding: 8px 12px 10px;
-  max-height: 46vh;
+  max-height: 30vh;
   overflow-y: auto;
-  background: rgba(255, 255, 255, .97);
+  background: rgba(255, 255, 255, .88);
   border-top: 1px solid var(--accent-line);
   box-shadow: 0 -6px 22px rgba(20, 30, 50, .12);
   backdrop-filter: blur(6px);
@@ -3620,18 +3732,76 @@ body.panel-dragging * { cursor: grabbing !important; }
 }
 .chain-bar .ci-preview { margin-top: 0; min-height: 0; white-space: nowrap; }
 
-/* 回放条里的首尾对照 / 投票行：去掉弹窗时代的上下留白 */
-.chain-bar .cb-row.second > .rp-verdict { flex: 1 1 auto; margin-bottom: 0; padding: 7px 10px; }
+/* ---- 回放控制条：矮、半透明、可折叠 ----
+   画面本体在 #chainCanvasLayer 里，这条只放控制（播放 / 翻格 / 速度 / 投票按钮），
+   所以压到 ~40px 高、底色半透明 —— 就算它贴着画布下沿，也不糊住画。 */
+.chain-bar.rp-bar {
+  gap: 4px;
+  padding: 5px 10px 7px;
+  max-height: 22vh;
+  background: rgba(255, 255, 255, .82);
+  box-shadow: 0 -4px 16px rgba(20, 30, 50, .10);
+  backdrop-filter: blur(6px);
+}
+.chain-bar.rp-bar .cb-title { font-size: 12px; }
+/* 折起来：只剩把词条那一行按钮（40px 上下），画面又长高一截 */
+.chain-bar.rp-bar.folded { padding: 4px 10px 5px; }
+.chain-bar.rp-bar.folded .cb-row:not(:first-child) { display: none; }
+.chain-bar.rp-bar.folded #rpTitle,
+.chain-bar.rp-bar.folded #rpIndex,
+.chain-bar.rp-bar.folded #rpChainHead,
+.chain-bar.rp-bar.folded #rpPills { display: none; }
+/* 投票 / 小结算行是**折叠也必须在**的（那是要点的按钮，藏了就没法投票） */
+.chain-bar.rp-bar.folded .cb-row.rp-vote { display: flex; }
+.chain-bar.rp-bar.folded #rpFold { transform: rotate(-90deg); }
+
+/* 回放条里那一行结果：已挪进画面下沿的窄带（见 .chain-canvas-layer .rp-verdict），
+   这里只留一条兜底 —— 万一它还在条里，也别撑高。 */
+.chain-bar .rp-verdict { flex: 1 1 auto; margin: 0; padding: 3px 10px; }
+
+/* 回放条里的投票行：去掉弹窗时代的上下留白 */
 .chain-bar .rp-vote { padding-top: 0; flex-wrap: wrap; }
 .chain-bar .rp-vote .btn { min-width: 46px; }
 .chain-bar .rp-fav-state { margin-left: 0; }
 
-/* 小结算：这一条链的 √ / × 与「起词人有没有拿到奖杯」 */
-.chain-score-row { font-size: 13px; }
-.chain-score-row b { font-family: var(--mono); }
-.chain-score-row .cs-won { color: var(--ok); font-weight: 600; }
-.chain-score-row .cs-lost { color: var(--danger); font-weight: 600; }
-.chain-score-row .cs-flow { color: var(--text-dim); }
+/* ---- 最终结算第一步：「点赞最多的画」那条横条 ----
+   画面本体铺在主画布上（#chainCanvasLayer 中间那一格），这条只放
+   「平票轮播的圆点 + 作者/票数 + 看奖杯榜 →」。
+   ⚠ 它必须参与 syncChainCanvasPad() 的下沿留白计算，否则会压住画。 */
+.chain-bar.fav-bar {
+  gap: 4px;
+  padding: 6px 10px 8px;
+  max-height: 18vh;
+  background: rgba(255, 255, 255, .86);
+  box-shadow: 0 -4px 16px rgba(20, 30, 50, .10);
+  backdrop-filter: blur(6px);
+}
+.fav-bar .fb-dots { display: inline-flex; align-items: center; gap: 4px; }
+.fb-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #cfd6e0;
+  display: inline-block;
+}
+.fb-dot.on { background: var(--accent); }
+.fav-bar .fb-note { font-size: 11.5px; color: var(--text-dim); white-space: nowrap; }
+.fav-bar .cb-title { font-size: 12.5px; }
+.fav-bar .cb-title b { color: var(--text); }
+
+/* 小结算：这一条链的 √ / × 与「起词人有没有拿到奖杯」。
+   它现在挂在画布**下沿那条窄带**里（#cclScore），不再单独占一条横条。 */
+.chain-score-row,
+.ccl-score { font-size: 12.5px; }
+.chain-score-row b,
+.ccl-score b { font-family: var(--mono); }
+.chain-score-row .cs-won,
+.ccl-score .cs-won { color: var(--ok); font-weight: 600; }
+.chain-score-row .cs-lost,
+.ccl-score .cs-lost { color: var(--danger); font-weight: 600; }
+.chain-score-row .cs-flow,
+.ccl-score .cs-flow { color: var(--text-dim); }
+.ccl-score.hidden { display: none; }
 
 /* 底部横条一出现，原本贴底的浮层得让位 —— 不然会被压在横条底下点不到 */
 .stage.chain-bar-on .chain-task,
@@ -3649,5 +3819,8 @@ body.chain-bar-on .toast-wrap { bottom: calc(var(--cb-h, 104px) + 60px); }
   .chain-bar .cb-head { max-width: 62vw; }
   .chain-bar .ci-custom { flex-basis: 200px; }
   .chain-canvas-layer { padding-left: 8px; padding-right: 8px; }
+  /* 窄屏上沿更挤：窄带压到 32px，HUD 那一截留白也收一点 */
+  .chain-canvas-layer { padding-top: 70px; }
+  .chain-canvas-layer .ccl-band { height: 32px; font-size: 12px; padding: 0 9px; }
 }
 

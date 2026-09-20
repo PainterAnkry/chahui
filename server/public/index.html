@@ -510,6 +510,9 @@
     <div class="chain-lobby hidden" id="chainLobby">
       <div class="cl-head">接龙大厅 · <span id="clCount">0 人</span></div>
       <div class="cl-players" id="clPlayers"></div>
+      <!-- 分组说明（v12）：7 人以上会分成几组、各自传各自的链。
+           1 组（4~6 人）时这一行**永远 hidden** —— 等于没有分组，不出声。 -->
+      <div class="cl-groups hidden" id="clGroups"></div>
       <button class="btn primary cl-ready" id="btnChainReady">准备</button>
       <div class="cl-hint" id="clHint"></div>
     </div>
@@ -517,6 +520,7 @@
     <!-- 接龙：进度（第几手 / 几人交卷，不含内容） -->
     <div class="chain-progress hidden" id="chainProgress">
       <div class="cp-head">链条进度</div>
+      <div class="cp-groups hidden" id="cpGroups"></div>
       <div class="cp-list" id="cpList"></div>
     </div>
 
@@ -536,14 +540,16 @@
       </div>
     </div>
 
-    <!-- 接龙：回放 / 投票 / 小结算的底部横条（画面本体在主画布上的 #chainCanvasLayer 里）。
-         跨链由服务端说了算（voteChainId），所以这里没有「上一条 / 下一条链」的箭头。 -->
-    <div class="chain-bar wide hidden" id="chainReplayBar">
+    <!-- 接龙：回放 / 投票 / 小结算的贴底控制条（画面本体在主画布上的 #chainCanvasLayer 里，
+         上/下两行说明在画布上沿/下沿的两条窄带里 —— 见 #chainCanvasLayer）。
+         跨链由服务端说了算（voteChainId），所以这里没有「上一条 / 下一条链」的箭头。
+         这一条**只放控制**（播放 / 翻格 / 速度 / 投票按钮），所以做得矮、半透明、可折叠。 -->
+    <div class="chain-bar wide rp-bar hidden" id="chainReplayBar">
       <div class="cb-row">
+        <button class="mini" id="rpFold" title="收起 / 展开这条控制条（画面会变大）">▾</button>
         <b class="cb-title" id="rpTitle">回放</b>
         <b class="cb-index" id="rpIndex">1 / 1</b>
         <span class="cb-head" id="rpChainHead"></span>
-        <span class="pick-timer" id="rpTimer">--</span>
         <span class="spacer"></span>
         <span class="rp-pills" id="rpPills"></span>
         <button class="mini" id="rpPrevItem" title="上一步">⏮</button>
@@ -557,9 +563,6 @@
         </select>
         <button class="btn primary hidden" id="btnRpNext">立刻结算</button>
       </div>
-      <div class="cb-row second">
-        <div class="rp-verdict" id="rpVerdict"></div>
-      </div>
       <div class="cb-row second rp-vote hidden" id="rpVote">
         <b class="cb-ask" id="rpVoteHint">这两个匹配吗？</b>
         <button class="btn ghost" id="rpVoteBad">×</button>
@@ -568,7 +571,20 @@
         <button class="mini hidden" id="rpFavBtn">♡ 最喜欢这张</button>
         <span class="rp-fav-state" id="rpFavState"></span>
       </div>
-      <div class="cb-row second chain-score-row hidden" id="chainScoreRow"></div>
+    </div>
+
+    <!-- 接龙：最终结算的**第一步** —— 「点赞最多的画」。
+         用户要的顺序：全部链结算完 → 先在主画布上把这幅画铺出来（一行「<作者> 画的 · N 票」）
+         → 再弹奖杯榜。所以这一条就是那个「画下面的按钮」：可以点，也可以等几秒自动跳。
+         平票时 #favDots 显示几个点，画面按 FAV_SHOW.tieMs 轮播。 -->
+    <div class="chain-bar fav-bar hidden" id="favBar">
+      <div class="cb-row">
+        <b class="cb-title" id="favTitle">♥ 点赞最多的画</b>
+        <span class="fb-dots" id="favDots"></span>
+        <span class="spacer"></span>
+        <span class="fb-note" id="favNote"></span>
+        <button class="btn primary" id="favToTrophy">看奖杯榜 →</button>
+      </div>
     </div>
 
   <div class="canvas-wrap" id="canvasWrap">
@@ -581,12 +597,29 @@
     </div>
 
     <!-- 接龙：把「这一格」摊在主画布上的一层。
-         猜词时放上家那幅画、回放时放当前格（画用 img，词用大字文本）。
-         只在接龙的猜词 / 回放 / 投票 / 小结算显示；层本身不吃指针事件，不挡作画。 -->
+         猜词时放上家那幅画；回放时**中间只放画**，说明文字一律走上下两条窄带（各 38px）：
+           上带 =「<作者> 画了：<题面词>」+ 倒计时 + 把词条折起来的小按钮
+           下带 =「<下一格的人> 猜的是：<词>」+ 回放控制条（播放 / 翻格 / 速度，可折叠）
+         两条带是 #chainCanvasLayer 这个 flex 列里的固定行，中间的 <img> 只占剩下的空间 ——
+         所以面板**物理上不可能压住画面**（不是靠 z-index 或留白碰运气）。
+         层本身 pointer-events:none，不吃指针、不影响作画。 -->
     <div class="chain-canvas-layer hidden" id="chainCanvasLayer">
-      <div class="ccl-tag hidden" id="chainCanvasTag"></div>
+      <div class="ccl-band ccl-top" id="cclTop">
+        <span class="ccl-text" id="cclTopText"></span>
+        <span class="pick-timer" id="rpTimer">--</span>
+      </div>
       <img class="ccl-img hidden" id="chainCanvasImg" alt="这一格的画">
-      <div class="ccl-text hidden" id="chainCanvasText"></div>
+      <div class="ccl-band ccl-bottom" id="cclBottom">
+        <span class="ccl-text" id="cclBottomText"></span>
+        <span class="ccl-score hidden" id="cclScore"></span>
+        <span class="spacer"></span>
+        <span class="rp-verdict" id="rpVerdict"></span>
+      </div>
+      <!-- 起词格以前会在这里挂一行大字（#chainCanvasText），现在词一律走上下窄带。
+           这两个节点保留成**永远空的占位**：老代码里的 showChainCanvasText 还认它，
+           但内容永远为空、且一直 hidden —— 画布上不会再出现任何文字。 -->
+      <div class="ccl-empty hidden" id="chainCanvasText"></div>
+      <div class="ccl-empty hidden" id="chainCanvasTag"></div>
     </div>
 
     <div class="stage-empty" id="stageEmpty">

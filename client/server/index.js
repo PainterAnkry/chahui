@@ -174,7 +174,10 @@ const server = http.createServer((req, res) => {
       // CHAIN_SCORE_MS 是「按链串行投票时，每条链的小结算展示时长」——
       // 忘了报它的话，测试没法判断端口上那台是不是自己配的那份计时。
       CHAIN_SCORE_MS: CHAIN_CFG.CHAIN_SCORE_MS,
-      GRACE_MS: CHAIN_CFG.GRACE_MS
+      GRACE_MS: CHAIN_CFG.GRACE_MS,
+      // 回放**每一格**定格时长的地板（v11）：真实每格时长 = max(它, REVEAL_MS / 链长)，
+      // 链长每局都不一样（默认 2×人数），所以这里只能报这个地板。
+      REVEAL_LEG_MS_MIN: P.GAME.CHAIN_REVEAL_LEG_MS_MIN
     },
     // 画皮的计时同理：自动化测试靠这几个值判断「端口上挂的是不是压缩计时的那个进程」。
     // 少了这一段，画皮 E2E 就只能盲跑，旧进程残留时会跑出一片假绿。

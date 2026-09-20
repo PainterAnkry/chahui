@@ -53,6 +53,10 @@ const GAME_ENV = Object.assign({}, process.env, {
   GAME_ROUND_END_MS: '800',
   // 接龙的计时：test-chain-serial.js 要把「写词 → 作画 → 猜词 → 逐链回放投票」整条流程跑完，
   // 默认（写词 60s、回放 150s、每条链一轮）一局要十几分钟。压到这里一局 ~40 秒。
+  // ⚠ v11 起 4 人房是 **8 格**（每格 = 画 + 猜），回放也是**逐格**推的：
+  //   每格 = max(CHAIN_REVEAL_LEG_MS_MIN, REVEAL_MS / 链长)，这里 = max(1500, 2500/8) = 1500ms。
+  //   test-chain-serial.js 用「房主立刻推进」快速走完回放，所以这条不影响它；
+  //   但**别把 REVEAL_MS 再往下压** —— 1500ms 是地板，压了只会更慢。
   GAME_CHAIN_INIT_MS: '1200',
   GAME_CHAIN_WRITE_MS: '3000',
   GAME_CHAIN_DRAW_MS: '4000',
@@ -101,6 +105,31 @@ let pickServer = null;
    （Cannot access 'SUITE' before initialization）。 */
 async function runAll() {
   const results = [];
+
+  /* ⚠⚠ 跑批前先看主服务端的房间数。
+     跑批会往它撞的那台服务端里**灌几十上百个测试房**（每个建房类用例一个），
+     而服务端有 `MAX_ROOMS = 400` 的上限 —— 撞上之后**新建房间会被拒**，
+     于是「建房 → 等 state.joined」的用例会成片超时失败（exit 2），
+     看起来像代码坏了，其实是环境满了。这一坑真踩过：一次跑批从 5 个失败
+     涨到 32 个，查了半天才发现是房间数打到 400。
+     所以这里先探一下，满了就吼一嗓子并直接退出，别让你对着一片红排查代码。 */
+  try {
+    const rl = await fetch(BASE + '/api/rooms').then(r => r.json());
+    const n = (rl && rl.rooms && rl.rooms.length) || 0;
+    if (n >= 380) {
+      process.stdout.write('\n[run-all] ✗ ' + BASE + ' 上已经有 ' + n + ' 个房间（上限 400）——\n'
+        + '          再建房会被服务端拒绝，跑批会成片假红。\n'
+        + '          请用**干净的存档目录**重起主服务端，例如：\n'
+        + '            $env:DATA_DIR = "$env:TEMP\\chahui-main"; $env:PORT = "8440"; node server/src/index.js\n'
+        + '          （跑批自己起的那两台 8446/8447 已经用临时目录，不用管）\n\n');
+      process.exit(2);
+    }
+    if (n >= 200) {
+      process.stdout.write('\n[run-all] ⚠ ' + BASE + ' 上已有 ' + n + ' 个房间，离上限 400 不远了 ——'
+        + '跑完这一轮建议换干净的 DATA_DIR 重起。\n');
+    }
+  } catch (e) { /* 探不到就算了，别因为这一步把跑批挡住 */ }
+
   let gameServerUp = false;
   let pickServerUp = false;
 

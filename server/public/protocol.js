@@ -50,7 +50,7 @@
  *
  * v9 变更（接龙重制 —— Draw & Guess 式的多链并行 Whisper）：
  *   - N 个玩家 = N 条并行的链：每条链以链主写的初始词为起点，沿打乱的玩家环传递，
- *     每个阶段全场并行（每人都恰好有一格）。链长可设定（3 ~ 人数，默认 = 人数）。
+ *     每个阶段全场并行（每人都恰好有一格）。链长可设定（3 ~ 2×人数，默认 = 2×人数）。
  *   - 数据结构 Round → Chains[] → Steps[]，每格 { playerId, type: WORD|DRAWING|GUESS,
  *     content, timestamp }；DRAWING 的 content = **笔迹数据**（不再是 PNG）。
  *   - 完整链条只在服务端；进回放阶段由 S2C.GAME_REVEAL **一次性**广播
@@ -68,6 +68,15 @@
  *     挂在 room.pendingGame 上、不落盘；GAME_START 成功或 GAME_STOP 之后清空。
  *   - GAME_FAST=1 时服务端所有阶段时长的**默认值**变成 1000ms（自动化测试用；
  *     收格宽限 GRACE_MS / WITCH_GRACE_MS 不变，否则超时的人反而被开后门）。
+ *
+ * v11 变更（接龙 8 步传递 + 回放棒次服务端同步）：
+ *   - 接龙的**一格归属**改成「每人连续两格」：链长默认 = **2 × 人数**，
+ *     4 人房固定 8 步 —— k=0 起词A k=1 画A k=2 猜B k=3 画B k=4 猜C k=5 画C
+ *     k=6 猜D k=7 画D（**每人猜完立刻画自己猜出来的词，然后才交给下一个人**）。
+ *   - 回放棒次改由服务端持有：GAME_STATE 新增 revealStep / revealLegs / legHoldMs，
+ *     前端不再自己定时翻页（各端时钟一抖四个人看到的就不是同一格）。
+ *   - 每一棒收完都会自检「下一棒有人接」（n 人 → n 个互不相同的 cell），
+ *     断了就打日志 + 播报 + 强制推进，绝不停在原地。
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
@@ -147,8 +156,10 @@
     //       repickLimit 夹到 [0, 5]（0 = 这一局一次都不许「换一组」）；
     //       rounds / chainLength 沿用各自原有的夹取（rounds 再按 mode 分 classic 与 skin 两套上限）。
     // 白名单：每个玩法只认自己那几个键，多出来的字段会被丢掉（见 server/src/game-prefs.js 的 pickStartOpts）。
-    // chainLength 由服务端 clampInt 夹到 [CHAIN_LENGTH_MIN, min(人数, CHAIN_LENGTH_MAX)]，
+    // **chainLength 的语义（v11）**：默认 = **2 × 人数**（每人连续两格：画自己拿到的 + 猜下一格），
+    // 服务端 clampInt 夹到 [CHAIN_LENGTH_MIN, 2 × min(人数, CHAIN_LENGTH_MAX)]，
     // 而且大厅→开局时还会跟着当时的实际人数再夹一次（有人中途进出也不会越界）。
+    //   4 人房 = 8 步：k=0 起词A k=1 画A k=2 猜B k=3 画B k=4 猜C k=5 画C k=6 猜D k=7 画D
     GAME_START: 'game:start',       // { mode?, theme?, drawSeconds?, rounds?, ... } 房主开局
     GAME_STOP: 'game:stop',         // 房主结束本局（回到自由绘画）
     // 房主的「本局预设」：他在设置面板上改任何一项就发一次（前端自己做防抖）。
@@ -167,7 +178,8 @@
                                     // （笔迹已在房间笔迹表里，服务端收格时按作者摘取）
     GAME_VOTE: 'game:vote',         // { kind:'keep', chainId, agree } 这条链首尾对得上吗
                                     // | { kind:'fav', chainId, step }  最喜欢的一张画（一人一票）
-    GAME_NEXT: 'game:next',         // 房主推进：大厅强制开局 / 跳过没交的人 / 回放→投票 / 结算
+    GAME_NEXT: 'game:next',         // 房主推进：大厅强制开局 / 跳过没交的人 /
+                                    // 回放**推进一格**（已在最后一格才进投票）/ 投票结算 / 结算
 
     // ---- 画皮（mode='skin'）----
     // 一个动作通道走完全部「玩家有主见」的操作：夜里验人 / 刀人，白天放逐投票。
@@ -212,6 +224,11 @@
     // 只有这三条是真正会发出去的。回合结算与最终排名都并进 GAME_STATE（靠 phase 变化触发），
     // 不另外开消息 —— 少一条消息就少一处「前端接了个永远不触发的 handler」。
     // GAME_STATE 是「按收件人裁剪过」的完整快照：猜手拿到的版本里没有 word 字段。
+    // chain 模式下还带三个**回放棒次**字段（v11，只有服务端说了算）：
+    //   revealStep 当前回放到第几格（0 起）。REVEAL 期间每 legHoldMs 加一；
+    //              VOTE 期间钉在最后一格（chainLength - 1）—— 投票要看最终画面。
+    //   revealLegs 总格数 = chainLength（前端拿它排进度点）。
+    //   legHoldMs  每格定格时长 = max(1500, 房主配的回放时长 / 格数)，前端按它排翻页动画。
     GAME_STATE: 'game:state',           // { game }  含 phase / wordLen / deadline / roundResult / scores
     // 房主的「本局预设」（清洗过的那一份），广播给全房间 —— 别人能看见房主选的设置。
     // 形状固定，**逐字段列全**：{ mode, theme, rounds, drawSeconds, repickLimit, roundEndSeconds,
@@ -293,19 +310,30 @@
     DRAW_SECONDS_MAX: 300,
 
     /* ---- 接龙模式（mode = 'chain'）---- v9 重制：多链并行 Whisper
-     * N 玩家 = N 条并行链，沿打乱的玩家环传递：链主写初始词 → 下家照词作画 →
-     * 再下家看画猜词 → 再下家照猜出的词作画…… 每个阶段全场并行，每链恰好传遍全场。
+     * N 玩家 = N 条并行链，沿打乱的玩家环传递。**每人连续两格**（v11）：
+     * 链主写初始词并自己画它（k=0 WORD / k=1 DRAWING）→ 下家看画猜词、再画自己
+     * 猜出来的（k=2 GUESS / k=3 DRAWING）→ 再下家…… 每个人拿到就画，画完才交棒。
+     * 所以默认链长 = **2 × 人数**（4 人房 = 8 步），每个阶段全场并行、每人恰好一格。
      */
     CHAIN_MIN_PLAYERS: 4,    // 少于 4 人链条太短，玩不出「越传越离谱」的效果
     CHAIN_MAX_PLAYERS: 16,
     CHAIN_LENGTH_MIN: 3,     // 每条链至少传 3 手（写词 → 作画 → 猜词）
-    CHAIN_LENGTH_MAX: 16,    // 上限（开局时再被人数夹一次：链长 ≤ 人数，避免传回自己）
+    // 链长上限的**双重夹取**（v11）：真实上限 = 2 × min(人数, CHAIN_LENGTH_MAX)。
+    // 「2 ×」是因为每人连续占两格（画自己拿到的 + 猜下一格，见 server/src/chain.js 的
+    // authorOffset）—— 链长 = 2×人数 时整圈正好走完，4 人房 = 用户点名的 8 步；
+    // 「min(人数, 这个常量)」是因为链比 2×人数 再长就会绕第二圈，同一格里会出现
+    // 两条链归同一个人。所以这个常量是**人数**的封顶（16 人 → 最多 32 格）。
+    CHAIN_LENGTH_MAX: 16,
     CHAIN_PICK_CHOICES: 3,   // 写初始词时给几个候选
     CHAIN_INIT_MS: 4000,     // 开场鼓点时长
     CHAIN_WRITE_MS: 60000,   // 写初始词的时限
     CHAIN_DRAW_MS: 90000,    // 作画一步的时限（房主可在开局设置里覆盖）
     CHAIN_GUESS_MS: 60000,   // 猜词一步的时限
     CHAIN_REVEAL_MS: 150000, // 回放阶段的时限（播放器可暂停 / 翻页，房主可提前推进）
+    // 回放里**每一格**定格时长的地板（v11）：服务端把「回放总时长」按格数摊开
+    // （每格 = 总时长 / 链长），再兜这个下限 —— 格数最多 32、总时长最短 3 秒，
+    // 不兜底就会「每格 90ms」闪成一片。前端拿 GAME_STATE 的 legHoldMs 排动画即可。
+    CHAIN_REVEAL_LEG_MS_MIN: 1500,
     CHAIN_VOTE_MS: 60000,    // 投票时限
     CHAIN_SCORE_MS: 20000,   // 最终结算展示时长（自动回大厅，分数保留）
     // 按链串行投票：每条链投完先亮一下「这条链过没过」再放下一条 —— 比最终结算短得多
