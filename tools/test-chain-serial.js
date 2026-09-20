@@ -217,19 +217,22 @@ async function playWholeGame(all, k0) {
     host.reveal.some(r => r.steps[0].auto === true), host.reveal.map(r => !!r.steps[0].auto));
   void words; void idleChoices;
 
-  console.log('\n[4] ★ 回放棒次（revealStep / revealLegs / legHoldMs）由服务端推');
+  console.log('\n[4] ★ 回放棒次（revealStep / revealLegs / legHoldMs / legMs）由服务端推');
   ok('★ 快照带 revealLegs = 8（总格数 = 链长）', host.game.revealLegs === 8, host.game.revealLegs);
-  ok('★ 快照带 legHoldMs ≥ 1500（每格定格时长，前端按它排动画）',
-    typeof host.game.legHoldMs === 'number' && host.game.legHoldMs >= 1500, host.game.legHoldMs);
+  ok('★ 快照带 legHoldMs ≥ 1400（当前这一格的时长，前端按它排动画）',
+    typeof host.game.legHoldMs === 'number' && host.game.legHoldMs >= 1400, host.game.legHoldMs);
+  // ★ v15：每一格的时长不再一样（起词 / 猜词格短、作画格长 + 下一格是猜词时带悬念尾）
+  ok('★ 快照带 legMs：长度 = 格数，且**每一格不是同一个数**',
+    Array.isArray(host.game.legMs) && host.game.legMs.length === host.game.revealLegs
+      && Math.max.apply(null, host.game.legMs) > Math.min.apply(null, host.game.legMs),
+    JSON.stringify(host.game.legMs));
   ok('★ 快照带 revealStep 且从 0 起', host.game.revealStep === 0, host.game.revealStep);
+  // ★ v14：回放没有手动干预（前端那排播放 / 翻格 / 倍速控件已经删掉）——
+  //   房主的「立刻推进」= 这条链不看了，直接进投票。
   host.send(P.C2S.GAME_NEXT, {});
-  ok('★ 房主推进一次只前进一格（不跳到投票）',
-    await host.waitFor(c => c.game && c.game.revealStep === 1, 4000) && host.phase() === 'chain_reveal',
+  ok('★ 房主推进 → 直接进投票（回放本身由服务端推，没有手动翻格）',
+    await host.waitFor(c => c.phase() === 'chain_vote', 5000),
     host.game.revealStep + '/' + host.phase());
-  ok('★ 到点后服务端自己把棒次往前推（不是客户端各自翻页）',
-    await host.waitFor(c => c.game && c.game.revealStep >= 2, 6000), host.game.revealStep);
-  for (let i = 0; i < 16 && host.phase() === 'chain_reveal'; i++) { host.send(P.C2S.GAME_NEXT, {}); await sleep(120); }
-  ok('★ 推到底 → 投票', host.phase() === 'chain_vote', host.phase());
   ok('★ 投票时棒次钉在最后一格（8 - 1 = 7）', host.game.revealStep === 7, host.game.revealStep);
 
   console.log('\n[5] ★ 按链串行投票 + 每条链各投一次 ♥');
@@ -258,15 +261,21 @@ async function playWholeGame(all, k0) {
       c.game.myFav.step === 1, 5000),
     all.map(c => JSON.stringify(c.game && c.game.myFav)));
 
-  all.forEach(c => c.send(P.C2S.GAME_VOTE, { kind: 'keep', chainId: gv.voteChainId, agree: true }));
-  ok('★ 全员投 √ 后已投人数 = 4',
-    await waitAll(all, c => c.game && c.game.voteDone === 4, 5000),
-    all.map(c => c.game && c.game.voteDone));
-  ok('√ 票数同步给所有人', all.every(c => c.game.voteAgree === 4), all.map(c => c.game.voteAgree));
-
-  host.send(P.C2S.GAME_NEXT, {});
-  ok('投票完 → 小结算（只带这一条链，不弹最终界面）',
+  // ★ v14：**全员投完服务端就立刻结算这条链**（不用等满投票时限）——
+  //   所以「已投 4 / 4」这个中间态只能**边投边看**：投到最后一个人之前先验一次。
+  for (let i = 0; i < all.length - 1; i++) {
+    all[i].send(P.C2S.GAME_VOTE, { kind: 'keep', chainId: gv.voteChainId, agree: true });
+  }
+  ok('★ 还没投满时已投人数按人涨（未投 = 不算）',
+    await waitAll(all, c => c.game && c.game.voteDone === 3 && c.phase() === 'chain_vote', 5000),
+    all.map(c => c.game && c.game.voteDone + '/' + c.phase()));
+  all[all.length - 1].send(P.C2S.GAME_VOTE, { kind: 'keep', chainId: gv.voteChainId, agree: true });
+  ok('★ 全员投完 → **自动**结算这条链（进 chain_score，不用点任何按钮）',
     await host.waitFor(c => c.phase() === 'chain_score', 6000), host.phase());
+  ok('★ 结算里 √ 数 = 4（全员投的就是 4 票）',
+    host.game.voteResult && host.game.voteResult.chains[0]
+      && host.game.voteResult.chains[0].agree === 4,
+    JSON.stringify(host.game.voteResult && host.game.voteResult.chains[0]));
   ok('★ 小结算 voteResult.partial = true',
     host.game.voteResult && host.game.voteResult.partial === true,
     JSON.stringify(host.game.voteResult && host.game.voteResult.partial));
@@ -283,22 +292,32 @@ async function playWholeGame(all, k0) {
 
   console.log('\n[5b] 剩下的链一条条走完 → 最终结算');
   for (let i = 2; i <= 4; i++) {
-    for (let g = 0; g < 14 && host.phase() === 'chain_reveal'; g++) { host.send(P.C2S.GAME_NEXT, {}); await sleep(120); }
+    // 回放阶段：**节流地**请房主推进（v14 一按就直接进投票 —— 连点会把投票跳过去，
+    // 所以每 2 秒最多点一次，等到真的进了 chain_vote 就停手）。
+    let lastNudge = 0;
+    for (let g = 0; g < 160; g++) {
+      if (host.phase() === 'chain_vote') break;
+      if (host.phase() === 'chain_reveal' && Date.now() - lastNudge > 2000) {
+        host.send(P.C2S.GAME_NEXT, {});
+        lastNudge = Date.now();
+      }
+      await sleep(200);
+    }
     if (!await waitAll(all, c => c.phase() === 'chain_vote', 12000)) { ok('第 ' + i + ' 条链进入投票', false, all.map(c => c.phase())); break; }
     await sleep(200);
     const cid = host.game.voteChainId;
-    all.forEach(c => c.send(P.C2S.GAME_VOTE, { kind: 'keep', chainId: cid, agree: true }));
     if (i === 2) {
       // ★ 第二条链也投一次 ♥：两条链的票必须同时留着（不是只剩最后一条）
+      //   ⚠ 必须**在 keep 之前**投：keep 一投满服务端就自动结算离开这条链了。
       all.forEach(c => c.send(P.C2S.GAME_VOTE, { kind: 'fav', chainId: cid, step: 1 }));
       ok('★★ 每条链各投一次 ♥：链 1 与链 2 的票都还在（不再被覆盖）',
         await waitAll(all, c => c.game && c.game.myFav && c.game.myFav.chainId === cid &&
           c.game.myFavStep === 1 && c.game.favVotedCount === 2, 5000),
         all.map(c => JSON.stringify({ m: c.game && c.game.myFav, n: c.game && c.game.favVotedCount })));
     }
-    await sleep(400);
-    host.send(P.C2S.GAME_NEXT, {});
-    await host.waitFor(c => c.phase() === 'chain_score', 6000);
+    // 全员投 √ → 服务端**自动**结算这条链（v14：不用等满时限，也不用房主点）
+    all.forEach(c => c.send(P.C2S.GAME_VOTE, { kind: 'keep', chainId: cid, agree: true }));
+    await host.waitFor(c => c.phase() === 'chain_score', 8000);
     if (host.game.voteChainIndex < host.game.chainCount) {
       host.send(P.C2S.GAME_NEXT, {});
       await sleep(400);
@@ -458,17 +477,21 @@ async function playWholeGame(all, k0) {
   await sleep(400);
   ok('★ 别组的人投 √ 也不进统计（已投仍是 0）', host2.game.voteDone === 0, host2.game.voteDone);
 
-  inGroup.forEach(c => c.send(P.C2S.GAME_VOTE, { kind: 'keep', chainId: curChain, agree: true }));
-  ok('★ 本组 4 人投 √ → 已投 4 / 4',
-    await waitAll(all2, c => c.game && c.game.voteDone === 4 && c.game.voteAgree === 4, 5000),
-    JSON.stringify({ d: host2.game.voteDone, a: host2.game.voteAgree }));
-
   // 本组投 ♥：链 1 的第 2 格
+  // ⚠ v14：keep 一投满服务端就自动结算离开这条链了 —— **先投 ♥ 再投 keep**。
   inGroup.forEach(c => c.send(P.C2S.GAME_VOTE, { kind: 'fav', chainId: curChain, step: 1 }));
   ok('★ 本组的 ♥ 都记在「现在这条链」上',
     await waitAll(inGroup, c => c.game && c.game.myFav && c.game.myFav.chainId === curChain &&
       c.game.myFav.step === 1, 5000),
     inGroup.map(c => JSON.stringify(c.game && c.game.myFav)));
+  inGroup.forEach(c => c.send(P.C2S.GAME_VOTE, { kind: 'keep', chainId: curChain, agree: true }));
+  ok('★ 本组 4 人投 √ → 结算里 √ = 4 / 4（投满即自动结算）',
+    await host2.waitFor(c => c.phase() === 'chain_score' && c.game.voteResult
+      && c.game.voteResult.chains[0] && c.game.voteResult.chains[0].agree === 4, 8000),
+    JSON.stringify({
+      d: host2.game.voteDone, a: host2.game.voteAgree,
+      row: host2.game.voteResult && host2.game.voteResult.chains[0]
+    }));
   ok('★ 别组的人没有 ♥ 记录（各归各的组）',
     outsider.game && (!outsider.game.myFav),
     JSON.stringify(outsider.game && outsider.game.myFav));

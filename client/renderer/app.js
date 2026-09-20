@@ -87,8 +87,18 @@
       // 逐笔动画状态：生成号 gen —— 换格时 +1，旧的帧回调 / 兜底定时器对不上就自己退出
       anim: {
         chain: -1, item: -1, gen: 1, raf: 0, tickTimer: 0, safety: 0, strokes: null, done: 0, frame: 0,
-        startAt: 0, animMs: 0, dur: 0, finished: false, landedAt: 0, framesAll: 0, pics: [], steps: 0
+        startAt: 0, animMs: 0, dur: 0, finished: false, landedAt: 0, framesAll: 0, pics: [], steps: 0,
+        // ★ v15：这一格画完之后要不要接「下一棒猜的是什么」的悬念倒计时（作画格 + 下一格是猜词）
+        tease: false
       },
+      // ★ v15：悬念倒计时的读数状态（2/1 秒各响一声，数到 1 就停在那儿等下一格）
+      teaseTimer: 0, teaseLeft: 0, teaseName: '',
+      // ★ v16：画面是不是被「接龙回放」接管了（接管时引擎的 replayCanvas = 逐笔帧画布，
+      //   回放画在真画布上；canvasPrev 记着接管前引擎原本的回放状态，退出时还回去）
+      canvasOwner: '', canvasPrev: null,
+      // 投票那排标记的记账：已见到的票数（用来判断「多了一票」→ 响一声）、
+      // 以及我自己刚投票的时刻（自己那一下已经响过 voteStamp，不再叠 voteLand）
+      voteSeen: 0, myVoteAt: 0,
       // 猜词期画布上的那幅画是猜题流程摆的（回放别去动它的词条窄带）
       externalImg: false,
       // 用户回放前快捷条是不是展开的（回放期间自动收起来，结束要还原）
@@ -6976,20 +6986,13 @@
       SFX.play('tap');
     });
 
-    /* ---- 回放播放器 + 投票 ----
+    /* ---- 回放 + 投票 ----
      * 画面在主画布上（#chainCanvasLayer），操作在贴底的 #chainReplayBar 里。
-     * 跨链由服务端说了算（voteChainId）—— 所以没有「上一条 / 下一条链」的按钮，
-     * 只有链内翻格。 */
-    $('#rpPlay').addEventListener('click', crPlay);
-    $('#rpPrevItem').addEventListener('click', function () { crStepItem(-1); });
-    $('#rpNextItem').addEventListener('click', function () { crStepItem(1); });
-    $('#rpSpeed').addEventListener('change', function () {
-      S.cr.speed = Number(this.value) || 1;
-      // 改了倍速 = 这一格的总时长变了：重排节奏，正在播的那一格按新时长继续（不重头画）
-      if (S.cr.playing) crScheduleNext();
-      renderChainReveal(true);
-    });
-    // 把控制条折起来（只剩播放 / 翻格那几颗），画面立刻长高一截
+     * 跨链由服务端说了算（voteChainId）—— 所以没有「上一条 / 下一条链」的按钮。
+     * ★ v14：**全场看同一份服务端推进的回放** —— 播放 / 暂停 / 前后翻格 / 倍速
+     *   这四颗控件连同 handler 一起删掉了（棒次跟服务端的 revealStep 走，
+     *   快慢由开局面板上的「回放倍速」在服务端侧决定）。
+     */
     $('#rpFold').addEventListener('click', function () {
       var bar = $('#chainReplayBar');
       if (!bar) return;
@@ -7002,31 +7005,9 @@
     $('#rpVoteOk').addEventListener('click', function () { voteKeep(true); });
     $('#rpFavBtn').addEventListener('click', favCurrentItem);
     $('#btnRpNext').addEventListener('click', function () { net.send(P.C2S.GAME_NEXT, {}); });
-    // 控制条里的小点：跳格（只在当前这条链内）
-    $('#rpPills').addEventListener('click', function (ev) {
-      var pill = ev.target.closest ? ev.target.closest('.rp-pill') : null;
-      if (!pill || pill.dataset.item == null) return;
-      var chain = S.chainReveal && S.chainReveal[S.cr.chain];
-      if (!chain) return;
-      var i = Number(pill.dataset.item);
-      if (!isFinite(i)) return;
-      S.cr.item = Math.max(0, Math.min(i, (chain.steps || []).length - 1));
-      S.cr.playing = false;
-      crClearTimer();
-      syncRpPlayBtn();
-      SFX.play('flip');
-      renderChainReveal();
-    });
-    // 键盘左右翻格（横条开着时才有意义）。正在输入框里打字时别抢方向键。
-    document.addEventListener('keydown', function (ev) {
-      var bar = $('#chainReplayBar');
-      if (!bar || bar.classList.contains('hidden')) return;
-      var el = ev.target;
-      var tag = el && el.tagName ? el.tagName.toUpperCase() : '';
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (el && el.isContentEditable)) return;
-      if (ev.key === 'ArrowLeft') { crStepItem(-1); ev.preventDefault(); }
-      else if (ev.key === 'ArrowRight') { crStepItem(1); ev.preventDefault(); }
-    });
+    // ★ v14：格点（#rpPills）只当**进度指示**（服务端放到第几格），点它不再跳格 ——
+    //   回放不许手动干预，所以这里没有 click handler。
+    // ★ v14：键盘左右翻格也一并删掉（回放不许手动干预，棒次由服务端推）
 
     /* ---- 奖杯结算 ---- */
     // 「点赞最多的画」横条上那颗按钮：点了立刻进奖杯榜（不用等自动那一下）
@@ -7367,8 +7348,11 @@
   function renderGameHud() {
     var hud = $('#gameHud');
     if (!hud) return;
-    if (!gameActive()) { hud.classList.add('hidden'); return; }
+    if (!gameActive()) { hud.classList.add('hidden'); setChainStrip(); return; }
     hud.classList.remove('hidden');
+    // 接龙：把 HUD 压成画布上沿的状态条（回放期间再收一次快捷条）——
+    // 状态条 ↔ 画布层的留白由 syncChainCanvasPad 按实测底边算，所以这里先摆好再量。
+    setChainStrip();
     var g = S.game;
     var chain = g.mode === 'chain';
     var skin = g.mode === 'skin';
@@ -7661,9 +7645,14 @@
     var g = S.game;
     if (g.mode === 'chain') {
       var mine = g.myStep || '';
+      // ★ 接龙每一步的说明只有一个出处：
+      //   写词 → 居中选词区；作画 → 题面卡片 + 状态条；猜词 → 输入条上方那一行。
+      //   所以这里**接龙的动手阶段一律不出声** —— 以前这条贴底提示会再说一遍
+      //   「猜词阶段 —— 要猜的画铺在画布上，输入条在下面」，正好压在画布下沿。
+      //   房主 / 观众的身份说明在上面已经提前 return 了，不受影响。
+      if (chainStepActive()) { if (el) el.remove(); return; }
       if (g.phase === 'chain_init') el.textContent = '马上开始 —— 链已排好，画布已清空';
-      else if (g.phase === 'chain_write') el.textContent = '写初始词阶段 —— 画布先留着，下一步才画';
-      else if (g.phase === 'chain_guess') el.textContent = '猜词阶段 —— 要猜的画铺在画布上，输入条在下面';
+      else if (g.phase === 'chain_guess') el.textContent = '猜词中 —— 输入条就在下面';
       else if (g.phase === 'chain_draw') el.textContent = mine === 'DRAWING' ? '轮到你作画' : '这一手不是你在画，先看着';
       else if (g.phase === 'chain_reveal') el.textContent = '回放中 —— 画布暂时不能动';
       else if (g.phase === 'chain_vote') el.textContent = '投票中 —— 画布暂时不能动';
@@ -7885,12 +7874,13 @@
   var MODE_ROWS = {
     classic: ['rowTheme', 'rowDrawTime', 'rowClassicRounds', 'rowClassicRepick', 'rowClassicRoundEnd'],
     chain: ['rowTheme', 'rowDrawTime', 'rowChainLength', 'rowChainWrite', 'rowChainGuess',
-      'rowChainReveal', 'rowVote'],
+      'rowChainReveal', 'rowChainReplaySpeed', 'rowVote'],
     skin: ['rowTheme', 'rowDrawTime', 'rowSkinRounds', 'rowSkinNight', 'rowSkinDawn',
       'rowSkinTalk', 'rowVote']
   };
   var ALL_ROWS = ['rowTheme', 'rowDrawTime', 'rowClassicRounds', 'rowClassicRepick',
     'rowClassicRoundEnd', 'rowChainLength', 'rowChainWrite', 'rowChainGuess', 'rowChainReveal',
+    'rowChainReplaySpeed',
     'rowSkinRounds', 'rowSkinNight', 'rowSkinDawn', 'rowSkinTalk', 'rowVote'];
 
   var MODE_LABEL = { classic: '你画我猜', chain: '接龙', skin: '画皮' };
@@ -7899,6 +7889,7 @@
   /** 面板里所有会写进 GAME_START / GAME_PREFS 的控件（改一个就广播一次，300ms 防抖） */
   var SETUP_CONTROL_IDS = ['gameTheme', 'gameDrawTime', 'gameRounds', 'gameRepickLimit',
     'gameRoundEndTime', 'chainLength', 'chainWriteTime', 'chainGuessTime', 'chainRevealTime',
+    'chainReplaySpeed',
     'gameSkinRounds', 'gameNightTime', 'gameDawnTime', 'gameTalkTime', 'gameVoteTime'];
 
   /* ---- 档位 / 默认值的来源：优先 /api/share ---- */
@@ -8040,19 +8031,37 @@
     }
   }
 
-  /** 链长下拉：3 ~ min(人数, 上限) + 1。人数变了要重填（见 chainLengthValue 的注释） */
+  /**
+   * 接龙的链长上限（手）。
+   *
+   * ⚠ 现在是 **2 × 人数** —— 因为「每人猜完立刻画自己猜出来的词」那一版里，
+   *   一个人要占两格（猜 + 画），链主占两格（起词 + 画），
+   *   所以「人人轮到」正好是 `2N` 手，而不是旧的 `N + 1`。
+   *   （4 人 = 8 手：A起词 → A画 → B猜 → B画 → C猜 → C画 → D猜 → D画）
+   *   服务端还会再夹一次；这里先夹是为了让下拉框里看到的即所得。
+   */
+  function chainLengthCap() {
+    var online = onlinePlayers();
+    var perPlayer = (S.shareCfg && S.shareCfg.setup && S.shareCfg.setup.chainLength
+      && S.shareCfg.setup.chainLength.perPlayer) || 2;
+    return Math.max(P.GAME.CHAIN_LENGTH_MIN,
+      Math.min(online * perPlayer, P.GAME.CHAIN_LENGTH_MAX * perPlayer));
+  }
+
+  /** 链长下拉：3 ~ 2×人数。人数变了要重填（见 chainLengthValue 的注释） */
   function buildChainLengthSelect() {
     var sel = $('#chainLength');
     if (!sel) return;
     var online = onlinePlayers();
-    var cap = Math.max(P.GAME.CHAIN_LENGTH_MIN, Math.min(online, P.GAME.CHAIN_LENGTH_MAX) + 1);
+    var cap = chainLengthCap();
+    var full = online * 2;                       // 「人人轮到」那一档，标一下
     var sig = P.GAME.CHAIN_LENGTH_MIN + '-' + cap;
     var cur = Number(sel.value) || 0;
     if (sel.dataset.sig !== sig) {
       var html = '';
       for (var i = P.GAME.CHAIN_LENGTH_MIN; i <= cap; i++) {
         html += '<option value="' + i + '">' + i + ' 手'
-          + (i === online + 1 ? '（人人轮到）' : '') + '</option>';
+          + (i === full ? '（人人轮到）' : '') + '</option>';
       }
       sel.innerHTML = html;
       sel.dataset.sig = sig;
@@ -8061,18 +8070,67 @@
   }
 
   /**
-   * 链长（夹到 [CHAIN_LENGTH_MIN, min(人数, CHAIN_LENGTH_MAX) + 1]）。
+   * 链长（夹到 [CHAIN_LENGTH_MIN, 2×人数]）。
    *
-   * ⚠ 上限是**人数 + 1**：第 0 格写词、第 1 格画自己的词，两格都是链主
-   *（见 server/src/chain.js 的 authorOffset），所以「人人轮到」是 N+1 手而不是 N 手。
+   * ⚠ 上限是**人数 × 2**：一个人要占两格（猜 + 画），链主占两格（起词 + 画），
+   *   所以「人人轮到」正好是 2N 手，而不是旧的 N + 1。
+   *   （4 人 = 8 手：A起词 → A画 → B猜 → B画 → C猜 → C画 → D猜 → D画）
    * 服务端还会再夹一次，这里先夹是为了让 UI 上看到的即所得。
    */
   function chainLengthValue() {
     var sel = $('#chainLength');
-    var online = onlinePlayers();
-    var want = Number(sel && sel.value) || (online + 1);
-    var cap = Math.max(P.GAME.CHAIN_LENGTH_MIN, Math.min(online, P.GAME.CHAIN_LENGTH_MAX) + 1);
+    var want = Number(sel && sel.value) || chainLengthCap();
+    var cap = chainLengthCap();
     return Math.max(P.GAME.CHAIN_LENGTH_MIN, Math.min(want, cap));
+  }
+
+  /* ---- 回放倍速（v14：每局设置，接龙那组里的一行）----
+   *
+   * 档位与默认值**都从服务端来**（/api/share 的 setup.replaySpeed = { speeds, default }，
+   * 由 game-prefs.js 的 setupOptions() 从协议常量推出来）—— 前端不再抄一份数字。
+   * 语义：倍速越大 → 每一格定格越短（服务端 revealLegMs() 直接除以它）。
+   */
+  function replaySpeedList() {
+    var v = shareSetup().replaySpeed;
+    var arr = v && Array.isArray(v.speeds) ? v.speeds : null;
+    if (!arr || !arr.length) arr = P.GAME.CHAIN_REPLAY_SPEEDS;
+    return arr.map(function (x) { return Number(x); }).filter(function (x) { return isFinite(x) && x > 0; });
+  }
+  function replaySpeedDefault() {
+    var v = shareSetup().replaySpeed;
+    var d = v ? Number(v.default) : NaN;
+    if (!isFinite(d) || d <= 0) d = P.GAME.CHAIN_REPLAY_SPEED_DEFAULT;
+    return d;
+  }
+  /** 「1.5x」这样的标签（1 → 「1x」，1.5 → 「1.5x」） */
+  function speedLabel(v) {
+    var n = Number(v);
+    return (isFinite(n) ? String(n) : '') + 'x';
+  }
+  /** 下拉当前值 → 倍速数值；空 / 非法 = 默认（服务端还会再夹一次） */
+  function chainReplaySpeedValue() {
+    var el = $('#chainReplaySpeed');
+    var n = Number(el && el.value);
+    if (!isFinite(n) || n <= 0) return replaySpeedDefault();
+    return replaySpeedList().indexOf(n) >= 0 ? n : replaySpeedDefault();
+  }
+  /** 按服务端给的档位重建这一行（用户选过的值保留；没选过 = 默认档） */
+  function buildReplaySpeedSelect() {
+    var sel = $('#chainReplaySpeed');
+    if (!sel) return;
+    var list = replaySpeedList();
+    var sig = list.join(',') + '@' + replaySpeedDefault();
+    if (sel.dataset.sig === sig) return;
+    var cur = Number(sel.value);
+    if (!isFinite(cur) || cur <= 0) cur = replaySpeedDefault();
+    var html = '';
+    list.forEach(function (v) {
+      html += '<option value="' + v + '">' + speedLabel(v)
+        + (v === replaySpeedDefault() ? '（默认）' : '') + '</option>';
+    });
+    sel.innerHTML = html;
+    sel.dataset.sig = sig;
+    sel.value = String(list.indexOf(cur) >= 0 ? cur : replaySpeedDefault());
   }
 
   /* ---- 开局 payload（「开始」与结算页「再来一局」共用同一份） ---- */
@@ -8081,7 +8139,7 @@
    * 按当前玩法组装 GAME_START / GAME_PREFS 的字段 —— 契约见 shared/protocol.js：
    *   mode, theme, drawSeconds                       三个玩法共用
    *   rounds, repickLimit, roundEndSeconds           你画我猜
-   *   chainLength, writeSeconds, guessSeconds, revealSeconds, voteSeconds   接龙
+   *   chainLength, writeSeconds, guessSeconds, revealSeconds, replaySpeed, voteSeconds   接龙
    *   nightSeconds, dawnSeconds, talkSeconds         画皮（投票复用 voteSeconds）
    * 秒数一律 0 = 用服务端默认。
    */
@@ -8101,6 +8159,7 @@
       p.writeSeconds = selNumTime('#chainWriteTime');
       p.guessSeconds = selNumTime('#chainGuessTime');
       p.revealSeconds = selNumTime('#chainRevealTime');
+      p.replaySpeed = chainReplaySpeedValue();
       p.voteSeconds = selNumTime('#gameVoteTime');
     } else {
       p.rounds = Number($('#gameSkinRounds') && $('#gameSkinRounds').value) || P.GAME.SKIN_ROUNDS;
@@ -8170,6 +8229,7 @@
       setSelValue('#chainWriteTime', prefs.writeSeconds);
       setSelValue('#chainGuessTime', prefs.guessSeconds);
       setSelValue('#chainRevealTime', prefs.revealSeconds);
+      setSelValue('#chainReplaySpeed', prefs.replaySpeed);
       setSelValue('#gameSkinRounds', prefs.rounds);
       setSelValue('#gameNightTime', prefs.nightSeconds);
       setSelValue('#gameDawnTime', prefs.dawnSeconds);
@@ -8204,6 +8264,8 @@
       setSelValue('#chainWriteTime', '');
       setSelValue('#chainGuessTime', '');
       setSelValue('#chainRevealTime', '');
+      // 回放倍速回到默认档（不保留上次选的 —— 切玩法回来应当是「开箱即用」的 1.5x）
+      setSelValue('#chainReplaySpeed', String(replaySpeedDefault()));
       setSelValue('#gameVoteTime', '');
     } else {
       setSelValue('#gameSkinRounds', String(P.GAME.SKIN_ROUNDS));
@@ -8280,6 +8342,7 @@
     buildNumberSelect($('#gameSkinRounds'), setupList('rounds'), P.GAME.SKIN_ROUNDS, '轮');
     buildNumberSelect($('#gameRepickLimit'), setupList('repick'), P.GAME.REPICK_LIMIT, '次', '不能换');
     buildChainLengthSelect();
+    buildReplaySpeedSelect();
 
     // 非房主：房主的预设（只读）
     applyGamePrefs();
@@ -8454,6 +8517,114 @@
    */
   function isChainMode() { return !!(S.game && S.game.mode === 'chain'); }
 
+  /* ============================================================ ★ v14「提交后保留成图」
+   *
+   * 用户报的现象：交完作画 / 猜词，画布当场被清空 / 切走，看不到自己刚交的东西。
+   *
+   * 服务端在收格时会 `resetCanvas()`（每个作画格开始都清），**那条不许动** ——
+   * 所以前端自己留一份「我刚交的那张图」，在**下一棒交接过来**（收到新题面
+   * / 阶段切换）之前继续显示：
+   *
+   *   - 作画格交了 → 保留「我画的那张图」；猜词格交了 → 保留「我猜的那个词 + 当时看的画」。
+   *   - 「下一棒」= applyChainTask 拿到**不同的**题面 key（chainId|step|word|choices）：
+   *     那一刻 keep 作废，画面交给新题面（猜词的画 / 空画布）。
+   *   - 拿不到新题面时（最后一步交完 → 进回放）由 renderChainReveal 接管；
+   *     阶段一离开「写 / 画 / 猜」keep 也自动失效（chainKeepActive 里判）。
+   *
+   * 保留的画面来源：提交那一刻引擎里的笔迹（私密作画时服务端只把**我自己的**
+   * 笔迹发回来，所以 engine.strokes 就是我这幅画）→ renderStrokesPNG 渲一张，
+   * 喂给 #chainCanvasImg（object-fit: contain，和回放共用同一格，不裁切）。
+   */
+  var CHAIN_KEEP = { sig: '', img: '', text: '', word: '' };
+
+  function resetChainKeep() {
+    CHAIN_KEEP.sig = '';
+    CHAIN_KEEP.img = '';
+    CHAIN_KEEP.text = '';
+    CHAIN_KEEP.word = '';
+  }
+
+  /** 当前这一棒的题面 key（与 applyChainTask 的去重键同一套口径） */
+  function chainTaskKey() {
+    var t = S.chainTask;
+    if (!t) return '';
+    return t.chainId + '|' + t.step + '|' + (t.word || '') + '|' + (t.choices || []).join(',');
+  }
+
+  /** 现在该不该继续显示「我刚交的那张」——
+   *  还在写 / 画 / 猜里、已经交过、而且**题面还没换成下一棒**。 */
+  function chainKeepActive() {
+    if (!CHAIN_KEEP.img && !CHAIN_KEEP.text) return false;
+    if (!isChainMode() || !chainStepActive()) return false;
+    if (!S.chainInputSubmitted) return false;
+    var t = S.chainTask;
+    if (!t) return false;
+    if (t.step !== 'DRAWING' && t.step !== 'GUESS') return false;   // 写词步不用画布
+    return t.chainId + '|' + t.step === CHAIN_KEEP.sig;
+  }
+
+  /** 把「我现在画布上这一幅」渲成一张图。
+   *  首选按笔迹渲（快、跟回放同一套渲染路径）；万一引擎的笔迹表还没追上
+   *  （最后一笔的 STROKE_END 还在路上），退回整张画布导出 —— 宁可贵一点，
+   *  也不能让「交完的成图」是空的。 */
+  function chainKeepRenderOwnArt() {
+    var url = '';
+    try {
+      var st = engine.strokes || [];
+      if (st.length) url = engine.renderStrokesPNG(st, '#fff');
+    } catch (e) { url = ''; }
+    if (!url) {
+      try { url = engine.exportPNG(); } catch (e2) { url = ''; }
+    }
+    return url || '';
+  }
+
+  /** 提交那一刻把「我这幅画」（/ 我猜的那个词）留下来 —— 渲失败就只留词，绝不显示半张 */
+  function chainKeepCapture(t, word) {
+    resetChainKeep();
+    if (!t || (t.step !== 'DRAWING' && t.step !== 'GUESS')) return;
+    var url = '';
+    if (t.step === 'DRAWING') {
+      url = chainKeepRenderOwnArt();
+      CHAIN_KEEP.text = '你刚交的画';
+    } else {
+      // 猜词：当时看的那幅画就是题面里带的笔迹
+      try {
+        if (t.strokes && t.strokes.length) url = engine.renderStrokesPNG(t.strokes, '#fff');
+        else url = chainTaskImage(t);
+      } catch (e) { url = ''; }
+      CHAIN_KEEP.text = '你猜的是';
+      CHAIN_KEEP.word = asWord(word, '我猜的词');
+    }
+    CHAIN_KEEP.sig = t.chainId + '|' + t.step;
+    CHAIN_KEEP.img = url || '';
+  }
+
+  /** 把留着的这张重新摆到画布层上（状态同步每秒都会走 renderChainTask，这里要幂等） */
+  function chainKeepPaint() {
+    var img = $('#chainCanvasImg');
+    if (CHAIN_KEEP.img) {
+      // ⚠ 别用 showChainCanvasImage：它最后会把说明挂到窄带上（猜词那条归猜题流程管）
+      var layer = $('#chainCanvasLayer');
+      if (layer) layer.classList.remove('hidden');
+      if (img) {
+        if (img.getAttribute('src') !== CHAIN_KEEP.img) img.src = CHAIN_KEEP.img;
+        img.classList.remove('hidden');
+      }
+    } else if (img) {
+      img.removeAttribute('src');
+      img.classList.add('hidden');
+    }
+    var t = $('#cclTopText');
+    if (t) {
+      t.innerHTML = '<span class="ccl-note">' + esc(CHAIN_KEEP.text || '已提交') + '</span>'
+        + (CHAIN_KEEP.word ? ' <b>' + esc(CHAIN_KEEP.word) + '</b>' : '');
+    }
+    var top = $('#cclTop');
+    if (top) top.classList.remove('hidden');
+    syncChainCanvasPad();
+  }
+
   function applyChainTask(t) {
     var prev = S.chainTask;
     S.chainTask = t || null;
@@ -8463,6 +8634,8 @@
     var nowKey = t ? t.chainId + '|' + t.step + '|' + (t.word || '') + '|' + (t.choices || []).join(',') : '';
     if (prevKey !== nowKey) {
       S.chainInputSubmitted = false;
+      // ★ v14：题面换了 = **下一棒交接过来了** —— 这时候才把「我刚交的那张图」换掉。
+      resetChainKeep();
       // 题面换了 = 轮到我了。这是接龙里最该被听见的一声：
       // 手里有活的人如果没注意到，这一步基本就废了（等超时才反应过来）。
       if (t && t.step) SFX.play('yourTurn');
@@ -8512,7 +8685,9 @@
     });
     var layer = $('#chainCanvasLayer');
     if (layer) {
-      var top = 78;
+      // 兜底留白：接龙状态条现在是画布上沿那条 34px 的细条（#stage.chain-strip），
+      // 量不到它的实际底边时按「快捷条 + 一点余量」算，绝不让窄带/画面钻到状态条底下。
+      var top = 52;
       var hud = $('#gameHud');
       if (hud && !hud.classList.contains('hidden')) {
         var hr = hud.getBoundingClientRect();
@@ -8534,13 +8709,12 @@
       }
       layer.style.paddingTop = top + 'px';
       layer.style.paddingBottom = bottom + 'px';
-      // <img> 是「原尺寸显示 + 这里按实测可用高度封顶」（CSS 的 max-height:100% 在
-      // flex 子项上不可靠，会把窄带顶开）—— 封住了它就不可能压到窄带 / 锁定提示。
+      // ★ v15：**不再**给 <img> 写 maxHeight —— 回放那一格现在是 flex:1 + 横向拉满
+      //   （见 styles.css 的 .ccl-img），上/下窄带是列里的固定行，中间那幅画
+      //   物理上吃不到它们的位置。以前那个 maxHeight 是「图片按原尺寸显示」时代的补丁，
+      //   留着只会让画面比画布区矮一截、露出底下的棋盘格。
       var img = $('#chainCanvasImg');
-      if (img) {
-        var avail = Math.round(layer.clientHeight - top - bottom - 4);
-        if (avail > 60) img.style.maxHeight = avail + 'px';
-      }
+      if (img) img.style.maxHeight = '';
     }
     // 顺手告诉 CSS：横条开着的时候，原本贴底的浮层（题面 / 进度 / 锁定提示）要抬起来
     var stage = $('#stage');
@@ -8623,6 +8797,9 @@
 
   function hideChainCanvas() {
     var layer = $('#chainCanvasLayer');
+    // ★ v14：刚交了画 / 猜词的那张图要**继续显示到下一棒**（见 CHAIN_KEEP）——
+    //   服务端收格时会 resetCanvas()，这里的隐藏动作必须让路，否则用户交完就看不到自己的图了。
+    if (chainKeepActive()) return;
     // ⚠ 回放 / 投票阶段这一层归 renderChainReveal 管：状态同步每秒钟来好几次，
     //   每次都会走一遍 renderChainTask()（那一刻 chainStepActive() 是 false），
     //   以前这里会把回放正演到一半的逐笔动画直接掐掉 —— 实测就是「一格只画出 1 帧」的元凶。
@@ -8648,6 +8825,13 @@
   function renderChainTask() {
     var box = $('#chainTask');
     if (!box) return;
+    syncChainWriteStep();     // 写词步的「画布腾出来 + 选词区居中」开关（其余阶段一律关）
+    // ★ v17：**不在回放 / 投票阶段 → 投票纸片与那排圈一律收掉**。
+    //   以前没人收：上一局投完的那张纸片一直挂在画布层里，新一局一开
+    //   （画布层为了显示「我刚交的画」又被显示出来）那张纸片就跟着冒出来了 ——
+    //   用户截图里「新开的一局游戏出现上局的投票窗口」就是这个。状态同步每次都走这里，
+    //   所以放在 early return 之前，任何阶段都收得住。
+    if (!S.game || (S.game.phase !== 'chain_reveal' && S.game.phase !== 'chain_vote')) crHideVotePaper();
     var t = S.chainTask;
     // 只有「做事」的阶段才有题面；大厅/回放/投票/结算都不显示这块
     if (!isChainMode() || !t || !chainStepActive()) {
@@ -8658,14 +8842,17 @@
     box.classList.remove('hidden');
     var body = $('#ctBody');
     var label = $('#ctStep');
+    // 写词步：题面卡片居中（选词区），画布腾出来 —— 见 CSS 的 .chain-task.ct-centered
+    box.classList.toggle('ct-centered', t.step === 'WORD');
     if (t.step === 'WORD') {
+      // 「写起词」这句话在整页只出现这一处（卡片标题），下面的说明只说后果
       label.textContent = '写一个起词';
       hideChainCanvas();
       if (S.chainInputSubmitted) {
         body.innerHTML = '<div class="ct-done">✓ 已提交，等其他人</div>';
         return;
       }
-      body.innerHTML = '<div class="ct-note">挑一个起词 —— <b>你自己</b>要照它作画：</div>' +
+      body.innerHTML = '<div class="ct-note">挑一个起词 —— <b>你自己要照它作画</b>：</div>' +
         '<div class="ct-choices"></div>';
       var list = body.querySelector('.ct-choices');
       (t.choices || []).forEach(function (w) {
@@ -8690,11 +8877,13 @@
     if (t.step === 'DRAWING') {
       // 这一步的词永远来自 S.chainTask.word：画自己写的起词时它就是本人刚写下的那个词
       label.textContent = '照这个词作画';
-      hideChainCanvas();
       if (S.chainInputSubmitted) {
+        // ★ v14：交了作品之后**画面继续留着**（下一棒交接 / 收格 resetCanvas 都不动它）
         body.innerHTML = '<div class="ct-done">✓ 已交作品</div><div class="ct-word">' + esc(t.word || '') + '</div>';
+        if (chainKeepActive()) chainKeepPaint(); else hideChainCanvas();
         return;
       }
+      hideChainCanvas();
       body.innerHTML = '<div class="ct-draw-head">照这个词画出来：</div>' +
         '<div class="ct-word">' + esc(t.word || '（空）') + '</div>' +
         '<div class="ct-note">直接在画布上画（别人看不到你的笔迹），画完点下面；倒计时到点会自动交。</div>' +
@@ -8705,9 +8894,10 @@
     if (t.step === 'GUESS') {
       label.textContent = '这幅画画的是什么？';
       if (S.chainInputSubmitted) {
+        // ★ v14：交完猜词 → **把猜的那个词 + 当时看的那幅画继续留着**，直到下一棒。
         body.innerHTML = '<div class="ct-done">✓ 已提交，等其他人</div>';
         S.cr.externalImg = false;
-        hideChainCanvas();
+        if (chainKeepActive()) chainKeepPaint(); else hideChainCanvas();
         return;
       }
       // 要猜的那幅画铺在主画布上（不再挤在这张小卡片里）；
@@ -8724,14 +8914,16 @@
         im0.removeAttribute('src');
         im0.classList.add('hidden');
       }
-      setChainCanvasBands(img ? '看画猜词 · 上面这幅画画的是什么？' : '（上一格是空的 —— 上家没交）', '');
+      setChainCanvasBands(img ? '看画猜词 · 上家画的这一幅' : '（上一格是空的 —— 上家没交）', '');
       syncChainCanvasPad();
-      body.innerHTML = '<div class="ct-note">上面这幅画画的是什么？猜一个词 —— ' +
-        '猜错也没关系，就是要看它跑偏成什么样。</div>' +
-        '<button class="btn primary ct-guess" style="margin-top:8px;width:100%">回答</button>';
-      body.querySelector('.ct-guess').addEventListener('click', function () {
-        openChainGuess();
-      });
+      // ★ v15：**「这幅画画的是什么? + 回答」那张卡片删掉了**（用户实测：多一层点击、
+      //   还占着画布下沿的一块地方）。猜词要的输入条本来就在画布下沿，
+      //   直接让它出现 —— 题面「看图猜词：上面这幅画的是什么？」也只在它上面出现一次
+      //   （见 syncChainInput），卡片再写一遍就是同一句话第四遍。
+      //   ⚠ 只在这里收掉卡片（不隐藏整个 #chainTask 容器）：
+      //     「✓ 已提交，等其他人」那条回执仍然走上面那个分支显示，交完不至于毫无反馈。
+      box.classList.add('hidden');
+      syncChainInput();
       return;
     }
     box.classList.add('hidden');
@@ -8744,9 +8936,27 @@
     return p === 'chain_write' || p === 'chain_draw' || p === 'chain_guess';
   }
 
+  /**
+   * 写词步（chain_write）给 #stage 挂一个开关类 `.chain-task-write`。
+   *
+   * 为什么要有它：这一步**根本不用画**（选完词才进作画），但画布 + 浮动层原本还整块
+   * 摊在中间，用户看到的是一张空画布中间挤着选词卡片 —— 空间全浪费了。
+   * 挂上这个类之后 CSS 会把画布层收掉、并把选词卡片居中放大（见 styles.css）。
+   * 其余阶段（作画 / 猜词 / 回放）一个字都不动，卡片照旧贴边。
+   */
+  function syncChainWriteStep() {
+    var stage = $('#stage');
+    if (!stage) return;
+    var on = !!(isChainMode() && S.game && S.game.phase === 'chain_write');
+    stage.classList.toggle('chain-task-write', on);
+  }
+
   function submitChainWord(payload) {
     if (!payload || !payload.text) return;
+    // ⚠ 顺序同 submitChainArt：先立旗再留成图（否则 renderChainTask 会当场收掉画布）
     S.chainInputSubmitted = true;
+    // ★ v14：把「我猜的词 + 当时看的那幅画」留下来（交完继续显示到下一棒）
+    chainKeepCapture(S.chainTask, payload.text);
     net.send(P.C2S.GAME_SUBMIT, payload);
     SFX.play('submit');
     renderChainTask();
@@ -8763,7 +8973,11 @@
     var t = S.chainTask;
     if (!t || t.step !== 'DRAWING') return;
     if (S.chainInputSubmitted) return;
+    // ⚠ 顺序要紧：先立「已提交」这面旗，再留成图 —— chainKeepActive() 会看这面旗，
+    //   反过来写的话 renderChainTask() 会以为「还没交」，当场把画布收掉。
     S.chainInputSubmitted = true;
+    // ★ v14：把这张画渲下来留着（交完继续显示到下一棒交接）
+    chainKeepCapture(t, '');
     net.send(P.C2S.GAME_SUBMIT, {});
     SFX.play('submit');
     renderChainTask();
@@ -8783,7 +8997,9 @@
       syncChainCanvasPad();
       return;
     }
-    $('#ciTitle').textContent = '这幅画画的是什么？';
+    // ★ 「看图猜词：上面这幅画的是什么？」**只在这一个地方出现**（输入条上方）。
+    //   以前它同时出现在：画布上沿窄带、题面卡片、输入条标题、页面底部锁定提示 —— 同一句话四遍。
+    $('#ciTitle').textContent = '看图猜词：上面这幅画的是什么？';
     // 猜词不卡字数、不卡中英文 —— 只要能被下一个人看懂就够了
     $('#ciHint').textContent = '猜一个词（英文、单字都行，不用管字数）';
     var inp = $('#ciInput');
@@ -8982,7 +9198,11 @@
     if (!show) { paintGroupLine('#clGroups', ''); }
     box.classList.toggle('hidden', !show);
     if (!show) return;
-    var players = g.players || [];
+    // ★ v17：**「准备」面板只列房间里真正在的人** ——
+    //   服务端的 players 里除了在场成员，还会带「已离场但榜上有分」的灰名
+    //   （那是给计分板用的，人走了分数还要在），以前这里照单全收，
+    //   于是大厅上冒出几个房间里根本不存在的人（用户报的）。计分板照旧显示灰名。
+    var players = (g.players || []).filter(function (p) { return p.online !== false; });
     var playing = players.filter(function (p) { return !p.spectating; });
     var cnt = $('#clCount');
     if (cnt) cnt.textContent = playing.length + ' 人（需 ≥ ' + (g.minPlayers || 4) + '）';
@@ -9041,9 +9261,10 @@
 
   /* ---- 回放：逐笔动画 ----
    *
-   * 服务端给的 legHoldMs = 这一格的**总时长**（动画 + 定格）。这里把它拆开：
+   * 服务端给的 legHoldMs = 这一格的**总时长**（动画 + 定格），且**已经算进回放倍速**
+   * （服务端 revealLegMs() = 总时长 / 格数 / 倍速）。这里把它拆开：
    *   动画占用 min(60% × 总时长, 8000ms)，剩下的时间用来定格看结果（最少 250ms）。
-   *   倍速选择器（0.5×~4×）再乘一层：总时长 = legHoldMs / speed。
+   * ★ v14：前端**不再**乘界面上的倍速（那个控件已经删掉）—— 时长完全对齐 legHoldMs。
    * 所以「服务端腿短 → 动画自动加速、腿长 → 慢放」，两端都有上下限，不会一帧画完或卡住。
    *
    * 逐笔的实现：**不用 renderStrokesPNG 那种「一次渲完整张」**，而是自己维护一张离屏
@@ -9051,7 +9272,15 @@
    * 新笔迹用 engine.replayStampOne 叠上去（增量绘制，不重画前面的笔），再 toDataURL 喂给
    * #chainCanvasImg。所以帧与帧之间的画**一定不一样** —— 看得见一笔一笔长出来。
    */
-  var CR_ANIM = { minTotal: 600, maxTotal: 12000, minAnim: 700, maxAnim: 8000, hold: 250, targetFrames: 18 };
+  var CR_ANIM = {
+    minTotal: 600, maxTotal: 20000, minAnim: 700, maxAnim: 9000, hold: 250,
+    targetFrames: 18,
+    // ★ v15：作画格后面紧跟猜词格时，尾巴上留给「下一棒猜的是什么」的悬念倒计时。
+    //   与服务端 CFG.REVEAL_TEASE_MS 同一个数（服务端把这段加进那一格的时长里）。
+    teaseMs: 3000,
+    // ★ v16：没有悬念尾的作画格，成图之后定格的时长（与服务端 REVEAL_HOLD_MS 同档）
+    tailHoldMs: 600
+  };
 
   /** 服务端下发的回放游标（可能还没落地 —— 拿不到就返回 null，退回本地逐格播放） */
   function crServerStep() {
@@ -9068,18 +9297,34 @@
     var n = Number(v);
     return (isFinite(n) && n > 0) ? Math.floor(n) : 0;
   }
-  /** 这一格的总时长（含定格）—— 服务端 legHoldMs / 本地倍速，带上下限 */
+  /** 回放：**当前这一格**的总时长（毫秒）。带上下限。
+   *
+   *  ★ v15：每一格的时长**不再一样**了 —— 服务端随快照下发 legMs（每条链一张表：
+   *  起词 / 猜词格只停 1.4 秒、作画格吃「回放总时长 / 格数 / 倍速」的预算，
+   *  下一格是猜词的作画格再多 3 秒悬念尾）。这里优先按 S.cr.item 取表里的那一格，
+   *  拿不到（老服务端 / 假快照）才退回单一的 legHoldMs。
+   *  快慢仍然由服务端的倍速算进这两者里，前端不再乘任何本地倍速。 */
   function crLegTotalMs() {
     var g = S.game;
-    var base = Number(g && g.legHoldMs);
+    var base = NaN;
+    var arr = g && g.legMs;
+    if (arr && typeof arr.length === 'number' && arr.length) {
+      var v = Number(arr[Math.max(0, Math.min(S.cr.item | 0, arr.length - 1))]);
+      if (isFinite(v) && v > 0) base = v;
+    }
+    if (!isFinite(base) || base <= 0) base = Number(g && g.legHoldMs);
     if (!isFinite(base) || base <= 0) base = 3600;
-    base = base / (S.cr.speed || 1);
     return Math.max(CR_ANIM.minTotal, Math.min(CR_ANIM.maxTotal, Math.round(base)));
   }
-  function crLegAnimMs(total) {
-    var a = Math.round(total * 0.6);
-    a = Math.max(CR_ANIM.minAnim, Math.min(CR_ANIM.maxAnim, a));
-    return Math.min(a, Math.max(0, total - CR_ANIM.hold));
+  /** 这一格用来播逐笔动画的时间。
+   *
+   *  ★ v16：**动画吃满「这一格的总时长 − 尾巴」** —— 尾巴 = 下一格是猜词时的 3 秒悬念
+   *  倒计时，否则只是一小段定格。总时长是服务端按**笔数 ÷ 倍速**算出来的（见
+   *  P.chainRevealAnimMs），所以这里减掉尾巴就等于「按倍速把笔迹播完，播完即定稿」，
+   *  不再有「小图也播八秒」那种按比例摊出来的空转。 */
+  function crLegAnimMs(total, reserve) {
+    var hold = Math.max(0, Number(reserve) || CR_ANIM.tailHoldMs);
+    return Math.max(300, Math.min(CR_ANIM.maxAnim, total - hold));
   }
   function crStopAnim() {
     var a = S.cr.anim;
@@ -9091,15 +9336,27 @@
       a.raf = 0;
       a.tickTimer = 0;
       a.safety = 0;
+      a.tease = false;
     }
+    // ★ v15：悬念倒计时是「这一格」的一部分，停动画就一起停
+    crStopTease();
   }
   /** 一格切换时清掉上一格的画面缓存（逐笔是现画的，留着只会占内存） */
   function crDropLegCaches(item) {
     if (!item) return;
     try { delete item._png; delete item._frames; } catch (e) { /* 无所谓 */ }
   }
-  /** 逐笔动画用的离屏画布：按引擎尺寸等比缩到最长边 ≤ 900px。
-   *  900 是「画出来不糊」与「每帧 toDataURL 不卡」之间的折中（显示宽度约 700~900px）。 */
+  /** 逐笔动画用的离屏画布 —— **两张**（★ v15 修的就是这里）。
+   *
+   *  a.raw = 引擎**原尺寸**画布：笔迹按 1:1 落上去，和作画时看到的一模一样。
+   *  a.cv  = 显示用的缩略图（最长边 ≤ 900）：每帧把 raw 整幅 drawImage 缩下来再 toDataURL，
+   *          这样「每帧同步编码」的开销还在小画布上。
+   *
+   *  ⚠ 以前只有 a.cv 一张缩小的画布，指望 `ctx.setTransform(scale…)` 把笔迹缩进去 ——
+   *    但 engine.replayStampOne 内部的 paintOnto 头一件事就是 setTransform(1,0,0,1,0,0)
+   *    （见 engine.js 的 paintOnto），缩放当场被抹掉：笔迹按 1:1 落进 900px 的小画布，
+   *    于是回放画面成了「原图左上角的放大版」，右边 / 下边被裁掉 —— 用户报的截图
+   *    「回放没有展示完全」就是这个。现在缩放只走 drawImage，绝不再依赖 transform。 */
   function crAnimCanvas() {
     var a = S.cr.anim;
     var W = (engine && engine.width) || 1280;
@@ -9107,26 +9364,40 @@
     var sc = Math.min(1, 900 / Math.max(W, H));
     var w = Math.max(64, Math.round(W * sc));
     var h = Math.max(64, Math.round(H * sc));
-    if (a.cv && a.w === w && a.h === h) return a.cv;
+    if (a.cv && a.raw && a.w === w && a.h === h && a.raw.width === W && a.raw.height === H) {
+      return a.cv;
+    }
+    var raw = document.createElement('canvas');
+    raw.width = W; raw.height = H;
+    a.raw = raw;
+    a.rawCtx = raw.getContext('2d');
     var cv = document.createElement('canvas');
     cv.width = w; cv.height = h;
     a.cv = cv; a.ctx = cv.getContext('2d');
     a.w = w; a.h = h;
     a.scale = sc;
+    a.done = 0;          // 换了画布 = 之前落的笔都不在了，从头补
     return cv;
   }
 
-  /** 把离屏画布抹成白底（= 这一格还没开始画的画面）并显示出来 */
+  /** 把两张画布都抹成白底（= 这一格还没开始画的画面）并刷新显示。
+   *  ★ v16：接管画布时显示走引擎（replayCanvas → 真画布），否则退回 <img>。 */
   function crResetAnimCanvas() {
     var a = S.cr.anim;
-    if (!a.ctx) crAnimCanvas();
+    if (!a.ctx || !a.rawCtx || !a.raw) crAnimCanvas();
+    if (a.rawCtx) {
+      a.rawCtx.setTransform(1, 0, 0, 1, 0, 0);
+      a.rawCtx.fillStyle = '#fff';
+      a.rawCtx.fillRect(0, 0, a.raw.width, a.raw.height);
+    }
     if (a.ctx) {
       a.ctx.setTransform(1, 0, 0, 1, 0, 0);
       a.ctx.fillStyle = '#fff';
       a.ctx.fillRect(0, 0, a.w, a.h);
     }
     a.canvasBlank = true;
-    crShowImage(a.cv ? a.cv.toDataURL('image/png') : '');
+    if (crCanvasOwned()) engine.invalidate();
+    else crShowImage(a.cv ? a.cv.toDataURL('image/png') : '');
   }
 
   /** 回放数据就位（GAME_REVEAL 到达 / 迟到补发）。开着的播放器保持当前页。 */
@@ -9150,6 +9421,14 @@
     var list = S.chainReveal;
     var show = !!(g && (g.phase === 'chain_reveal' || g.phase === 'chain_vote') && list && list.length);
     if (!show) { hideChainReplayBar(); return; }
+    // ★ v14：回放 / 投票阶段由这一层接管画面 —— 「我刚交的那张」到此为止（不再往画布上贴）。
+    //   没有这一句的话：最后一步交完 → hideChainCanvas() 因为 keep 生效而提前 return，
+    //   画布层就横在回放画面上面（实测会把 #chainCanvasImg 整个挡掉）。
+    resetChainKeep();
+    // ★ v16：**画面画在真画布上**（用户：「就在现成的画布区域展示，别弄个独立窗口」）——
+    //   接管引擎的回放显示位，把那块白面板 <img> 收掉。退出见 hideChainReplayBar。
+    crCanvasTake();
+    crHideImg();
 
     // 服务端说了现在是哪条链 —— 前端跟着走（voteChainIndex 是串行投票的游标）
     var ci = currentChainIndex();
@@ -9165,6 +9444,8 @@
       S.cr.playing = (g.phase === 'chain_reveal');
       S.cr.item = (g.phase === 'chain_vote') ? Math.max(0, items.length - 1) : 0;
       S.cr.serverStep = crServerStep();
+      // ★ v14：换链 = 重新数「定格到几秒后弹投票纸片」（每条链各定格一次）
+      resetVotePaper();
     }
 
     // 棒次跟着服务端走：revealStep 变了就切到那一格（并重新播动画）。
@@ -9182,16 +9463,24 @@
 
     var bar = $('#chainReplayBar');
     if (bar) bar.classList.remove('hidden');
-    setReplayChrome(true);
+    setChainStrip();
     if (!skipChrome) {
       setChainCtlVisible(true);
       $('#rpTitle').textContent = g.phase === 'chain_vote' ? '投票' : '回放';
+      // 房主的「立刻推进」：REVEAL→进投票 / VOTE→结算（SCORE 时服务端自动回大厅，不给按钮）
+      var nextBtn = $('#btnRpNext');
+      if (nextBtn) {
+        nextBtn.classList.toggle('hidden', !S.me.isOwner ||
+          (g.phase !== 'chain_reveal' && g.phase !== 'chain_vote'));
+        nextBtn.textContent = (g.phase === 'chain_vote') ? '立刻结算' : '进入投票';
+      }
 
       // 头部：第几条链 / 起词人（跨链的小点去掉了 —— 看哪条链由服务端说了算）
       var n = list.length;
       $('#rpIndex').textContent = (ci + 1) + ' / ' + n;
       var head = $('#rpChainHead');
-      head.innerHTML = '第 ' + (ci + 1) + ' 条链 · 起词人 <b>' + esc(chain.ownerName || '某人') + '</b>' +
+      head.innerHTML = '第 ' + (ci + 1) + ' 条链 · 起词人 <b>' +
+        esc(safeName(chain.ownerName, '链主名字')) + '</b>' +
         (chain.ownerPlayerId === S.me.userId ? '<span class="rp-mine">我的</span>' : '');
       head.classList.remove('rp-in');
       void head.offsetWidth;          // 强制回流，动画才能重播
@@ -9203,7 +9492,6 @@
     if (!skipChrome) {
       renderRpVerdict(g, chain, items);
       renderChainVoteArea(chain);
-      syncRpPlayBtn();
     }
 
     // 这一格的内容（词条 / 逐笔动画）—— 换格 / 换链 / 改速度时都要重来一遍
@@ -9237,19 +9525,19 @@
     if (box) box.innerHTML = pills;
   }
 
-  /** 走完最后一格 / 投票阶段才揭晓的首尾对照 + 「这个匹配吗？」+ √ × */
+  /** 走完最后一格 / 投票阶段才揭晓的首尾对照。
+   *  ★ v14：问句与两个按钮搬进画布中央的「纸片」面板（#rpVote）了 —— 这里只留
+   *  「起词 → 最终猜词」这条流水（下沿窄带里常驻，投票时也看得见）。 */
   function renderRpVerdict(g, chain, items) {
     var verdict = $('#rpVerdict');
     if (!verdict) return;
     var atEnd = S.cr.item >= items.length - 1;
     if (g.phase === 'chain_vote' || atEnd) {
-      // 用户要的三行：起词 → 最终猜词 / 这个匹配吗？/ √ ×
       verdict.innerHTML =
-        '<span class="rv-a">起词 <b>' + esc(chain.firstWord || '（空）') + '</b></span>' +
+        '<span class="rv-a">起词 <b>' + esc(safeWord(chain.firstWord, '首尾对照的起词')) + '</b></span>' +
         '<b class="rv-arrow">→</b>' +
-        '<span class="rv-b">最终猜词 <b>' + esc(chain.lastWord || '（空）') + '</b></span>' +
-        '<span class="rv-tag ' + (chain.matched ? 'ok">√ 对得上' : 'bad">× 对不上') + '</span>' +
-        '<span class="rv-ask">这个匹配吗？</span>';
+        '<span class="rv-b">最终猜词 <b>' + esc(safeWord(chain.lastWord, '首尾对照的最终猜词')) + '</b></span>' +
+        '<span class="rv-tag ' + (chain.matched ? 'ok">√ 对得上' : 'bad">× 对不上') + '</span>';
       verdict.classList.toggle('ok', !!chain.matched);
       verdict.classList.toggle('bad', !chain.matched);
     } else {
@@ -9262,10 +9550,16 @@
   function hideChainReplayBar() {
     crClearTimer();
     crStopAnim();
+    // ★ v16：把引擎的回放显示位还回去（回放结束 / 阶段过去了，画布该显示文档本身了）
+    crCanvasRelease();
+    resetVotePaper();
+    // ★ v17：纸片 / 已投标记一并收掉（以前这里只收了标记，纸片会留到下一局）
+    crHideVotePaper();
     S.cr.playing = false;
     var bar = $('#chainReplayBar');
     if (bar) bar.classList.add('hidden');
-    setReplayChrome(false);
+    renderChainVoteMarks(null);
+    setChainStrip();
     syncChainCanvasPad();
   }
 
@@ -9288,9 +9582,46 @@
   /** 猜题流程摆的画（回放别去动它的词条窄带） */
   function crMarkExternal(on) { S.cr.externalImg = !!on; }
 
-  /** 一行「<作者> 画了：<词>」。
-   *  上=本格作者 + 本格拿到的题面（= 上一格的 content）；
-   *  下=下一格猜词的人 + 他猜出来的词（下一格不是猜词格时给一句说明）。 */
+  /**
+   * 把一格的内容安全地取成「词」。
+   *
+   * ⚠ 这里以前直接 `esc(prev.content)`，结果作画格的 content（**笔迹数组**）被塞进
+   *   「猜的是：」那一行 → 界面上显示成
+   *   `友友791 猜的是：[object Object],[object Object]`（用户报的 P0）。
+   *   规矩：**只有字符串才当词**，其余一律当作「没有」并报一条错误日志 ——
+   *   宁可显示「（空）」，也绝不把对象 toString 到界面上。
+   */
+  function asWord(v, where) {
+    if (v == null) return '';
+    if (typeof v === 'string') return v;
+    console.error('[chain] 期望是词，拿到的是 ' + (Array.isArray(v) ? '数组' : typeof v)
+      + '（' + where + '）—— 已按「空」处理，不渲染对象');
+    return '';
+  }
+
+  /**
+   * ★ v14：显示层的**兜底断言** —— 所有「要当词渲染」的字段都必须过这里。
+   *
+   * 与 asWord 的区别只有一个：**渲染**（这个返回「（空）」而不是空串），
+   * 因为调用点大多是 `esc(x || '（空）')` 这种写法，把兜底收进来更不容易漏。
+   * 非字符串一律 console.error 报出**字段名**，绝不把对象 toString 到界面上
+   *（用户报过的 `[object Object]` 就是这么来的：笔迹数组被当成词）。
+   */
+  function safeWord(v, where) {
+    var w = asWord(v, where || '未标注字段');
+    return w || '（空）';
+  }
+
+  /** 人名 / 昵称的兜底（「某人」）。不是字符串一律 console.error 后回退 —— 同样的规矩。 */
+  function safeName(v, where) {
+    if (typeof v === 'string' && v) return v;
+    if (v != null && typeof v !== 'string') {
+      console.error('[chain] 期望是名字，拿到的是 ' + (Array.isArray(v) ? '数组' : typeof v)
+        + '（' + (where || '未标注字段') + '）—— 已按「某人」处理');
+    }
+    return '某人';
+  }
+
   function crLegLabels(items, k) {
     var it = items[k];
     var prev = k > 0 ? items[k - 1] : null;
@@ -9298,25 +9629,87 @@
     var who = esc(it.playerName || '某人');
     var top;
     if (it.type === 'WORD') {
-      top = '<b>' + who + '</b> 起词：<span class="ccl-w">' + esc(it.content || '（空）') + '</span>';
+      top = '<b>' + who + '</b> 起词：<span class="ccl-w">' + esc(asWord(it.content, 'WORD') || '（空）') + '</span>';
     } else if (it.type === 'DRAWING') {
-      var w = prev ? (prev.content || '') : '';
+      // 作画格「画了：X」里的 X = 他**拿到的题面**，也就是上一格的 content。
+      // 上一格只可能是 WORD 或 GUESS（都是词），但照样过 asWord 兜一层。
+      var w = prev ? asWord(prev.content, 'DRAWING 的题面') : '';
       top = '<b>' + who + '</b> 画了：<span class="ccl-w">' + esc(w || '（空）') + '</span>';
     } else {
-      var q = prev ? (prev.content || '') : '';
+      // ★ 猜词格「猜的是：X」里的 X = **他自己猜出来的词（本格 content）**。
+      //   以前错写成上一格的 content，而上一格是作画格、content 是笔迹数组
+      //   → 界面上就是 [object Object],[object Object]。
+      var q = asWord(it.content, 'GUESS');
       top = '<b>' + who + '</b> 猜的是：<span class="ccl-w">' + esc(q || '（空）') + '</span>';
     }
     var nx = items[k + 1];
     var bottom = '';
     if (nx && nx.type === 'GUESS') {
-      bottom = '<b>' + esc(nx.playerName || '某人') + '</b> 猜的是：<span class="ccl-w">' +
-        esc(nx.content || '（空）') + '</span>';
+      // ★ v15：用户要的顺序是「**笔迹回放完了**再显示『下一棒 X 猜的是：』+ 3 秒倒计时」——
+      //   所以回放进行中这一行只说一句「回放中」，**既不报词也不报倒计时**；
+      //   笔一画完，crStartTease() 会把它换成悬念倒计时（词仍然只在那一格的上窄带里揭晓）。
+      //   窄带本身留着（不清空）是为了不让画面在换文案时弹一下高度。
+      bottom = '<span class="ccl-note">笔迹回放中…</span>';
     } else if (nx) {
       // 下一格是作画（最后一格后面没有了也算）—— 这一行没有「猜」可报
-      bottom = '<span class="ccl-note">下一格：<b>' + esc(nx.playerName || '某人') + '</b> ' +
+      bottom = '<span class="ccl-note">下一个：<b>' + esc(nx.playerName || '某人') + '</b> ' +
         (nx.type === 'DRAWING' ? '照这个词作画' : '写起词') + '</span>';
     }
     return { top: top, bottom: bottom };
+  }
+
+  /* ---- ★ v15：作画格播完 →「下一棒猜的是什么」的悬念倒计时 ----
+   *
+   * 用户实测：以前每一格都占同样长的时间，起词格 / 猜词格没东西可看也干等，
+   * 而「下一棒猜的是什么」又提前写在下窄带里，等于没悬念。
+   * 现在服务端把这段尾留给作画格（legMsAt 里加的 REVEAL_TEASE_MS），前端在这段时间里：
+   *   笔迹播完 → 响一声 tease()（抽气）→ 倒数 3 / 2 / 1（每声 countTick）→
+   *   下一格（猜词格）开始放时响 reveal()（惊喜），词同时在上窄带里出现。
+   * 倒计时只会读数字，**绝不**提前把词写出来 —— 词只有一个来源：那一格自己的上窄带。 */
+  function crStopTease() {
+    if (S.cr.teaseTimer) { clearInterval(S.cr.teaseTimer); S.cr.teaseTimer = 0; }
+    S.cr.teaseLeft = 0;
+    S.cr.teaseName = '';
+  }
+  /** 悬念那一行的文案：「下一棒 <人> 猜的是：<读数>」——**只有这一处**会写出这句话 */
+  function crTeaseText(name, n) {
+    return '<span class="ccl-note">下一棒</span> <b>' + esc(safeName(name, '下一棒的名字')) +
+      '</b> 猜的是：<span class="ccl-cd" id="cclCount">' + (n > 0 ? String(n) : '？') + '</span>';
+  }
+  function crPaintCount(n) {
+    setChainCanvasBands(null, crTeaseText(S.cr.teaseName, n));
+    var el = $('#cclCount');
+    if (!el) return;
+    el.classList.remove('pulse');
+    void el.offsetWidth;              // 强制回流，动画才会重播
+    el.classList.add('pulse');
+  }
+  function crStartTease() {
+    var a = S.cr.anim;
+    if (!a || !a.tease) return;
+    if (!S.game || S.game.phase !== 'chain_reveal') return;
+    var items = (S.chainReveal && S.chainReveal[S.cr.chain] && S.chainReveal[S.cr.chain].steps) || [];
+    var nx = items[S.cr.item + 1];
+    // 剩多少时间 = 这一格的总时长 - 笔迹动画已经用掉的
+    var used = Math.max(0, Date.now() - (a.startAt || Date.now()));
+    var leftMs = Math.max(0, (a.dur || 0) - used);
+    var left = Math.max(1, Math.min(3, Math.round(leftMs / 1000)));
+    crStopTease();
+    S.cr.teaseName = (nx && nx.playerName) || '某人';
+    S.cr.teaseLeft = left;
+    crPaintCount(left);
+    SFX.play('tease');
+    S.cr.teaseTimer = setInterval(function () {
+      if (!S.game || S.game.phase !== 'chain_reveal') { crStopTease(); return; }
+      S.cr.teaseLeft -= 1;
+      if (S.cr.teaseLeft <= 1) {
+        crPaintCount(1);
+        if (S.cr.teaseTimer) { clearInterval(S.cr.teaseTimer); S.cr.teaseTimer = 0; }
+        return;
+      }
+      crPaintCount(S.cr.teaseLeft);
+      SFX.play('countTick', { n: S.cr.teaseLeft });
+    }, 1000);
   }
 
   /* ---- 逐笔动画 ---- */
@@ -9328,7 +9721,9 @@
     var items = (S.chainReveal && S.chainReveal[ci] && S.chainReveal[ci].steps) || [];
     var lab = crLegLabels(items, k);
     var total = crLegTotalMs();
-    var animMs = crLegAnimMs(total);
+    // ★ v15：下一格是猜词 → 这一格的尾巴要留给悬念倒计时，动画只能占剩下的时间
+    var nextIsGuess = !!(items[k + 1] && items[k + 1].type === 'GUESS');
+    var animMs = crLegAnimMs(total, nextIsGuess ? CR_ANIM.teaseMs : CR_ANIM.tailHoldMs);
     var strokes = (item && item.type === 'DRAWING' && Array.isArray(item.content)) ? item.content : null;
 
     if (a.chain === ci && a.item === k && !a.finished) {
@@ -9339,12 +9734,21 @@
     if (a.chain === ci && a.item === k && a.finished) {
       // 这一格刚才已经演完了（一次状态同步又进来）—— 只补词条，画面别动，
       // 否则每次状态同步都会把定格画面重画一遍。
-      setChainCanvasBands(lab.top, lab.bottom);
+      // ★ v15：如果这一格的悬念倒计时正走着，别把它覆盖掉（下窄带要留住读数）
+      setChainCanvasBands(lab.top,
+        (a.tease && S.cr.teaseLeft > 0) ? crTeaseText(S.cr.teaseName, S.cr.teaseLeft) : lab.bottom);
+      // ★ v16：进投票那一刻，最后一格常常是**猜词格**（没画）—— 回放期间它是空白，
+      //   这里补上「这一格往前最近的那幅画」，把最后一棒的成图留在画布上（用户要求）。
+      if (crCanvasOwned()) {
+        var isArt0 = !!(item && item.type === 'DRAWING' && Array.isArray(item.content) && item.content.length);
+        if (!isArt0) crCanvasShowArt(items, k - 1);
+      }
       return;
     }
 
     // 换格：停掉上一格，从头开始
     crStopAnim();
+    crStopTease();
     a.gen++;
     crDropLegCaches(item);
     a.chain = ci; a.item = k;
@@ -9356,17 +9760,28 @@
     a.finished = false;
     a.dur = total;
     a.animMs = animMs;
+    a.tease = nextIsGuess;
     setChainCanvasBands(lab.top, lab.bottom);
+    // ★ v15：猜词格一开始放就**揭晓**（惊喜音）—— 上窄带里的「<人> 猜的是：<词>」
+    //   正是刚刚数完倒计时的那个答案，音画同一下。
+    if (item && item.type === 'GUESS' && el < 400) SFX.play('reveal');
 
-    if (!item) { crShowImage(''); a.finished = true; return; }
+    if (!item) { crCanvasShowArt(items, k - 1); a.finished = true; return; }
 
     // GUESS 格在回放里不铺大字（词在上窄带里）——
     // 画面留白，把注意力交给上一条窄带说的「他猜的是什么」。
-    if (item.type !== 'DRAWING') { crShowImage(''); a.finished = true; return; }
+    // ★ v16：画布这块**不留白**了 —— 用户要「投票阶段底下保留最后一棒成图，不必清除」，
+    //   而且整场回放都画在真画布上（crCanvasTake），词格 / 猜词格就把**最近的那幅画**
+    //   整幅留在画布上：一条链的最后一格常常是猜词格（5 步链就是），
+    //   以前进投票时画布是空白，投票的人只能盯着纸片回忆刚才那幅画。
+    if (item.type !== 'DRAWING') {
+      crCanvasShowArt(items, k);
+      a.finished = true; return;
+    }
 
     if (!strokes || !strokes.length) {
       setChainCanvasBands(lab.top + ' <span class="ccl-note">（这一格没有交画）</span>', lab.bottom);
-      crShowImage('');
+      crCanvasShowArt(items, k - 1);
       a.finished = true;
       return;
     }
@@ -9435,37 +9850,73 @@
     a.startAt = Date.now();       // 重新计时 = 定格时间从「画完」这一刻算起
     a.landedAt = Date.now();      // 本地兜底节奏：这一格「最短定格」从这一刻起算
     a.framesAll = (a.framesAll | 0) + (a.frame | 0);   // 累计「逐笔画出过多少帧」（自测看这个）
+    // ★ v14：这一格**播完了** —— ♥ 立刻置灰（不用等下一次状态同步，那可能有 1 秒延迟，
+    //   用户在「刚放完」那一瞬间还点得动，等于没做到「过时不候」）。
+    if (S.game && S.game.phase === 'chain_reveal') {
+      var chain = S.chainReveal && S.chainReveal[S.cr.chain];
+      if (chain) renderChainVoteArea(chain);
+      // ★ v15：画播完了 → 如果下一格是猜词，就在这里起悬念倒计时
+      //   （「下一棒 X 猜的是：」+ 3 → 2 → 1，词等那一格开始放才揭晓）
+      crStartTease();
+    }
   }
 
-  /** 把「总共 upTo 笔」画进离屏画布，再喂给 #chainCanvasImg（逐笔 = 每帧都不一样） */
+  /** 把「总共 upTo 笔」画进**引擎尺寸的帧画布**（a.raw）。
+   *
+   *  ★ v16：这块画布现在是**引擎自己的回放画布**（engine.replayCanvas）——
+   *  用户的原话：「笔迹回放就在现成的画布区域展示得了呗，为啥非要弄个独立窗口出来呢」，
+   *  所以不再走「缩成一张 PNG 喂给 <img>」，而是每画出一批笔就 engine.invalidate()，
+   *  由引擎把这块画布**照常经过视口变换**画到真画布上 —— 和作画时同一块画布、同一个缩放，
+   *  屏幕上不会再出现第二个「窗口」。
+   *  ⚠ 笔迹只落在 a.raw（1:1，paintOnto 会把 transform 重置，缩放绝不能靠 transform —— 见 crAnimCanvas）。 */
   function crDrawUpTo(upTo) {
     var a = S.cr.anim;
-    if (!a || !a.ctx || !a.strokes) return;
+    if (!a || !a.rawCtx || !a.raw || !a.strokes) return;
     var strokes = a.strokes;
     var upto = Math.max(a.done, Math.min(strokes.length, upTo | 0));
-    a.ctx.setTransform(a.scale || 1, 0, 0, a.scale || 1, 0, 0);
+    a.rawCtx.setTransform(1, 0, 0, 1, 0, 0);
     for (var i = a.done; i < upto; i++) {
       var s = strokes[i];
-      try { engine.replayStampOne(a.ctx, a.cv, s); } catch (e) { /* 单笔坏了别拖垮整幅 */ }
+      try { engine.replayStampOne(a.rawCtx, a.raw, s); } catch (e) { /* 单笔坏了别拖垮整幅 */ }
     }
+    var grew = upto > a.done;
     a.done = upto;
     a.canvasBlank = false;
     a.frame++;
-    var url = '';
-    try { url = a.cv.toDataURL('image/png'); } catch (e) { url = ''; }
-    if (url) {
-      // 记下「这一格实际显示过的每一张画面」的指纹（自测/自检用：pics 长度 = 逐笔帧数）
-      var h = 0;
-      for (var k = 0; k < url.length; k += 97) h = (h * 31 + url.charCodeAt(k)) | 0;
-      var fp = url.length + ':' + h;
+    // 「这一格又长出新笔」的次数（逐笔动画的硬指标，自测/探针都读它）
+    if (grew) a.steps = (a.steps | 0) + 1;
+    // 指纹：从帧画布里抽一小块像素算个 hash（比每帧 toDataURL 便宜得多，语义一样：
+    // 画面变了它就变）。自测靠它断言「同一格里的画面确实一帧一帧在变」。
+    var fp = '';
+    try {
+      var sc = a.rawCtx.getImageData(0, 0, Math.min(64, a.raw.width), Math.min(40, a.raw.height)).data;
+      var hh = 0;
+      for (var q = 0; q < sc.length; q += 17) hh = (hh * 31 + sc[q]) | 0;
+      fp = hh + ':' + upto;
+    } catch (e) { fp = ''; }
+    if (fp) {
       if (!a.pics) a.pics = [];
       if (a.pics[a.pics.length - 1] !== fp) a.pics.push(fp);
-      a.steps = (a.steps | 0) + 1;      // 这一格「又长出新笔」的次数（逐笔动画的硬指标）
-      crShowImage(url);
+    }
+    // ★ v16：显示交给引擎 —— 它把 replayCanvas 画到真画布上（走当前视口变换）
+    if (crCanvasOwned()) {
+      engine.invalidate();
+    } else {
+      // 兜底：没接管画布时（老路径 / 假快照）还是缩一张 PNG 喂给 <img>
+      if (!a.ctx) crAnimCanvas();
+      a.ctx.setTransform(1, 0, 0, 1, 0, 0);
+      a.ctx.fillStyle = '#fff';
+      a.ctx.fillRect(0, 0, a.w, a.h);
+      try { a.ctx.drawImage(a.raw, 0, 0, a.w, a.h); } catch (e) { /* 画布被回收 */ }
+      var url = '';
+      try { url = a.cv.toDataURL('image/png'); } catch (e) { url = ''; }
+      if (url) crShowImage(url);
     }
   }
 
-  /** 把一张图（或空）摆到画布层中间那一格 */
+  /** 把一张图（或空）摆到画布层中间那一格。
+   *  ★ v16：回放期间**不再走这里**（那时画面由引擎画在真画布上，见 crCanvasTake）——
+   *  这条路只留给猜词步的「上家那幅画」、刚交完作品的成图、以及点赞最多的画。 */
   function crShowImage(url) {
     var layer = $('#chainCanvasLayer');
     if (layer) layer.classList.remove('hidden');
@@ -9478,6 +9929,75 @@
       img.removeAttribute('src');
       img.classList.add('hidden');
     }
+  }
+
+  /** 回放期间把 <img> 收掉 —— 画面这时候在真画布上，不该再多一块白面板 */
+  function crHideImg() {
+    var img = $('#chainCanvasImg');
+    if (!img) return;
+    img.removeAttribute('src');
+    img.classList.add('hidden');
+  }
+
+  /* ---- ★ v16：回放**画在真画布上**（用户：「就在现成的画布区域展示，别弄个独立窗口」）----
+   *
+   * 引擎本来就有这条路：`replayMode = true` 时，画布那一帧画的就是 `engine.replayCanvas`
+   * （引擎尺寸的整幅图），而且**照常经过视口变换**（见 engine.js 的 render：
+   * `if (this.replayMode && this.replayCanvas) ctx.drawImage(this.replayCanvas, 0, 0)`）。
+   *
+   * 于是：把逐笔帧画布直接交给引擎当 replayCanvas，每画出一批笔 invalidate 一次 ——
+   * 回放画面就和作画时**同一块画布、同一个缩放**，屏幕上不会再出现第二个「窗口」，
+   * 也不会被缩成小图（多大由用户当前的视图决定，他也随时能缩放/平移着看）。
+   *
+   * 用完把引擎原来的回放状态原样还回去（万一用户自己正开着「回放」看历史笔迹）。
+   */
+  function crCanvasOwned() { return S.cr.canvasOwner === 'chain'; }
+
+  function crCanvasTake() {
+    if (!engine || !engine.width) return null;
+    var a = S.cr.anim;
+    if (!crCanvasOwned()) {
+      S.cr.canvasPrev = { mode: !!engine.replayMode, canvas: engine.replayCanvas || null };
+      S.cr.canvasOwner = 'chain';
+    }
+    // 画面现在归引擎画了，但那一层里的**上下窄带 + 投票纸片**还得露出来
+    // （以前是 crShowImage 顺手把层显示的，改成画在画布上之后要自己来）
+    var layer = $('#chainCanvasLayer');
+    if (layer) layer.classList.remove('hidden');
+    crAnimCanvas();                       // 保证 a.raw 是引擎尺寸的帧画布
+    engine.replayCanvas = a.raw;
+    engine.replayMode = true;
+    engine.invalidate();
+    return a.raw;
+  }
+
+  function crCanvasRelease() {
+    if (!crCanvasOwned()) return;
+    var prev = S.cr.canvasPrev || {};
+    engine.replayCanvas = prev.canvas || null;
+    engine.replayMode = !!prev.mode;
+    S.cr.canvasOwner = '';
+    S.cr.canvasPrev = null;
+    engine.invalidate();
+  }
+
+  /** 把「这条链到第 k 格为止最近的一幅画」整幅（不带动画）铺到帧画布上 ——
+   *  词格 / 猜词格、以及投票阶段都靠它，免得画布空着（用户：「投票阶段底下保留最后一棒成图」）。 */
+  function crCanvasShowArt(items, k) {
+    var a = S.cr.anim;
+    if (!crCanvasOwned() || !a.rawCtx) return false;
+    var art = null;
+    for (var i = Math.min(k | 0, (items || []).length - 1); i >= 0; i--) {
+      var it = items[i];
+      if (it && it.type === 'DRAWING' && Array.isArray(it.content) && it.content.length) { art = it; break; }
+    }
+    if (!art) { crResetAnimCanvas(); return false; }
+    crResetAnimCanvas();
+    a.strokes = art.content;
+    a.done = 0;
+    crDrawUpTo(art.content.length);
+    a.finished = true;
+    return true;
   }
 
   function isChainVote() { return !!(S.game && S.game.phase === 'chain_vote'); }
@@ -9507,65 +10027,341 @@
     return !!(f && chain && f.chainId === chain.chainId);
   }
 
-  /** 投票区（只在 VOTE 阶段出现）：当前链的「起词 → 最后猜出来的词」+ √ / × + 已投人数 */
+  /**
+   * ★ v14：某一格画**是不是正在回放播放 / 定格**（♥ 只在这时候可点，过时不候）。
+   *
+   * 「那一格播完就置灰」的判据就是动画自己的 finished 标志（见 crFinishAnim）：
+   *   - 阶段必须是 chain_reveal（投票阶段是回放完了才进去的，那儿不再给 ♥）；
+   *   - 当前格必须是真的一幅画（有笔迹）；
+   *   - 动画还没 finished（正在一笔一笔画 / 刚画完正在定格）。
+   * 状态同步把它渲染成 `disabled` + 一句「这一格已经放完」，不是直接消失 ——
+   * 用户能看出「刚才能点，现在不能了」，而不是「按钮莫名其妙没了」。
+   */
+  function crLegFavOpen() {
+    var g = S.game;
+    if (!g || g.phase !== 'chain_reveal') return false;
+    var chain = S.chainReveal && S.chainReveal[S.cr.chain];
+    var item = chain && chain.steps && chain.steps[S.cr.item];
+    if (!item || item.type !== 'DRAWING' || !Array.isArray(item.content) || !item.content.length) return false;
+    var a = S.cr.anim;
+    if (!a || a.chain !== S.cr.chain || a.item !== S.cr.item) return false;
+    return !a.finished;
+  }
+
+  /** ★ v17：把投票纸片 + 那排投票圈整块收掉。
+   *
+   *  为什么单独立一个函数：以前「离开投票」这条路只收了下面的标记（renderChainVoteMarks(null)），
+   *  **纸片（#rpVote）没人收** —— 它一直挂在画布层里，新一局开始、画布层为了显示
+   *  「我刚交的画」又被显示出来时，上一局那张投票纸片就跟着冒出来了
+   *  （用户报的「新开的一局游戏会出现上局的投票窗口」）。
+   *  收的时候连着两个按钮一起隐藏 + 置灰，不留「灰着但还能点」的假象。 */
+  function crHideVotePaper() {
+    var box = $('#rpVote');
+    if (box) box.classList.add('hidden');
+    var bad = $('#rpVoteBad'), ok = $('#rpVoteOk');
+    if (bad) { bad.classList.add('hidden'); bad.disabled = true; }
+    if (ok) { ok.classList.add('hidden'); ok.disabled = true; }
+    resetVotePaper();
+    renderChainVoteMarks(null);
+  }
+
+  /* ---- 纸片投票面板的视觉零件（撕边 + 手绘圈） ----
+   *
+   * 用户给的参照图：一张**撕下来的纸**，边缘是不规则撕痕（不是圆角矩形），
+   * 纸面有横向扫描线；按钮是**手绘圈**（✗ 红圈在左、✓ 绿圈在右），
+   * 卡片下方再一排手绘圈表示「谁投了哪边」。
+   *
+   * 为什么用 CSS clip-path 的 polygon 而不是 SVG 撕纸边框：
+   *   纸片的内容（起词 / 猜词 / 两个按钮）全在 HTML 里，用 clip-path 裁一下
+   *   就能得到撕痕，**不用把内容塞进 <foreignObject>**（那样字号、点击、
+   *   文本断言都会变脆）。手绘圈的圈本身才用内联 SVG —— 那是纯画。
+   */
+
+  /** 伪随机（固定种子）：同一台机器每次刷新撕痕形状一样，测试截图可复现 */
+  function prand(seed) {
+    var s = seed >>> 0;
+    return function () {
+      s = (s * 1664525 + 1013904223) >>> 0;
+      return s / 4294967296;
+    };
+  }
+
+  /**
+   * 生成一条**撕痕**多边形的 clip-path（百分比坐标，跟随元素尺寸）。
+   *
+   * 做法：四条边各取若干采样点，沿边行走时让「沿边方向」和「垂直方向」都抖一点，
+   * 抖动幅度 1.2%~2.6% —— 太小看不出撕痕、太大会啃掉纸上的字。四个角一定有顶点。
+   */
+  var TORN_CLIP = null;
+  function tornPaperClip() {
+    if (TORN_CLIP) return TORN_CLIP;
+    var rnd = prand(20240414);
+    var pts = [];
+    var N = 13;                                  // 每条边的采样段数
+    function jitter(base, amp) { return base + (rnd() * 2 - 1) * amp; }
+    var i, t;
+    for (i = 0; i < N; i++) {                    // 上边：左 → 右
+      t = i / N;
+      pts.push(jitter(t * 100, 1.4).toFixed(2) + '% ' + jitter(1.6, 1.6).toFixed(2) + '%');
+    }
+    for (i = 0; i < N; i++) {                    // 右边：上 → 下
+      t = i / N;
+      pts.push(jitter(98.4, 1.6).toFixed(2) + '% ' + jitter(t * 100, 1.4).toFixed(2) + '%');
+    }
+    for (i = 0; i < N; i++) {                    // 下边：右 → 左
+      t = i / N;
+      pts.push(jitter(100 - t * 100, 1.4).toFixed(2) + '% ' + jitter(98.4, 1.6).toFixed(2) + '%');
+    }
+    for (i = 0; i < N; i++) {                    // 左边：下 → 上
+      t = i / N;
+      pts.push(jitter(1.6, 1.6).toFixed(2) + '% ' + jitter(100 - t * 100, 1.4).toFixed(2) + '%');
+    }
+    TORN_CLIP = 'polygon(' + pts.join(',') + ')';
+    return TORN_CLIP;
+  }
+
+  /** 给一张纸挂上撕痕（一次性，元素尺寸变了也不用重算 —— 百分比坐标） */
+  function applyTornPaper(el) {
+    if (!el || el.dataset.torn === '1') return;
+    try {
+      el.style.clipPath = tornPaperClip();
+      el.style.webkitClipPath = tornPaperClip();
+      el.dataset.torn = '1';
+    } catch (e) { /* 老内核不支持 clip-path：退化成矩形纸，不算事故 */ }
+  }
+
+  /**
+   * 手绘圈（内联 SVG）：不规则椭圆 + 圈里一个 ✓ / ✗，下面一行小字标签。
+   * 圈是一条闭合三次贝塞尔，四个手柄故意不对称 —— 看着就是手画的；
+   * dasharray 86/4 + 走一遍 dashoffset 的动画 = 「圈被随手画出来」的一下。
+   * ⚠ 标签写在 SVG 里（而不是按钮的 textContent）是刻意的：
+   *   按钮的 textContent 会因此自带「✓ √ 对得上」/「✗ × 跑偏了」，
+   *   自动化断言（和屏幕阅读器）拿到的就是完整的一句话。
+   */
+  var SKETCH_CACHE = {};
+  /** pending=true 时画一个**空圈**（浅灰虚线、不打勾不打叉）—— 「这个人还没投」。
+   *  参照图里那一排圈是 ✓✓✓✗✗，但**开投时空着的位置也要占一个圈**，
+   *  不然「谁还没投」只能靠人数猜（用户 v15 明确要求「显示全部玩家所投票」）。 */
+  function sketchDisk(ok, size, label, pending) {
+    var key = (pending ? 'wait' : (ok ? 'ok' : 'bad')) + '|' + size + '|' + (label || '');
+    if (SKETCH_CACHE[key]) return SKETCH_CACHE[key];
+    var s = size || 26;
+    var c = pending ? '#9aa4b2' : (ok ? '#2f8f4e' : '#d6453c');
+    var mark = pending ? '' : (ok
+      // ✓：两笔，第二笔长一点、往下探，像随手打的对勾
+      ? '<path d="M8.6 13.4 c 2.2 1.8 3.4 3.1 4.3 4.9 c 1.6 -4.4 4.1 -7.7 6.6 -10.1"'
+        + ' fill="none" stroke="' + c + '" stroke-width="2.1" stroke-linecap="round"'
+        + ' stroke-linejoin="round"/>'
+      // ✗：两笔交叉，交点略微偏左下（手绘感的来源）
+      : '<path d="M8.4 8.6 c 3 3.4 6.2 6.6 9.4 9.4 M17.8 8.4 c -3.3 3.6 -6.6 6.9 -9.6 9.6"'
+        + ' fill="none" stroke="' + c + '" stroke-width="2.1" stroke-linecap="round"/>');
+    var svg = '<svg class="sk-disk" width="' + s + '" height="' + s + '" viewBox="0 0 26 26"'
+      + ' aria-hidden="true" focusable="false">'
+      + '<path d="M13 2.2 C18.8 2.2 24 5.6 23.8 12.4 C23.6 19.4 18.6 23.8 12.6 23.7'
+      + ' C6.6 23.6 2.3 19.2 2.3 13 C2.3 6.9 7.2 2.2 13 2.2 Z"'
+      + ' fill="none" stroke="' + c + '" stroke-width="1.6" stroke-linecap="round"'
+      + ' stroke-dasharray="' + (pending ? '5 5' : '86 4') + '" transform="rotate(-3 13 13)">'
+      + (pending ? '' : '<animate attributeName="stroke-dashoffset" values="0;-90;0" dur="2.2s"'
+        + ' repeatCount="indefinite"/>')
+      + '</path>'
+      + mark + '</svg>'
+      + (label ? '<u class="pp-lab">' + esc(label) + '</u>' : '');
+    SKETCH_CACHE[key] = svg;
+    return svg;
+  }
+
+  /** 一个手绘圈按钮的状态：圈里的符号（✓/✗）、高亮、置灰、以及「已投」那半句。
+   *  ⚠ 「已投」不能写进 textContent（会把圈抹掉），走 data-voted + CSS ::after。 */
+  var VOTE_LABEL = { ok: '√ 对得上', bad: '× 跑偏了' };
+  function setVoteBtn(btn, ok, voted) {
+    if (!btn) return;
+    var c = btn.querySelector('.pp-c');
+    if (c) c.innerHTML = sketchDisk(ok, 26, VOTE_LABEL[ok ? 'ok' : 'bad']);
+    btn.dataset.voted = voted ? '1' : '';
+    btn.classList.toggle('voted', !!voted);
+    btn.classList.toggle('primary', !!voted);
+    btn.classList.toggle('ghost', !voted);
+    btn.title = voted ? '你已经投了这一票（可以改投另一边）' : '';
+    btn.setAttribute('aria-label', VOTE_LABEL[ok ? 'ok' : 'bad'] + (voted ? '（已投）' : ''));
+  }
+
+  /** 这条链的**全体投票人**（画布下方那排圈要给每个人都留一个位置）。
+   *
+   *  名单来源有两处，**优先用服务端的**：
+   *    ① 快照里的 groups（每条链那一组的成员名单，voteGroupId 指的就是它）——
+   *       这也是 voteTotal 的来源，两边一定对得上；
+   *    ② 兜底：链条上的作者顺序（老服务端 / 假快照没有 groups 时）。
+   *  服务端的 voteMarks 只报「已经投过的人」，光看它会不知道还有谁没投 —— 用户要的是
+   *  「投票窗口下方显示**全部玩家**所投票」，所以名单必须独立于 marks。 */
+  function chainRoster(g, chain) {
+    var out = [], seen = {};
+    var push = function (id, name) {
+      if (!id || seen[id]) return;
+      seen[id] = 1;
+      out.push({ userId: id, name: safeName(name, '投票人名单') });
+    };
+    var gid = g && g.voteGroupId;
+    var groups = (g && g.groups) || [];
+    for (var i = 0; i < groups.length; i++) {
+      if (gid && groups[i].id !== gid) continue;
+      ((groups[i] && groups[i].members) || []).forEach(function (m) {
+        push(m && m.userId, m && m.name);
+      });
+      break;
+    }
+    if (!out.length) {
+      ((chain && chain.steps) || []).forEach(function (s) { push(s && s.playerId, s && s.playerName); });
+    }
+    return out;
+  }
+
+  /** 画布纸片**下方**那排「全场玩家的投票」：每人一个手绘圈 —— 投过的是 ✓ / ✗，
+   *  还没投的是一个浅灰虚线空圈（位置先占住，投了就当场变成 √ / ×）。
+   *  最前面挂一句「已投 x / y」。 */
+  function renderChainVoteMarks(g) {
+    var box = $('#rpVoteMarks');
+    if (!box) return;
+    var paper = $('#rpVote');
+    var paperOn = !!(paper && !paper.classList.contains('hidden'));
+    // 只在投票阶段、且纸片已经弹出来之后才显示（定格那几秒画面上只有最后一格）
+    var show = !!(g && g.phase === 'chain_vote' && paperOn);
+    if (!show) {
+      box.classList.add('hidden');
+      box.innerHTML = '';
+      box.style.top = '';
+      // 收起期间票数照样在涨 —— 记下来，等弹出时不当成「刚有人投票」乱响
+      S.cr.voteSeen = g ? (g.voteDone | 0) : 0;
+      return;
+    }
+    var chain = S.chainReveal && S.chainReveal[S.cr.chain];
+    var marks = Array.isArray(g.voteMarks) ? g.voteMarks : [];
+    var byUid = {};
+    marks.forEach(function (m) { if (m && m.userId) byUid[m.userId] = !!m.add; });
+    var roster = chainRoster(g, chain);
+    if (!roster.length) {
+      // 假快照 / 老服务端：链条里没有 playerId，只能退回「服务端报了几个就画几个」
+      roster = marks.map(function (m) {
+        return { userId: m.userId, name: safeName(m && m.name, '投票人名字') };
+      });
+    }
+    var html = '<span class="rm-done">已投 ' + (g.voteDone | 0) + ' / ' + (g.voteTotal | 0) + '</span>';
+    roster.forEach(function (p) {
+      var voted = Object.prototype.hasOwnProperty.call(byUid, p.userId);
+      var add = !!byUid[p.userId];
+      html += '<span class="rm' + (voted ? (add ? ' ok' : ' bad') : ' pending') + '" title="' + esc(p.name)
+        + (voted ? (add ? ' 投了 √ 对得上' : ' 投了 × 跑偏了') : ' 还没投') + '">'
+        + sketchDisk(add, 22, '', !voted) + '<i>' + esc(p.name) + '</i></span>';
+    });
+    box.innerHTML = html;
+    box.classList.remove('hidden');
+    // 位置：紧贴纸片下沿（纸片是绝对居中的，高度不定 → 渲染完量一次，别写死 CSS）
+    var box2 = $('#rpVoteMarks');
+    var layer = $('#chainCanvasLayer');
+    if (box2 && layer) {
+      var pr = paper.getBoundingClientRect(), br = box2.getBoundingClientRect();
+      var lr = layer.getBoundingClientRect();
+      if (pr.height > 0 && br.height > 0 && lr.height > 0) {
+        var top = Math.round(pr.bottom - lr.top + 8);
+        var maxTop = Math.round(lr.height - br.height - 6);
+        box2.style.top = Math.max(0, Math.min(top, Math.max(0, maxTop))) + 'px';
+      }
+    }
+    // ★ v15：投票音效 —— 别人投了一票（这排圈多了一个）时轻轻响一声；
+    //   自己刚按下去的那一下已经响过 voteStamp 了，1.2 秒内不重复。
+    var done = g.voteDone | 0;
+    if (done > (S.cr.voteSeen | 0) && Date.now() - (S.cr.myVoteAt | 0) > 1200) SFX.play('voteLand');
+    S.cr.voteSeen = done;
+  }
+
+  /**
+   * ★ v14：画布**中央**的「纸片」投票面板（#rpVote，见 index.html / styles.css）。
+   *
+   * 用户要的：一条链**全部棒次回放完**之后才进投票；进投票后先**定格**几秒，
+   * 再在画布中央弹出这张纸片，内容从上到下 ——
+   *   起词：<词> → 最终猜词：<词> → 这个匹配吗？ → 【× 跑偏了】【√ 对得上】。
+   * 下方的「已投 x / y + 每人一个 √ / ×」走 renderChainVoteMarks（在画布下方）。
+   *
+   * ⚠ 纸片是 #chainCanvasLayer 这个 flex 列里的一行（夹在上下窄带之间），
+   *   只吃中间那块高度 —— 物理上压不到窄带，也不会盖住画布之外的东西。
+   */
   function renderChainVoteArea(chain) {
     var g = S.game;
     var box = $('#rpVote');
     if (!box) return;
+    // ★ 只有「整条链放完、轮到投票」才出现 —— 服务端用 voteChainId + phase=chain_vote
+    //   保证「放完才投、每条链串行」，前端只跟着它显隐。
     var show = !!(g && g.phase === 'chain_vote');
-    box.classList.toggle('hidden', !show);
-    var btn = $('#btnRpNext');
-    if (btn) {
-      // 房主的「立刻推进」：REVEAL→进投票 / VOTE→结算（SCORE 时服务端自动回大厅，不给按钮）
-      btn.classList.toggle('hidden', !S.me.isOwner || !g ||
-        (g.phase !== 'chain_reveal' && g.phase !== 'chain_vote'));
-      btn.textContent = (g && g.phase === 'chain_vote') ? '立刻结算' : '进入投票';
-    }
-    if (!show) return;
-    var hint = $('#rpVoteHint');
-    if (hint) hint.textContent = '这两个匹配吗？';
-    var myKeep = (g.myKeep || {})[chain.chainId];
     var bad = $('#rpVoteBad'), ok = $('#rpVoteOk');
-    // 投过的那一侧高亮 + 标「已投」，另一侧退回未选中的样子
-    bad.textContent = myKeep === false ? '× 已投：跑偏了' : '× 跑偏了';
-    ok.textContent = myKeep === true ? '√ 已投：对得上' : '√ 对得上';
-    bad.classList.toggle('primary', myKeep === false);
-    ok.classList.toggle('primary', myKeep === true);
-    bad.classList.toggle('ghost', myKeep !== false);
-    ok.classList.toggle('ghost', myKeep !== true);
-    bad.classList.toggle('voted', myKeep === false);
-    ok.classList.toggle('voted', myKeep === true);
-
-    // 已投 x / y 直接读服务端算好的数 —— 各端显示才不会一个 2/4 一个 3/4
-    var done = $('#rpVoteDone');
-    if (done) {
-      done.textContent = '已投 ' + (g.voteDone | 0) + ' / ' + (g.voteTotal | 0) +
-        (myKeep === undefined ? '' : (myKeep ? ' · 你投了 √' : ' · 你投了 ×'));
+    if (!show) {
+      box.classList.add('hidden');
+      resetVotePaper();
+      // 收起时把两个按钮一起藏掉 + 置灰（不留「灰着但还能点」的假象）
+      if (bad) { bad.classList.add('hidden'); bad.disabled = true; }
+      if (ok) { ok.classList.add('hidden'); ok.disabled = true; }
+      renderChainVoteMarks(null);
+    } else {
+      // 进投票后先定格 voteFreezeMs（服务端下发，3~5 秒），到点才弹纸片
+      var ready = votePaperReady(g);
+      box.classList.toggle('hidden', !ready);
+      // 两个按钮的圈先渲好（隐藏时也渲，弹出那一刻不会闪一下空白）
+      setVoteBtn(bad, false, false);
+      setVoteBtn(ok, true, false);
+      if (bad) { bad.disabled = !ready; bad.classList.toggle('hidden', !ready); }
+      if (ok) { ok.disabled = !ready; ok.classList.toggle('hidden', !ready); }
+      if (ready) {
+        applyTornPaper(box);
+        var first = $('#rpVoteFirst'), last = $('#rpVoteLast');
+        // ★ 去 [object Object] 的兜底：这两个字段可能来自服务端 / 老壳 / 假快照，
+        //   一律过 safeWord —— 非字符串 console.error + 渲染「（空）」。
+        if (first) first.textContent = safeWord(chain && chain.firstWord, '纸片的起词');
+        if (last) last.textContent = safeWord(chain && chain.lastWord, '纸片的最终猜词');
+        var hint = $('#rpVoteHint');
+        if (hint) hint.textContent = '这个匹配吗？';
+        var myKeep = (g.myKeep || {})[chain.chainId];
+        // 投过的那一侧高亮 + 标「已投」，另一侧退回未选中的样子。
+        // ⚠ 圈是内联 SVG，不能整块 textContent 覆盖（会把圈抹掉）——
+        //   所以「已投」那句走 ::after（见 styles.css 的 [data-voted]）。
+        setVoteBtn(bad, false, myKeep === false);
+        setVoteBtn(ok, true, myKeep === true);
+        // 已投 x / y 直接读服务端算好的数 —— 各端显示才不会一个 2/4 一个 3/4
+        var done = $('#rpVoteDone');
+        if (done) {
+          done.textContent = '已投 ' + (g.voteDone | 0) + ' / ' + (g.voteTotal | 0) +
+            (myKeep === undefined ? '' : (myKeep ? ' · 你投了 √' : ' · 你投了 ×'));
+        }
+      }
     }
+    // 画布**下方**那排标记（谁投了、投了哪边）
+    renderChainVoteMarks(g);
 
-    // 「最喜欢的一张画」：画格现在铺在主画布上（层不吃指针），
-    // 所以 ♥ 按钮挪到这条横条里，只当前格是画的时候才露出来。
-    // ★ v12：♥ 是**按链**记的 —— 每条链各能投一次。这里只看「当前这条链」投过没有
-    //   （S.game.myFav 就是服务端按当前链给的），投过就高亮 + 标「已投」。
+    // 「最喜欢的一张画」：**单独一行**（#rpFavRow），和 √ / × 那一行分开 ——
+    // 它投的是「这条链里我最喜欢的一幅画」，跟「首尾对得上吗」是两码事，
+    // 服务端也分开统计（结算里各自给分），前端绝不混在一起。
+    // ★ v12：♥ 是**按链**记的 —— 每条链各能投一次。
+    // ★ v14：**只在某一格画正在回放播放 / 定格时可点**，那一格播完就置灰（过时不候）。
     var favBtn = $('#rpFavBtn');
     var item = chain.steps && chain.steps[S.cr.item];
-    var canFav = !!(item && item.type === 'DRAWING' && Array.isArray(item.content) && item.content.length);
+    var isArt = !!(item && item.type === 'DRAWING' && Array.isArray(item.content) && item.content.length);
+    var open = crLegFavOpen();
+    var canFav = isArt && (open || isMyFav(S.cr.chain, S.cr.item));
+    var favRow = $('#rpFavRow');
+    if (favRow) favRow.classList.toggle('hidden', !canFav);
     if (favBtn) {
       favBtn.classList.toggle('hidden', !canFav);
       var mine = canFav && isMyFav(S.cr.chain, S.cr.item);
       var chainVoted = chainFavMine(chain);
-      favBtn.textContent = mine ? '♥ 已投 · 这张' : '♡ 最喜欢这张';
+      favBtn.textContent = mine ? '♥ 已投 · 这张' : (open ? '♡ 最喜欢这张' : '♡ 这一格已经放完');
       favBtn.classList.toggle('primary', !!mine);
       favBtn.classList.toggle('voted', !!mine);
-      favBtn.title = chainVoted
-        ? '这条链你已经投过 ♥ 了（每条链一次，可以再挑别的链）'
-        : '把这张选为本条链里你最喜欢的画（每条链各一次）';
+      favBtn.disabled = !canFav || !open;
+      favBtn.title = !open
+        ? '这一格已经放完了 —— ♥ 只在画正在回放的时候投'
+        : chainVoted
+          ? '这条链你已经投过 ♥ 了（每条链一次，可以再挑别的链）'
+          : '把这张选为本条链里你最喜欢的画（每条链各一次）';
     }
 
     // 我一共投过几条链（不是全场进度）—— 让人知道「还能投」。
-    // ⚠ 链长是奇数时最后一格是「猜词」，而 ♥ 只出现在画格上 —— 服务端把投票的棒次
-    //   钉在最后一格（要对着最终画面判「对得上吗」），所以这里只能说一句「用 ⏮ 翻到画上」，
-    //   不能自作主张把棒次挪走（那会让「起词 → 最终猜词」那行结果提前消失）。
     var favState = $('#rpFavState');
     if (favState) {
       var n = favVotedCountOf(g);
@@ -9573,9 +10369,27 @@
       if (!isFinite(totalChains) || totalChains <= 0) totalChains = (S.chainReveal || []).length;
       var txt = '你已给 ' + n + ' 条链投过 ♥' +
         (totalChains > 0 ? '（共 ' + totalChains + ' 条 · 每条链一次）' : '（每条链一次）');
-      if (!canFav) txt += ' · 用 ⏮ 翻到一幅画上再点 ♥';
+      if (!open) txt += ' · ♥ 只在某幅画回放时能投（过时不候）';
       favState.textContent = txt;
     }
+  }
+
+  /* ---- 纸片出现的时机：进投票后先定格几秒（各端同时弹、同时能点） ---- */
+  var VOTE_PAPER_FALLBACK_MS = 3500;    // 服务端没下发 voteFreezeMs 时的兜底（协议默认同一档）
+  var voteReadyAt = 0;
+  function resetVotePaper() { voteReadyAt = 0; }
+  /** 进投票那一刻记下「到点」的时间（只记一次；换链 / 离开展开时重置） */
+  function votePaperReady(g) {
+    var freeze = Number(g && g.voteFreezeMs);
+    if (!isFinite(freeze) || freeze < 0) freeze = VOTE_PAPER_FALLBACK_MS;
+    if (!voteReadyAt) {
+      voteReadyAt = Date.now() + freeze;
+      // 到点那一刻**自己重渲染一次** —— 状态同步可能刚好在这几秒里没来，
+      // 光等下一次 sync 会让「定格 3~5 秒」变成「定格到下一次同步」。
+      S.cr.timer = setTimeout(function () { S.cr.timer = null; renderChainReveal(); },
+        Math.max(0, freeze) + 40);
+    }
+    return Date.now() >= voteReadyAt;
   }
 
   /** keep 票：当前这条链「首尾对得上吗」。票可改（服务端按人记 Map）。 */
@@ -9584,6 +10398,9 @@
     var chain = S.chainReveal && S.chainReveal[S.cr.chain];
     if (!chain || !g || g.phase !== 'chain_vote') return;
     var my = (g.myKeep || {})[chain.chainId];
+    // ★ v15：投票音效 = 纸片被拍在桌上（voteStamp）+ 原来那声倾向音（√ 亮 / × 低）
+    S.cr.myVoteAt = Date.now();
+    SFX.play('voteStamp');
     SFX.play(agree ? 'voteOk' : 'voteBad');
     net.send(P.C2S.GAME_VOTE, { kind: 'keep', chainId: chain.chainId, agree: !!agree });
     // 立刻给按钮一个「按下了」的反馈，别等服务端回快照 ——
@@ -9596,11 +10413,15 @@
   }
 
   /** fav 票：本条链里我最喜欢的一张画（v12：**每条链各一票**，同一张再点 = 不变；
-   *  同一链里换一张 = 改票，服务端按 (chainId → step) 覆盖）。 */
+   *  同一链里换一张 = 改票，服务端按 (chainId → step) 覆盖）。
+   *  ★ v14：只在**这一格画正在回放播放 / 定格**时可投（crLegFavOpen），过时不候 ——
+   *  服务端 favVote 也认 REVEAL 阶段，所以回放途中点下去就是生效的。 */
   function sendFavVote(ci, si) {
     var g = S.game;
     var chain = S.chainReveal && S.chainReveal[ci];
-    if (!chain || !g || g.phase !== 'chain_vote') return;
+    if (!chain || !g) return;
+    if (g.phase !== 'chain_vote' && g.phase !== 'chain_reveal') return;
+    if (ci === S.cr.chain && si === S.cr.item && !crLegFavOpen() && !isMyFav(ci, si)) return;
     var item = chain.steps && chain.steps[si];
     if (!item || item.type !== 'DRAWING') return;
     if (isMyFav(ci, si)) { SFX.play('tap'); return; }   // 已经是这张了，别重投
@@ -9613,11 +10434,10 @@
     sendFavVote(S.cr.chain, S.cr.item);
   }
 
-  /** 回放控制那一整组（播放 / 前后翻格 / 速度 / 格点）的显隐。
-   *  小结算时画布上放的是「这条链的结果」，翻格按钮留着会被误点 ——
-   *  一点就 renderChainReveal 发现阶段不对，把整条横条（含结果行）收掉了。 */
+  /** 回放那一组「进度件」的显隐（v14 只剩格点进度 + 房主的「立刻推进」）。
+   *  小结算时画布上放的是「这条链的结果」，格点 / 按钮留着会被误点。 */
   function setChainCtlVisible(on) {
-    ['#rpPlay', '#rpPrevItem', '#rpNextItem', '#rpSpeed', '#rpPills'].forEach(function (sel) {
+    ['#rpPills'].forEach(function (sel) {
       var el = $(sel);
       if (el) el.classList.toggle('hidden', !on);
     });
@@ -9636,14 +10456,16 @@
     var r = settled[settled.length - 1];
     if (!r) { score.classList.add('hidden'); return; }
     bar.classList.remove('hidden');
-    setReplayChrome(true);
+    setChainStrip();
     crStopAnim();
+    crCanvasRelease();          // ★ v16：小结算把画布还给文档本身
     crMarkExternal(false);
     setChainCtlVisible(false);
     $('#rpTitle').textContent = '结算';
     $('#rpIndex').textContent = (Math.max(1, (g.voteChainIndex | 0))) + ' / ' + (g.chainCount | 0);
-    $('#rpChainHead').innerHTML = '「' + esc(r.firstWord || '（空）') + '」这条链已结算';
+    $('#rpChainHead').innerHTML = '「' + esc(safeWord(r.firstWord, '小结算的起词')) + '」这条链已结算';
     renderRpPills([]);
+    renderChainVoteMarks(null);      // 小结算没有投票标记（那条链已经投完了）
     var verdict = $('#rpVerdict');
     if (verdict) { verdict.innerHTML = ''; verdict.classList.remove('ok', 'bad'); }
     var vote = $('#rpVote');
@@ -9669,34 +10491,10 @@
     if (score) { score.classList.add('hidden'); score.innerHTML = ''; }
   }
 
-  /** 翻一格（⏮ / ⏭ 与小点跳格共用）。播放中手动翻格后继续按节奏走。
-   *  ⚠ 手动翻格只是「本地看一眼」——服务端下一次下发 revealStep 时仍以它为准。 */
-  function crStepItem(d) {
-    var chain = S.chainReveal && S.chainReveal[S.cr.chain];
-    if (!chain) return;
-    var items = chain.steps || [];
-    var next = S.cr.item + d;
-    if (next < 0 || next >= items.length) {
-      S.cr.playing = false;
-      crClearTimer();
-      syncRpPlayBtn();
-      return;
-    }
-    S.cr.item = next;
-    SFX.play('cellReveal');
-    renderChainReveal();     // 里面已经按新格重排了节奏，别在这再排一次（会重置计时）
-  }
-
-  /** 自动播放：按这一格的总时长（服务端 legHoldMs / 倍速）停一拍；到底自动停 */
-  function crPlay() {
-    var chain = S.chainReveal && S.chainReveal[S.cr.chain];
-    if (!chain || !(chain.steps || []).length) return;
-    if (S.cr.playing) { S.cr.playing = false; crClearTimer(); syncRpPlayBtn(); return; }
-    S.cr.playing = true;
-    if (S.cr.item >= (chain.steps || []).length - 1) S.cr.item = 0;   // 到底了就从头演
-    syncRpPlayBtn();
-    renderChainReveal();
-  }
+  /* ★ v14：本地「自动播放」的节奏 —— 回放**不再有**手动翻格 / 播放 / 暂停
+   * （crStepItem / crPlay / syncRpPlayBtn 三个函数连同 UI 一起删掉了）。
+   * 服务端每过 revealLegMs 推进一格并下发 revealStep，前端跟着切；
+   * 下面这个定时器只是**兜底**（万一某次状态同步丢了，本地也能按同一节奏继续往下走）。 */
 
   function crScheduleNext() {
     crClearTimer();
@@ -9710,16 +10508,13 @@
       if (!S.cr.playing) return;
       var chain = S.chainReveal && S.chainReveal[S.cr.chain];
       var items = chain ? (chain.steps || []) : [];
-      if (S.cr.item >= items.length - 1) { S.cr.playing = false; syncRpPlayBtn(); return; }
+      if (S.cr.item >= items.length - 1) { S.cr.playing = false; return; }
       S.cr.item += 1;
-      SFX.play('cellReveal');
+      // ★ v15：走到猜词格 = 悬念揭晓（和 crApplyLeg 里那一处同一个音）
+      var nx = items[S.cr.item];
+      SFX.play(nx && nx.type === 'GUESS' ? 'reveal' : 'cellReveal');
       renderChainReveal();
     }, crLegTotalMs());
-  }
-
-  function syncRpPlayBtn() {
-    var b = $('#rpPlay');
-    if (b) b.textContent = S.cr.playing ? '⏸ 暂停' : '▶ 播放';
   }
 
   /* ---- 最终结算第一步：「点赞最多的画」（v12） ----
@@ -10411,7 +11206,7 @@
 
     // 阶段播报 + 音效
     if (phase !== prevPhase) {
-      if (phase === 'chain_write' && prevPhase === 'chain_init') toast('第一手：每人给自己那条链写一个起词（写完自己先照它画）', 'ok', 3000);
+      if (phase === 'chain_write' && prevPhase === 'chain_init') toast('第一手：每人给自己那条链起个头（写完自己先照它画）', 'ok', 3000);
       else if (phase === 'lobby' && prevPhase === 'chain_score') toast('回到大厅 —— 点「准备」再来一局（分数保留）', 'ok', 2600);
       else if (phase === 'lobby') toast('接龙大厅已就绪', 'ok', 2400);
       else if (phase === 'off' && prevPhase !== 'off') toast('接龙结束，回到自由绘画', 'ok', 2600);
@@ -11844,17 +12639,33 @@
   }
 
   /** 快捷条折行 / 收起 / 自定义显隐都会变高 —— HUD 和回合卡挂在它下面，得跟着挪 */
-  /** 回放 / 投票开着的时候，把画布上沿那两条常驻浮层压小：
-   *  快捷条收成一个小箭头（省下上百 px），HUD 只留「阶段+倒计时 / 结束游戏 / 计分」。
-   *  用户自己的快捷条展开状态记在 S.cr.qbWasOpen 里，回放一结束就恢复。
-   *  —— 这是「面板不占画面」的关键：不然上窄带只能一路被顶到画面中间。 */
-  function setReplayChrome(on) {
+  /**
+   * 接龙阶段的「上沿状态条」开关 + 回放期间再省一点地方。
+   *
+   * v13 起，接龙的**每一个阶段**（写词 / 作画 / 猜词 / 回放 / 投票 / 小结算）都走这一套：
+   *   · #stage.chain-strip → CSS 把 #gameHud 从「居中大白框」压成画布上沿那条 ≤40px 的
+   *     半透明状态条（只留 阶段+倒计时 · 第 X/Y 手 · 已完成，右侧是房主那几颗按钮）。
+   *     以前只有回放期间才收窄，写词 / 猜词时那个宽 460 高 139 的白面板就钉在画布正中。
+   *   · #stage.replay-chrome → 回放 / 投票 / 小结算期间把快捷条收成一个小箭头，
+   *     省下的高度全给中间那一格画面；用户自己的快捷条展开状态记在 S.cr.qbWasOpen 里，
+   *     离开这些阶段就恢复原样。
+   */
+  function setChainStrip() {
     var stage = $('#stage');
-    if (stage) stage.classList.toggle('replay-chrome', !!on);
+    var g = S.game;
+    var chain = isChainMode() && !!g && g.phase !== 'off';
+    // 回放 / 投票 / 小结算：中间那一格画面最需要高度
+    var compact = !!(chain && (g.phase === 'chain_reveal' || g.phase === 'chain_vote' ||
+      g.phase === 'chain_score'));
+    if (stage) {
+      stage.classList.toggle('chain-strip', chain);
+      stage.classList.toggle('replay-chrome', compact);
+    }
+
     var open = false;
     var bar = $('#quickBar');
     if (bar) open = !bar.classList.contains('collapsed');
-    if (on) {
+    if (compact) {
       if (S.cr.qbWasOpen === null || S.cr.qbWasOpen === undefined) S.cr.qbWasOpen = open;
       if (open) setQuickBarCollapsed(true, false);
     } else if (S.cr.qbWasOpen !== null && S.cr.qbWasOpen !== undefined) {
@@ -13493,7 +14304,8 @@
     startChainGame: startChainGame, openChainDialog: openChainDialog,
     submitChainWord: submitChainWord, submitChainArt: submitChainArt,
     doChainGuessSubmit: doChainGuessSubmit, voteKeep: voteKeep, sendFavVote: sendFavVote,
-    crPlay: crPlay, crStepItem: crStepItem,
+    // v14：回放没有手动翻格 / 播放（crPlay / crStepItem 已删），只留「这一格能不能点 ♥」
+    crLegFavOpen: crLegFavOpen,
     favCurrentItem: favCurrentItem, endChainGame: endChainGame,
     openTrophy: openTrophy, closeTrophy: closeTrophy,
     // 最终结算第一步「点赞最多的画」：给测试/控制台喂假 voteResult 的入口

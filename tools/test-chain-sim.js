@@ -60,17 +60,21 @@ function makeGame(names, opts) {
   return { g, room, chats, reveals, r, api };
 }
 
-/** 交当前一格：WRITE/DRAWING/GUESS 各按类型交（全员交齐自动收格） */
-function playGrid(g, room, mode) {
+/** 交当前一格：WRITE/DRAWING/GUESS 各按类型交（全员交齐自动收格）
+ *  perStep = 作画格交几笔（★ v16：回放动画时长**按笔数**算，测试要能造出「多笔」的一格） */
+function playGrid(g, room, mode, perStep) {
   const type = g.stepTypeOf(g.stepIndex);
   const k = g.stepIndex;
+  const nStrokes = Math.max(1, perStep || 1);
   for (const uid of g.ring) {
     const ch = g.cellOf(uid, k);
     if (!ch) continue;                             // 组内已经走完一圈的人这一格没活
     if (type === STEP.WORD) {
       g.submit(uid, { text: mode === 'same' ? '长颈鹿' : ('词_' + ch.chainId) });
     } else if (type === STEP.DRAWING) {
-      room.strokes.push({ userId: uid, points: [{ x: 1, y: 2 }, { x: 3, y: 4 }], color: '#112233', size: 5, ts: 1, te: 2 });
+      for (let s = 0; s < nStrokes; s++) {
+        room.strokes.push({ userId: uid, points: [{ x: 1, y: 2 }, { x: 3, y: 4 }], color: '#112233', size: 5, ts: 1, te: 2 });
+      }
       g.submit(uid, {});
     } else {
       g.submit(uid, { text: mode === 'same' ? '长颈鹿' : ('猜_' + ch.chainId) });
@@ -136,7 +140,9 @@ function runChainVotes(g, vote) {
       const cur = g.currentVoteChain();
       order.push(cur.chainId);
       if (vote) vote(cur.chainId, cur, order.length);
-      g.settleChain();
+      // ★ v14：全员投完时服务端会**自动**结算这条链（不用等满时长）——
+      //   那时 phase 已经不在 VOTE 了，别再补一次 settleChain（会多结算一条链）。
+      if (g.phase === CHAIN_PHASE.VOTE) g.settleChain();
       continue;
     }
     if (g.phase === CHAIN_PHASE.SCORE) { g.tick(g.deadline); continue; }
@@ -387,21 +393,35 @@ console.log('\n[7] 回放数据形状 + chatLeaks');
   ok('末词 = 长颈鹿（猜对了）', c1.steps[2].content === '长颈鹿');
 }
 
-console.log('\n[7b] ★ 回放棒次由服务端同步：revealStep / revealLegs / legHoldMs');
+console.log('\n[7b] ★ 回放棒次由服务端同步：revealStep / revealLegs / legHoldMs / legMs');
 {
-  const { g, room } = makeGame(['甲', '乙', '丙', '丁'], { chainLength: 8, revealSeconds: 16 });
+  const { g, room } = makeGame(['甲', '乙', '丙', '丁'], { chainLength: 8, revealSeconds: 16, replaySpeed: 1 });
   toGrid(g, room, 0, 'free');
   while (g.isPlaying()) playGrid(g, room, 'free');
   ok('走完 8 格 → 回放', g.phase === CHAIN_PHASE.REVEAL, g.phase);
   ok('★ 回放一进来指针在第 0 格', g.revealStep === 0, String(g.revealStep));
-  ok('★ revealLegMs = 总时长 / 格数 = 16000 / 8 = 2000',
-    g.revealLegMs() === 2000, String(g.revealLegMs()));
+  // ★ v15：**每一格的时长不再一样**（起词 / 猜词格干等太久，是用户实测报的）
+  // ★ v16：作画格的动画时长改成**按笔数**算（起步 900 + 每笔 240，夹 [1500, 9000]，再除倍速）。
+  //   这个 fixture 每一步只交 1 笔 → 900+240=1140 低于地板 → 兜 1500。
+  ok('★ 起词格只停 CHAIN_REVEAL_WORD_MS（不再和作画格一样长）',
+    g.revealLegMs(0) === P.GAME.CHAIN_REVEAL_WORD_MS, String(g.revealLegMs(0)));
+  ok('★ 猜词格停 CHAIN_REVEAL_GUESS_MS（v16 起 2 秒：那个词要看清再翻下一棒）',
+    g.revealLegMs(2) === P.GAME.CHAIN_REVEAL_GUESS_MS, String(g.revealLegMs(2)));
+  ok('★ 1 笔的作画格兜动画地板 1500，下一格是猜词 → 再加 3 秒悬念尾 = 4500',
+    g.revealLegMs(1) === P.GAME.CHAIN_REVEAL_DRAW_MIN_MS + P.GAME.CHAIN_REVEAL_TEASE_MS,
+    String(g.revealLegMs(1)));
+  ok('★ 最后一格作画后面没有猜词 → 只留一小段定格（1500 + HOLD）',
+    g.revealLegMs(7) === P.GAME.CHAIN_REVEAL_DRAW_MIN_MS + P.GAME.CHAIN_REVEAL_HOLD_MS,
+    String(g.revealLegMs(7)));
   const snap = g.snapshotFor('u1');
-  ok('★ 快照下发 revealStep / revealLegs / legHoldMs',
-    snap.revealStep === 0 && snap.revealLegs === 8 && snap.legHoldMs === 2000,
-    JSON.stringify({ s: snap.revealStep, l: snap.revealLegs, h: snap.legHoldMs }));
-  ok('★ deadline = 当前这一格的 deadline（不是整段一个）',
-    Math.abs(g.deadline - (Date.now() + 2000)) < 200, String(g.deadline - Date.now()));
+  ok('★ 快照下发 revealStep / revealLegs / legHoldMs / legMs（每格时长表）',
+    snap.revealStep === 0 && snap.revealLegs === 8
+      && snap.legHoldMs === P.GAME.CHAIN_REVEAL_WORD_MS
+      && Array.isArray(snap.legMs) && snap.legMs.length === 8,
+    JSON.stringify({ s: snap.revealStep, l: snap.revealLegs, h: snap.legHoldMs, m: snap.legMs }));
+  ok('★ deadline = 当前这一格（起词格）的 deadline，不是整段一个',
+    Math.abs(g.deadline - (Date.now() + P.GAME.CHAIN_REVEAL_WORD_MS)) < 200,
+    String(g.deadline - Date.now()));
 
   const seen = [];
   for (let i = 0; i < 20 && g.phase === CHAIN_PHASE.REVEAL; i++) {
@@ -409,27 +429,75 @@ console.log('\n[7b] ★ 回放棒次由服务端同步：revealStep / revealLegs
     g.tick(dl);
     seen.push(g.phase === CHAIN_PHASE.REVEAL ? g.revealStep : 'VOTE');
   }
-  ok('★ tick 按 revealLegMs 逐格推进：0→1→2→…→7→VOTE',
+  ok('★ tick 按每一格自己的时长逐格推进：0→1→2→…→7→VOTE',
     seen.join(',') === '1,2,3,4,5,6,7,VOTE', seen.join(','));
   ok('★ 放到最后一格就进投票', g.phase === CHAIN_PHASE.VOTE, g.phase);
   ok('★ 投票阶段 revealStep 钉在最后一格（chainLength - 1 = 7）',
     g.revealStep === 7, String(g.revealStep));
-  ok('★ 投票快照里的 legHoldMs 仍是每格定格时长', g.snapshotFor('u2').legHoldMs === 2000);
+  ok('★ 投票快照里的 legHoldMs 仍是「当前这一格」的时长（最后一格作画 = 1500 + HOLD）',
+    g.snapshotFor('u2').legHoldMs === P.GAME.CHAIN_REVEAL_DRAW_MIN_MS + P.GAME.CHAIN_REVEAL_HOLD_MS,
+    String(g.snapshotFor('u2').legHoldMs));
 }
 
-console.log('\n[7c] ★ 回放「立刻推进」一次只走一格（不是一步跳到投票）');
+console.log('\n[7b2] ★ v14/v16 回放倍速（每局设置）：倍速越大 → 笔迹播得越快，只认 1 / 1.5 / 2');
+{
+  // ★ v16：动画时长按笔数算，所以要造「多笔的一格」才看得出倍速差
+  //   （笔数太少会先撞上 1500ms 地板，倍速就被抹平了 —— 那是刻意的保护）。
+  const mk = (opts, perStep) => {
+    const { g, room } = makeGame(['甲', '乙', '丙', '丁'], Object.assign({ chainLength: 8, revealSeconds: 24 }, opts));
+    toGrid(g, room, 0, 'free');
+    while (g.isPlaying()) playGrid(g, room, 'free', perStep);
+    return g;
+  };
+  const N = 12;                                   // 每格 12 笔：900 + 12×240 = 3780（高于地板，倍速说了算）
+  const anim = 900 + N * P.GAME.CHAIN_REVEAL_DRAW_PER_STROKE_MS;
+  const g1 = mk({ replaySpeed: 1 }, N);
+  ok('★ 1x → 作画格 = 900 + 12×240 = 3780 + 3 秒悬念尾',
+    g1.revealLegMs(1) === anim + P.GAME.CHAIN_REVEAL_TEASE_MS, String(g1.revealLegMs(1)));
+  const g15 = mk({ replaySpeed: 1.5 }, N);
+  ok('★ 1.5x → 3780 / 1.5 = 2520 + 悬念尾',
+    g15.revealLegMs(1) === Math.round(anim / 1.5) + P.GAME.CHAIN_REVEAL_TEASE_MS,
+    String(g15.revealLegMs(1)));
+  const g2 = mk({ replaySpeed: 2 }, N);
+  ok('★ 2x → 3780 / 2 = 1890 + 悬念尾',
+    g2.revealLegMs(1) === Math.round(anim / 2) + P.GAME.CHAIN_REVEAL_TEASE_MS,
+    String(g2.revealLegMs(1)));
+  ok('★ 倍速越大 → 笔迹播得越快（用户要的「倍速越大越短」）',
+    g2.revealLegMs(1) < g15.revealLegMs(1) && g15.revealLegMs(1) < g1.revealLegMs(1),
+    [g2.revealLegMs(1), g15.revealLegMs(1), g1.revealLegMs(1)].join(' < '));
+  ok('★ 起词 / 猜词格不受倍速影响（它们本来就只有一拍，快慢没意义）',
+    g1.revealLegMs(0) === g2.revealLegMs(0) && g1.revealLegMs(2) === g2.revealLegMs(2),
+    [g1.revealLegMs(0), g2.revealLegMs(0)].join(' / '));
+  const gFew = mk({ replaySpeed: 2 }, 1);
+  ok('★ 笔数太少（1 笔）时兜 CHAIN_REVEAL_DRAW_MIN_MS 地板，倍速不再往下压 + 悬念尾',
+    gFew.revealLegMs(1) === P.GAME.CHAIN_REVEAL_DRAW_MIN_MS + P.GAME.CHAIN_REVEAL_TEASE_MS,
+    String(gFew.revealLegMs(1)));
+  const gMany = mk({ replaySpeed: 1 }, 80);
+  ok('★ 笔特别多时封顶 CHAIN_REVEAL_DRAW_MAX_MS（不然一张细画要播一分钟）+ 悬念尾',
+    gMany.revealLegMs(1) === P.GAME.CHAIN_REVEAL_DRAW_MAX_MS + P.GAME.CHAIN_REVEAL_TEASE_MS,
+    String(gMany.revealLegMs(1)));
+  const gDef = mk({}, N);
+  ok('★ 缺省 = 默认 1.5x', gDef.replaySpeed === P.GAME.CHAIN_REPLAY_SPEED_DEFAULT,
+    String(gDef.replaySpeed));
+  const gBad = mk({ replaySpeed: 3 }, N);
+  ok('★ 非法档位（3）夹回默认 1.5x', gBad.replaySpeed === P.GAME.CHAIN_REPLAY_SPEED_DEFAULT,
+    String(gBad.replaySpeed));
+  ok('★ 快照带 voteFreezeMs（进投票前的定格，3~5 秒）',
+    g1.snapshotFor('u1').voteFreezeMs === 0 || g1.snapshotFor('u1').voteFreezeMs >= 3000,
+    String(g1.snapshotFor('u1').voteFreezeMs));
+}
+
+console.log('\n[7c] ★ v14 回放「立刻推进」= 直接进投票（回放由服务端推，前端没有手动翻格）');
 {
   const { g, room } = makeGame(['甲', '乙', '丙', '丁'], { chainLength: 8 });
   toGrid(g, room, 0, 'free');
   while (g.isPlaying()) playGrid(g, room, 'free');
   ok('进入回放', g.phase === CHAIN_PHASE.REVEAL && g.revealStep === 0);
   g.next('u1');
-  ok('推进一次 → 第 1 格', g.phase === CHAIN_PHASE.REVEAL && g.revealStep === 1, String(g.revealStep));
-  g.next('u1');
-  ok('再推进一次 → 第 2 格', g.phase === CHAIN_PHASE.REVEAL && g.revealStep === 2, String(g.revealStep));
-  for (let i = 0; i < 10 && g.phase === CHAIN_PHASE.REVEAL; i++) g.next('u1');
-  ok('推到底 → 投票（且指针停在最后一格）',
-    g.phase === CHAIN_PHASE.VOTE && g.revealStep === 7,
+  ok('★ 房主「立刻推进」一次就进投票（不再一格一格翻）',
+    g.phase === CHAIN_PHASE.VOTE, String(g.phase));
+  ok('推到底（投票里再点 = 结算）→ 进结算（且指针停在最后一格）',
+    (g.next('u1'), g.phase === CHAIN_PHASE.SCORE && g.revealStep === 7),
     g.phase + ' step=' + g.revealStep);
 }
 
@@ -601,6 +669,28 @@ console.log('\n[12] 中途离场：按「没交」处理，不卡死全场');
     gone.length === 1 && typeof gone[0].steps[0].content === 'string'
       && gone[0].steps[0].content.length > 0,
     JSON.stringify(gone.map(c => c.steps[0].content)));
+}
+
+console.log('\n[12b] ★ v17：离场的人在**大厅名单**里必须消失（分数还留在计分板）');
+{
+  const { g, room } = makeGame(['甲', '乙', '丙', '丁'], { chainLength: 3 });
+  toGrid(g, room, 0, 'free');
+  const m = room.members.get('u4');
+  room.members.delete('u4');
+  g.onLeave(m);
+  const states = g.playerStates();
+  const ghost = states.filter(r => r.userId === 'u4');
+  // 服务端的契约：**players 保留「已离场但榜上有分」的灰名**（计分板要它），
+  // 而 playerList()（= 大厅准备 / 开局人数的来源）不含离场者。
+  // 前端据此把大厅那份名单过滤成 online !== false —— 用户报的
+  // 「准备面板上有房间里不存在的人」就是漏了这一步过滤。
+  ok('★ 快照 players 里留着离场者（online=false，计分板用）',
+    ghost.length === 1 && ghost[0].online === false, JSON.stringify(ghost));
+  ok('★ playerList()（大厅 / 开局人数）里**没有**离场者',
+    g.playerList().every(p => p.userId !== 'u4'), JSON.stringify(g.playerList().map(p => p.userId)));
+  ok('★ 快照里 online=false 的行数 = 离场人数（前端就按这个过滤大厅名单）',
+    states.filter(r => r.online === false).length === 1,
+    JSON.stringify(states.map(r => [r.userId, r.online])));
 }
 
 console.log('\n[13] 局中进人 = 观战');

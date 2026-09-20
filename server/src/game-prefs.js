@@ -15,6 +15,8 @@
  *   - rounds：0 / 缺省 / 非法 = 用默认（存各玩法的默认回合数）；否则夹到 [1, 该玩法上限]。
  *   - chainLength：0 / 缺省 / 非法 = 用默认（开局时 = **2 × 人数**，每人连续两格）；否则夹到 [3, 16]。
  *   - repickLimit：**0 是实义值**（这一局一次都不许「换一组」）；缺省 / 非法 = 默认 1；夹到 [0, 5]。
+ *   - replaySpeed（v14）：只认 G.CHAIN_REPLAY_SPEEDS 的档位（1 / 1.5 / 2）；
+ *     缺省 / 非法 / 不在档位里一律回 G.CHAIN_REPLAY_SPEED_DEFAULT（1.5）。
  *
  * ⚠ 与 start() 的分工：这里的值**只是预设 / 面板显示**，真正的裁定仍在三处 start() 里
  *   （它们各自再夹一次，老客户端不发新字段时行为与 v9 完全一致）。
@@ -72,6 +74,18 @@ function intOrDefault(v, dflt, min, max) {
 }
 
 /**
+ * ★ v14：回放倍速 → 只认 G.CHAIN_REPLAY_SPEEDS 里的档位（1 / 1.5 / 2）。
+ * 缺省 / 非法 / 不在档位里一律回默认（1.5）—— 0 不是合法倍速，不能被夹成下限。
+ * 关掉倍速 = 默认（不是 1），这样老客户端不发这个字段时的行为与「默认 1.5」一致。
+ */
+function pickSpeed(v) {
+  if (badNum(v)) return G.CHAIN_REPLAY_SPEED_DEFAULT;
+  const n = Number(v);
+  if (!isFinite(n) || n <= 0) return G.CHAIN_REPLAY_SPEED_DEFAULT;
+  return G.CHAIN_REPLAY_SPEEDS.indexOf(n) >= 0 ? n : G.CHAIN_REPLAY_SPEED_DEFAULT;
+}
+
+/**
  * GAME_START / GAME_PREFS 认的全部字段（按 mode 取用）。
  * **顺序与形状就是这个顺序** —— pendingGame 的 14 个字段 + by/at 由 applyGamePrefs 补上。
  */
@@ -80,7 +94,7 @@ const GAME_PREF_FIELDS = [
   // classic
   'rounds', 'repickLimit', 'roundEndSeconds',
   // chain
-  'chainLength', 'writeSeconds', 'guessSeconds', 'revealSeconds', 'voteSeconds',
+  'chainLength', 'writeSeconds', 'guessSeconds', 'revealSeconds', 'voteSeconds', 'replaySpeed',
   // skin
   'nightSeconds', 'dawnSeconds', 'talkSeconds'
 ];
@@ -129,6 +143,9 @@ function normalizeGamePrefs(src) {
     guessSeconds: secOrZero(src.guessSeconds),
     revealSeconds: secOrZero(src.revealSeconds),
     voteSeconds: secOrZero(src.voteSeconds),
+    // ★ v14：回放倍速（只认 G.CHAIN_REPLAY_SPEEDS 里的档位）。缺省 / 非法 = 默认 1.5。
+    //   与秒数字段的「0 = 用默认」不同：0 不是合法倍速，也一律回默认。
+    replaySpeed: pickSpeed(src.replaySpeed),
     nightSeconds: secOrZero(src.nightSeconds),
     dawnSeconds: secOrZero(src.dawnSeconds),
     talkSeconds: secOrZero(src.talkSeconds)
@@ -201,7 +218,12 @@ function setupOptions() {
       perPlayer: 2                    // 默认 / 上限的倍数：链长 = perPlayer × 人数
     },
     repick: G.SETUP_REPICK.slice(),
-    rounds: rounds
+    rounds: rounds,
+    // ★ v14：回放倍速的档位 + 默认值（前端照着渲染那一行下拉，别在客户端再抄一份）。
+    replaySpeed: {
+      speeds: G.CHAIN_REPLAY_SPEEDS.slice(),
+      default: G.CHAIN_REPLAY_SPEED_DEFAULT
+    }
   };
 }
 
@@ -229,5 +251,6 @@ module.exports = {
   secOrZero,
   intOrZero,
   intOrDefault,
+  pickSpeed,
   clampInt
 };

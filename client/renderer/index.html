@@ -456,24 +456,34 @@
     </div>
   </div>
 
-    <!-- 你画我猜 / 接龙 / 画皮：画布上沿的状态条。不在游戏模式时整条隐藏。 -->
+    <!-- 你画我猜 / 接龙 / 画皮：画布上沿的状态条。不在游戏模式时整条隐藏。
+         接龙（写词 / 作画 / 猜词 / 回放）走 #stage.chain-strip 那一套 CSS：
+         整条铺满画布上沿、高 ≤ 40px、半透明，只显示「阶段 · 倒计时 · 第 X/Y 手 · 已完成」，
+         房那几个按钮（结束游戏 / 计分 / 音量）排在最右侧 —— 绝不占画布中央。 -->
     <div class="game-hud hidden" id="gameHud">
       <!-- 倒计时**带阶段名**：显示成「投票中 12 秒」。
            光看一个裸数字不知道在等哪个阶段；三个玩法的所有阶段（含接龙的写词）
            都共用这一个控件，所以每个阶段都有倒计时。 -->
       <b class="gh-timer" id="ghTimer" title="当前阶段与剩余时间"><span class="gh-timer-phase" id="ghTimerPhase"></span><span class="gh-timer-sec" id="ghTimerSec">--</span></b>
-      <span class="gh-word" id="ghWord">—</span>
+      <!-- 手数 / 已完成：接龙状态条的第二个信息块（阶段名与倒计时在最前面的 #ghTimer） -->
       <span class="gh-round" id="ghRound"></span>
+      <!-- 这一步我在做什么（一句话）。接龙收窄成状态条时整块藏起来 ——
+           同一句话在画布上方 / 输入条里已经有一处了，状态条只留数字，不重复文案。 -->
+      <span class="gh-word" id="ghWord">—</span>
       <!-- 画皮专用：在场人数（全场最关心的那个数字） -->
       <span class="gh-skin-state hidden" id="ghSkinState"></span>
-      <!-- 房主的「结束游戏」入口：合并成一个开局面板之后 #chainMask / #skinMask
-           都没了，游戏进行中得有地方点到它（面板里那个也在，但开着面板挡画）。 -->
-      <button class="mini danger hidden" id="ghStop" title="结束本局，回到自由绘画">结束游戏</button>
-      <button class="mini" id="ghScore" title="查看计分板">计分</button>
-      <button class="mini" id="ghSound" title="游戏音效开关">🔊</button>
-      <input type="range" class="gh-vol" id="ghVol" min="0" max="100" step="1" title="音效音量" />
-      <!-- 接龙专用：房主的「推进 / 立刻结算」 -->
-      <button class="mini hidden" id="ghNext" title="跳过没交的人，直接进入下一步">立刻推进</button>
+      <!-- 右侧按钮组（.gh-actions）：接龙状态下这一组被 margin-left:auto 推到状态条最右，
+           全部按钮都待在条内 —— 以前它们是居中面板的一部分，等于钉在画布正中。 -->
+      <span class="gh-actions">
+        <!-- 接龙专用：房主的「推进 / 立刻结算」 -->
+        <button class="mini hidden" id="ghNext" title="跳过没交的人，直接进入下一步">立刻推进</button>
+        <!-- 房主的「结束游戏」入口：合并成一个开局面板之后 #chainMask / #skinMask
+             都没了，游戏进行中得有地方点到它（面板里那个也在，但开着面板挡画）。 -->
+        <button class="mini danger hidden" id="ghStop" title="结束本局，回到自由绘画">结束游戏</button>
+        <button class="mini" id="ghScore" title="查看计分板">计分</button>
+        <button class="mini" id="ghSound" title="游戏音效开关">🔊</button>
+        <input type="range" class="gh-vol" id="ghVol" min="0" max="100" step="1" title="音效音量" />
+      </span>
     </div>
 
     <!-- 计分板（点 HUD 上的「计分」浮出来） -->
@@ -496,6 +506,9 @@
 
     <!-- 接龙：我这一步的题面。只有当事者看得到（候选词 / 要画的词）。
          猜词那幅画现在铺在主画布上（#chainCanvasLayer），这里只留操作。
+         ★ v15：**猜词步不再用这张卡片**（用户实测：「这幅画画的是什么? + 回答」
+         那块既多一层点击又占画布下沿）—— 猜词直接让贴底的输入条出现（#chainInputMask）。
+         只有「✓ 已提交，等其他人」这条回执还留在这里。
          放在画布左下角，底部横条出现时会自动抬起来让位。 -->
     <div class="chain-task hidden" id="chainTask">
       <div class="ct-head">
@@ -528,12 +541,12 @@
          不压暗、不遮挡，画（#chainCanvasLayer）和输入框能同时看见。 -->
     <div class="chain-bar hidden" id="chainInputMask">
       <div class="cb-row">
-        <b class="cb-title" id="ciTitle">这幅画画的是什么？</b>
+        <b class="cb-title" id="ciTitle">看图猜词：上面这幅画的是什么？</b>
         <span class="pick-timer" id="ciTimer">60</span>
         <span class="hint cb-hint" id="ciHint">猜一个词（英文、单字都行，不用管字数）</span>
         <span class="spacer"></span>
         <div class="ci-custom">
-          <input type="text" id="ciInput" maxlength="20" placeholder="你猜这幅画的是什么…" autocomplete="off">
+          <input type="text" id="ciInput" maxlength="20" placeholder="写一个词交上去…" autocomplete="off">
           <button class="btn primary" id="ciSubmit">提交答案</button>
         </div>
         <span class="ci-preview" id="ciPreview"></span>
@@ -551,24 +564,18 @@
         <b class="cb-index" id="rpIndex">1 / 1</b>
         <span class="cb-head" id="rpChainHead"></span>
         <span class="spacer"></span>
+        <!-- 回放没有手动干预（v14）：播放 / 翻格 / 倍速三颗控件已经删掉，
+             棒次一律跟服务端的 revealStep 走。这里只剩格点进度 + 房主的「立刻推进」。 -->
         <span class="rp-pills" id="rpPills"></span>
-        <button class="mini" id="rpPrevItem" title="上一步">⏮</button>
-        <button class="mini" id="rpPlay" title="自动播放 / 暂停">▶ 播放</button>
-        <button class="mini" id="rpNextItem" title="下一步">⏭</button>
-        <select id="rpSpeed" title="播放速度">
-          <option value="0.5">0.5×</option>
-          <option value="1" selected>1×</option>
-          <option value="2">2×</option>
-          <option value="4">4×</option>
-        </select>
         <button class="btn primary hidden" id="btnRpNext">立刻结算</button>
       </div>
-      <div class="cb-row second rp-vote hidden" id="rpVote">
-        <b class="cb-ask" id="rpVoteHint">这两个匹配吗？</b>
-        <button class="btn ghost" id="rpVoteBad">×</button>
-        <button class="btn primary" id="rpVoteOk">√</button>
-        <span class="cb-done" id="rpVoteDone">已投 0 / 0</span>
-        <button class="mini hidden" id="rpFavBtn">♡ 最喜欢这张</button>
+      <!-- ♥ 最喜欢这张：**独立一行**（不和下面那一行 √ / × 混排）——
+           它投的是「这条链里我最喜欢的一幅画」，与「首尾对得上吗」是两回事，
+           服务端也分开统计（结算里各自给分）。v14 起**只在某一格画正在回放时**可点，
+           那一格播完就置灰（过时不候）——见 app.js 的 crLegFavOpen()。 -->
+      <div class="cb-row second rp-fav hidden" id="rpFavRow">
+        <b class="cb-ask">❤ 最喜欢这张</b>
+        <button class="mini" id="rpFavBtn">♡ 最喜欢这张</button>
         <span class="rp-fav-state" id="rpFavState"></span>
       </div>
     </div>
@@ -599,7 +606,8 @@
     <!-- 接龙：把「这一格」摊在主画布上的一层。
          猜词时放上家那幅画；回放时**中间只放画**，说明文字一律走上下两条窄带（各 38px）：
            上带 =「<作者> 画了：<题面词>」+ 倒计时 + 把词条折起来的小按钮
-           下带 =「<下一格的人> 猜的是：<词>」+ 回放控制条（播放 / 翻格 / 速度，可折叠）
+           下带 =「下一棒 <人> 猜的是：<倒计时>」—— ★ v15：**不再提前报出那个词**，
+                  笔迹播完后数 3 → 2 → 1，词等那一格开始放才在上带里揭晓
          两条带是 #chainCanvasLayer 这个 flex 列里的固定行，中间的 <img> 只占剩下的空间 ——
          所以面板**物理上不可能压住画面**（不是靠 z-index 或留白碰运气）。
          层本身 pointer-events:none，不吃指针、不影响作画。 -->
@@ -615,6 +623,29 @@
         <span class="spacer"></span>
         <span class="rp-verdict" id="rpVerdict"></span>
       </div>
+      <!-- ★ v14「纸片」投票面板：一条链**全部棒次回放完**之后（服务端 phase=chain_vote
+           且定格几秒）才出现，就落在**画布中央**。
+           它就是一张**撕下来的纸**：边缘走 SVG 撕痕多边形（app.js 的 tornPaperClip
+           生成 clip-path），纸面带横向扫描线纹理 —— 不是圆角矩形卡片。
+           内容自上而下、水平居中：起词 → ↓ → 最终猜词 → 「这个匹配吗？」→ 两个手绘圈按钮
+           （✗ 在左红、✓ 在右绿 —— 圈由 app.js 的 sketchDisk() 内联 SVG 画，不规则手绘感）。
+           纸片下方（仍在画布区域内）是 #rpVoteMarks：**全场每人一个手绘圈**
+           （投过的是 ✓ / ✗，还没投的是浅灰空圈，位置先占住）+ 已投 x / y。 -->
+      <div class="ccl-paper hidden" id="rpVote">
+        <b class="pp-first" id="rpVoteFirst">（空）</b>
+        <span class="pp-arrow" aria-hidden="true">↓</span>
+        <b class="pp-last" id="rpVoteLast">（空）</b>
+        <div class="pp-ask" id="rpVoteHint">这个匹配吗？</div>
+        <div class="pp-btns">
+          <!-- 手绘圈按钮：圈 + 标签都由 app.js 的 setVoteBtn()/sketchDisk() 渲进来
+               （内联 SVG，圈里是 ✗ / ✓，圈下一行是「× 跑偏了 / √ 对得上」）。 -->
+          <button class="btn pp-circle bad" id="rpVoteBad"><span class="pp-c"></span></button>
+          <button class="btn pp-circle ok" id="rpVoteOk"><span class="pp-c"></span></button>
+        </div>
+        <div class="pp-done" id="rpVoteDone">已投 0 / 0</div>
+      </div>
+      <!-- 全场投票标记（★ v15）：位置由 app.js 量出纸片下沿后贴上去（见 renderChainVoteMarks） -->
+      <div class="ccl-marks hidden" id="rpVoteMarks"></div>
       <!-- 起词格以前会在这里挂一行大字（#chainCanvasText），现在词一律走上下窄带。
            这两个节点保留成**永远空的占位**：老代码里的 showChainCanvasText 还认它，
            但内容永远为空、且一直 hidden —— 画布上不会再出现任何文字。 -->
@@ -1288,6 +1319,7 @@
        通用            #rowTheme #rowDrawTime
        你画我猜        #rowClassicRounds #rowClassicRepick #rowClassicRoundEnd
        接龙            #rowChainLength #rowChainWrite #rowChainGuess #rowChainReveal
+                       #rowChainReplaySpeed
        画皮            #rowSkinRounds #rowSkinNight #rowSkinDawn #rowSkinTalk
        接龙 + 画皮共用  #rowVote（协议里都是 voteSeconds） -->
 <div class="modal-mask hidden" id="gameMask">
@@ -1362,6 +1394,13 @@
         <label>回放时间</label>
         <select id="chainRevealTime"></select>
         <span class="hint">一起看「这条链怎么跑偏的」的时间</span>
+      </div>
+      <!-- ★ v14：回放倍速（每局设置）。倍速越大 → 每一格定格越短（服务端直接除），
+           全场看的是同一份服务端推进的回放，前端没有播放 / 翻格 / 倍速控件。 -->
+      <div class="form-row hidden" id="rowChainReplaySpeed">
+        <label>回放倍速</label>
+        <select id="chainReplaySpeed"></select>
+        <span class="hint">每一格回放的快慢（倍速越大，每格停得越短）</span>
       </div>
 
       <!-- 画皮 -->

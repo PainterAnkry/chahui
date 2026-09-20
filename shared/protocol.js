@@ -77,6 +77,25 @@
  *     前端不再自己定时翻页（各端时钟一抖四个人看到的就不是同一格）。
  *   - 每一棒收完都会自检「下一棒有人接」（n 人 → n 个互不相同的 cell），
  *     断了就打日志 + 播报 + 强制推进，绝不停在原地。
+ *
+ * v14 变更（回放交回服务端 + 每局「回放倍速」）：
+ *   - C2S.GAME_START 的 opts 新增 replaySpeed（只允许 GAME.CHAIN_REPLAY_SPEEDS 里的档位，
+ *     默认 GAME.CHAIN_REPLAY_SPEED_DEFAULT）：倍速越大 → 每一格定格越短
+ *     （服务端 revealLegMs() 直接除以它）。前端**不再**有播放 / 翻格 / 倍速控件。
+ *
+ * v15 变更（回放节奏：起词 / 猜词格不再干等，画完接 3 秒悬念倒计时）：
+ *   - **每一格的时长不再一样**：revealLegMs(k) 按格类型给
+ *     （起词 / 猜词格 = 短，作画格 = 回放预算，若下一格是猜词再多一段悬念尾）。
+ *     GAME_STATE 新增 legMs（当前这条链**每格**的时长表），legHoldMs 仍是「当前这一格」。
+ *   - 画布上的「谁画了什么 / 谁猜的是什么」两条窄带里，下一棒是猜词时**不再提前报出词**，
+ *     只写「下一棒 <人> 猜的是：」+ 倒计时，词等那一格真的开始放才揭晓。
+ *
+ * v16 变更（回放时长改成「按笔数播完」+ 猜词定格 2 秒 + 回放铺在纸张上）：
+ *   - 作画格的动画时长不再按「回放总时长 × 60%」摊（用户实测：四笔的小图也要播好几秒），
+ *     改成 **按这一格的笔数算**：CHAIN_REVEAL_DRAW_BASE_MS + 笔数 × PER_STROKE，
+ *     夹在 [MIN, MAX] 之间，再除以回放倍速 —— 播完就是成图，紧接着开始悬念倒计时。
+ *     快照里的 legMs 仍然权威，前端照它排；chainRevealAnimMs() 是两端共用的那条公式。
+ *   - 猜词格 CHAIN_REVEAL_GUESS_MS 提到 2000：揭晓的那个词要**停两秒**再翻下一棒。
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
@@ -84,7 +103,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var PROTOCOL_VERSION = 10;
+  var PROTOCOL_VERSION = 16;
 
   // 客户端 -> 服务端
   var C2S = {
@@ -149,7 +168,7 @@
     // ---- 你画我猜（mode='classic'）----
     // 三个玩法共用这一条开局消息，**字段按 mode 取用，全部可选，0 / 缺省 = 用默认**：
     //   classic { mode?, theme?, drawSeconds?, rounds?, repickLimit?, roundEndSeconds? }
-    //   chain   { mode?, theme?, drawSeconds?, chainLength?, writeSeconds?, guessSeconds?, revealSeconds?, voteSeconds? }
+    //   chain   { mode?, theme?, drawSeconds?, chainLength?, writeSeconds?, guessSeconds?, revealSeconds?, voteSeconds?, replaySpeed? }
     //   skin    { mode?, theme?, drawSeconds?, rounds?, nightSeconds?, dawnSeconds?, talkSeconds?, voteSeconds? }
     // 夹取：秒数字段一律夹到 [SETUP_SECONDS_MIN, SETUP_SECONDS_MAX] = [3, 600]，0 / 非法 / 负数 = 用默认；
     //       **drawSeconds 是唯一的例外**（从 v4 起最短就是 DRAW_SECONDS_MIN = 30 秒），仍是 [30, 300]；
@@ -160,7 +179,9 @@
     // 服务端 clampInt 夹到 [CHAIN_LENGTH_MIN, 2 × min(人数, CHAIN_LENGTH_MAX)]，
     // 而且大厅→开局时还会跟着当时的实际人数再夹一次（有人中途进出也不会越界）。
     //   4 人房 = 8 步：k=0 起词A k=1 画A k=2 猜B k=3 画B k=4 猜C k=5 画C k=6 猜D k=7 画D
-    GAME_START: 'game:start',       // { mode?, theme?, drawSeconds?, rounds?, ... } 房主开局
+    // **replaySpeed 的语义（v14）**：回放倍速，只认 [1, 1.5, 2] 三档，缺省 / 非法 = 1.5。
+    // 服务端夹取后算每格定格时长（revealLegMs() = 总时长 / 格数 / 倍速）并随快照下发 legHoldMs。
+    GAME_START: 'game:start',       // { mode?, theme?, drawSeconds?, rounds?, replaySpeed?, ... } 房主开局
     GAME_STOP: 'game:stop',         // 房主结束本局（回到自由绘画）
     // 房主的「本局预设」：他在设置面板上改任何一项就发一次（前端自己做防抖）。
     // **仅房主可发**：服务端逐字段白名单清洗 + 夹取后挂到 room.pendingGame
@@ -179,7 +200,7 @@
     GAME_VOTE: 'game:vote',         // { kind:'keep', chainId, agree } 这条链首尾对得上吗
                                     // | { kind:'fav', chainId, step }  最喜欢的一张画（一人一票）
     GAME_NEXT: 'game:next',         // 房主推进：大厅强制开局 / 跳过没交的人 /
-                                    // 回放**推进一格**（已在最后一格才进投票）/ 投票结算 / 结算
+                                    // 回放 → 进投票 / 投票结算 / 结算
 
     // ---- 画皮（mode='skin'）----
     // 一个动作通道走完全部「玩家有主见」的操作：夜里验人 / 刀人，白天放逐投票。
@@ -228,11 +249,14 @@
     //   revealStep 当前回放到第几格（0 起）。REVEAL 期间每 legHoldMs 加一；
     //              VOTE 期间钉在最后一格（chainLength - 1）—— 投票要看最终画面。
     //   revealLegs 总格数 = chainLength（前端拿它排进度点）。
-    //   legHoldMs  每格定格时长 = max(1500, 房主配的回放时长 / 格数)，前端按它排翻页动画。
+    //   legHoldMs  每格定格时长 = max(1500, 房主配的回放时长 / 格数 / 回放倍速)，
+    //              前端按它排翻页动画（v14 起前端不再自己乘倍速）。
+    // 另外 chain 模式还带 voteMarks（v14）：当前这条链**已投的人** [{
+    //   userId, name, add }] —— add=true 投的 √。只给「已经投了的」，没投的不出现。
     GAME_STATE: 'game:state',           // { game }  含 phase / wordLen / deadline / roundResult / scores
     // 房主的「本局预设」（清洗过的那一份），广播给全房间 —— 别人能看见房主选的设置。
     // 形状固定，**逐字段列全**：{ mode, theme, rounds, drawSeconds, repickLimit, roundEndSeconds,
-    // chainLength, writeSeconds, guessSeconds, revealSeconds, voteSeconds,
+    // chainLength, writeSeconds, guessSeconds, revealSeconds, voteSeconds, replaySpeed,
     // nightSeconds, dawnSeconds, talkSeconds, by, at }；0 = 该项用默认；by = 房主 userId。
     GAME_PREFS: 'game:prefs',           // { prefs }
     GAME_WORD: 'game:word',             // { word, choices? } 只发给画手
@@ -334,11 +358,36 @@
     // （每格 = 总时长 / 链长），再兜这个下限 —— 格数最多 32、总时长最短 3 秒，
     // 不兜底就会「每格 90ms」闪成一片。前端拿 GAME_STATE 的 legHoldMs 排动画即可。
     CHAIN_REVEAL_LEG_MS_MIN: 1500,
+    // ★ v15 回放节奏：**每一格的时长不再一样**（用户实测：起词格 / 猜词格干等太久）。
+    //   起词格只有一行词要看、猜词格只揭晓一个词，都只需要短短一拍；
+    //   作画格才吃「回放总时长 / 格数」那份预算（还受倍速影响）。
+    //   作画格后面紧跟猜词格时，再多留一段**悬念倒计时**：先亮「下一棒 X 猜的是：」，
+    //   数完 3 秒才把词揭出来（前端配一对音效，见 client/renderer/sfx.js）。
+    CHAIN_REVEAL_WORD_MS: 1400,
+    // ★ v16：猜词格 2 秒 —— 用户实测要求「猜的词要停留两秒再切换」
+    //（以前 1.4 秒，刚看清那一下就翻页了）
+    CHAIN_REVEAL_GUESS_MS: 2000,
+    CHAIN_REVEAL_TEASE_MS: 3000,
+    // 作画格**没有**悬念尾时，成图定格这一小会儿再翻下一棒（不让人看个背影）
+    CHAIN_REVEAL_HOLD_MS: 600,
+    // ★ v16：作画格的**笔迹动画时长按笔数算** —— 用户实测报的「笔迹回放时间太长了」：
+    //   以前是「回放总时长 × 60%」（还夹了 8 秒上限），一张四笔的小图也要慢慢爬 8 秒。
+    //   现在 = 起步 + 每笔固定时长，夹在 [MIN, MAX]，再除以回放倍速 ——
+    //   播完即定稿，紧接着开始「下一棒猜的是什么」的倒计时。
+    CHAIN_REVEAL_DRAW_BASE_MS: 900,
+    CHAIN_REVEAL_DRAW_PER_STROKE_MS: 240,
+    CHAIN_REVEAL_DRAW_MIN_MS: 1500,
+    CHAIN_REVEAL_DRAW_MAX_MS: 9000,
     CHAIN_VOTE_MS: 60000,    // 投票时限
     CHAIN_SCORE_MS: 20000,   // 最终结算展示时长（自动回大厅，分数保留）
     // 按链串行投票：每条链投完先亮一下「这条链过没过」再放下一条 —— 比最终结算短得多
     CHAIN_CHAIN_SCORE_MS: 8000,
     CHAIN_GRACE_MS: 1500,    // 收格宽限：倒计时到点后，客户端自动提交的包还在路上
+    // ★ v14：回放倍速（每局设置，GAME_START.opts.replaySpeed）。**倍速越大 → 每格越短**：
+    //   服务端 revealLegMs() = (回放总时长 / 格数) / replaySpeed，前端不再乘界面上的速度。
+    //   只允许这三档（服务端夹取），默认 1.5 —— 比 1x 紧凑、又不至于看不清逐笔动画。
+    CHAIN_REPLAY_SPEED_DEFAULT: 1.5,
+    CHAIN_REPLAY_SPEEDS: [1, 1.5, 2],
     CHAIN_MAX_GUESS_LEN: 20, // 单步猜词长度上限
     CHAIN_TROPHY_AGREE: 1,   // 首尾「对得上」且投票不反对时，链主拿几分
     CHAIN_FAV_POINTS: 3,     // 「最喜欢的一张画」独家最高票的作者拿几分
@@ -699,9 +748,26 @@
     return WORD_MEANING_RE.test(t);
   }
 
+  /**
+   * ★ v16：作画格**笔迹动画**该播多久（毫秒）—— 服务端算每格时长、前端排动画
+   * 用的都是这一条公式（前端优先读快照的 legMs，这条是兜底与自检）。
+   *
+   * 「按笔数」而不是「按回放总时长摊」：用户实测的原话是「笔迹回放时间太长了，
+   * 时间应该从笔迹倍速播完到成图就行了」——一张四笔的小图不该播八秒。
+   * 倍速是**除法**：1.5x 就是这条时长 ÷ 1.5（倍速越大越快看完）。
+   */
+  function chainRevealAnimMs(strokeCount, speed) {
+    var n = Math.max(0, Math.floor(Number(strokeCount) || 0));
+    var s = Number(speed) > 0 ? Number(speed) : 1;
+    var ms = GAME.CHAIN_REVEAL_DRAW_BASE_MS + n * GAME.CHAIN_REVEAL_DRAW_PER_STROKE_MS;
+    ms = Math.max(GAME.CHAIN_REVEAL_DRAW_MIN_MS, Math.min(GAME.CHAIN_REVEAL_DRAW_MAX_MS, ms));
+    return Math.round(ms / s);
+  }
+
   return {
     PROTOCOL_VERSION: PROTOCOL_VERSION,
     isPlayableWord: isPlayableWord,
+    chainRevealAnimMs: chainRevealAnimMs,
     WORD_RE: WORD_RE,
     C2S: C2S,
     S2C: S2C,

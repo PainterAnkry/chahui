@@ -126,7 +126,7 @@ console.log('\n[1] 每局覆盖：三个玩法的 start(opts) 真的收下了');
   const c = new ChainGame(room2, makeApi(room2));
   const r2 = c.start({
     theme: 'arknights', drawSeconds: 45, chainLength: 4,
-    writeSeconds: 7, guessSeconds: 8, revealSeconds: 9, voteSeconds: 10
+    writeSeconds: 7, guessSeconds: 8, revealSeconds: 9, voteSeconds: 10, replaySpeed: 1
   });
   eq('chain start ok', r2.ok, true);
   eq('chain chainLength = 4', c.chainLength, 4);
@@ -145,10 +145,45 @@ console.log('\n[1] 每局覆盖：三个玩法的 start(opts) 真的收下了');
   eq('chain stepMs(GUESS) = 8s', c.stepMs(), 8000);
   c.enterReveal();
   eq('chain 回放 phase', c.phase, CHAIN_PHASE.REVEAL);
-  // ★ v11：回放的 deadline 是**当前这一格**的，不是整段 —— 每格 = 总时长 / 链长
-  deadlineNear('chain 回放 deadline = 每格（9s / 4 格 = 2.25s）', c.deadline, 2250);
+  // ★ v11：回放的 deadline 是**当前这一格**的，不是整段。
+  // ★ v15：而且**每一格的时长不再一样** —— 起词格 / 猜词格只停短短一拍。
+  // ★ v16：作画格改成**按笔数**算动画时长（用户实测：四笔的小图也播了八秒）。
+  eq('★ 第 0 格是起词格 → 只停 CHAIN_REVEAL_WORD_MS', c.revealLegMs(0), P.GAME.CHAIN_REVEAL_WORD_MS);
+  deadlineNear('chain 回放 deadline = 起词格那一拍', c.deadline, P.GAME.CHAIN_REVEAL_WORD_MS);
   eq('chain 回放总时长仍可查（stepMs 报的是整段）', c.stepMs(), 9000);
-  eq('chain revealLegMs = 9000 / 4 = 2250', c.revealLegMs(), 2250);
+  eq('★ 猜词格停 CHAIN_REVEAL_GUESS_MS（v16 起 2 秒：词要看清再翻下一棒）',
+    c.revealLegMs(2), P.GAME.CHAIN_REVEAL_GUESS_MS);
+  eq('★ 这一格还没人交画 → 动画兜地板 1500 + 3 秒悬念尾',
+    c.revealLegMs(1), P.GAME.CHAIN_REVEAL_DRAW_MIN_MS + P.GAME.CHAIN_REVEAL_TEASE_MS);
+  eq('★ 最后一格作画后面没有猜词 → 只留一小段定格（1500 + HOLD）',
+    c.revealLegMs(3), P.GAME.CHAIN_REVEAL_DRAW_MIN_MS + P.GAME.CHAIN_REVEAL_HOLD_MS);
+  eq('★ 快照下发 legMs（这一条链每一格的时长表）',
+    Array.isArray(c.snapshotFor('u1').legMs) && c.snapshotFor('u1').legMs.length === c.chainLength, true);
+  // ★ v16：动画时长**按笔数**算 —— 用一条假链直接问 legMsAt（这台 fixture 没有真环，
+  //   而公式只认「这一格有几笔」，与环无关）。
+  const anim10 = P.GAME.CHAIN_REVEAL_DRAW_BASE_MS + 10 * P.GAME.CHAIN_REVEAL_DRAW_PER_STROKE_MS;
+  const fakeChain = {
+    steps: [
+      { type: 'WORD', content: '词' },
+      { type: 'DRAWING', content: new Array(10).fill(null).map(() => ({ points: [] })) },
+      { type: 'GUESS', content: '猜' },
+      { type: 'DRAWING', content: [] }
+    ]
+  };
+  eq('★ 10 笔的作画格 = (900 + 10×240) = 3300 + 悬念尾（1x）',
+    c.legMsAt(1, fakeChain), anim10 + P.GAME.CHAIN_REVEAL_TEASE_MS);
+  // ★ v14：回放倍速（每局设置）。倍速是**除法**：笔迹按倍速播完更快。
+  eq('★ 倍速 1x（上面那条就是 1x）', c.replaySpeed, 1);
+  c.replaySpeed = 2;
+  eq('★ 倍速 2x → 3300 / 2 = 1650 + 悬念尾',
+    c.legMsAt(1, fakeChain), Math.round(anim10 / 2) + P.GAME.CHAIN_REVEAL_TEASE_MS);
+  c.replaySpeed = 1.5;
+  eq('★ 倍速 1.5x → 3300 / 1.5 = 2200 + 悬念尾',
+    c.legMsAt(1, fakeChain), Math.round(anim10 / 1.5) + P.GAME.CHAIN_REVEAL_TEASE_MS);
+  eq('★ 起词 / 猜词格不受倍速影响（本来就只有一拍）',
+    [c.legMsAt(0, fakeChain), c.legMsAt(2, fakeChain)].join(','),
+    [P.GAME.CHAIN_REVEAL_WORD_MS, P.GAME.CHAIN_REVEAL_GUESS_MS].join(','));
+  c.replaySpeed = 1;
   c.enterVote();
   eq('chain 投票 phase', c.phase, CHAIN_PHASE.VOTE);
   eq('★ 投票时棒次钉在最后一格', c.revealStep, Math.max(0, c.chainLength - 1));
@@ -428,11 +463,11 @@ console.log('\n[6] GAME_START 的白名单（cfg 透传）与协议注释一致'
     rooms: fs.readFileSync(R('server/src/rooms.js'), 'utf8')
   };
 
-  // (a) pickStartOpts 把 14 个字段原样透传（含 undefined —— 缺省必须留给 start() 自己决定）
+  // (a) pickStartOpts 把 15 个字段原样透传（含 undefined —— 缺省必须留给 start() 自己决定）
   const full = {
     mode: 'chain', theme: 'arknights', drawSeconds: 45, rounds: 3, repickLimit: 2,
     roundEndSeconds: 20, chainLength: 4, writeSeconds: 7, guessSeconds: 8,
-    revealSeconds: 9, voteSeconds: 10, nightSeconds: 12, dawnSeconds: 13, talkSeconds: 14
+    revealSeconds: 9, voteSeconds: 10, replaySpeed: 1.5, nightSeconds: 12, dawnSeconds: 13, talkSeconds: 14
   };
   const picked = PREFS.pickStartOpts(full);
   const miss = PREFS.GAME_PREF_FIELDS.filter(k => !(k in picked));
@@ -449,7 +484,7 @@ console.log('\n[6] GAME_START 的白名单（cfg 透传）与协议注释一致'
   // (c) 协议注释里的字段表 = 上面那张表（三处 start() 的字段名也对得上）
   const want = {
     classic: ['mode', 'theme', 'drawSeconds', 'rounds', 'repickLimit', 'roundEndSeconds'],
-    chain: ['mode', 'theme', 'drawSeconds', 'chainLength', 'writeSeconds', 'guessSeconds', 'revealSeconds', 'voteSeconds'],
+    chain: ['mode', 'theme', 'drawSeconds', 'chainLength', 'writeSeconds', 'guessSeconds', 'revealSeconds', 'voteSeconds', 'replaySpeed'],
     skin: ['mode', 'theme', 'drawSeconds', 'rounds', 'nightSeconds', 'dawnSeconds', 'talkSeconds', 'voteSeconds']
   };
   const seen = {};
@@ -600,7 +635,21 @@ console.log('\n[8] /api/share 的新增内容 + setup 档位');
   // 协议里确实有这两条消息（前端据此对接）
   eq('C2S.GAME_PREFS = game:prefs', P.C2S.GAME_PREFS, 'game:prefs');
   eq('S2C.GAME_PREFS = game:prefs', P.S2C.GAME_PREFS, 'game:prefs');
-  eq('协议版本已推进到 v10', P.PROTOCOL_VERSION, 10);
+  eq('★ 协议版本已推进到 v16（逐格时长 + 按笔数播动画 + 猜词定格 2 秒）',
+    P.PROTOCOL_VERSION, 16);
+  ok('★ v16：每一格的时长不再一样 —— 起词 / 猜词格一拍，作画格按笔数 + 悬念尾',
+    P.GAME.CHAIN_REVEAL_WORD_MS > 0 && P.GAME.CHAIN_REVEAL_GUESS_MS >= 2000
+      && P.GAME.CHAIN_REVEAL_TEASE_MS >= 2000
+      && P.GAME.CHAIN_REVEAL_DRAW_PER_STROKE_MS > 0
+      && P.GAME.CHAIN_REVEAL_DRAW_MIN_MS > 0 && P.GAME.CHAIN_REVEAL_DRAW_MAX_MS > P.GAME.CHAIN_REVEAL_DRAW_MIN_MS,
+    { word: P.GAME.CHAIN_REVEAL_WORD_MS, guess: P.GAME.CHAIN_REVEAL_GUESS_MS,
+      tease: P.GAME.CHAIN_REVEAL_TEASE_MS, per: P.GAME.CHAIN_REVEAL_DRAW_PER_STROKE_MS,
+      min: P.GAME.CHAIN_REVEAL_DRAW_MIN_MS, max: P.GAME.CHAIN_REVEAL_DRAW_MAX_MS });
+  eq('★ v16：chainRevealAnimMs 是两端共用的那条公式（起步 + 每笔，夹上下限，再除倍速）',
+    [P.chainRevealAnimMs(0, 1), P.chainRevealAnimMs(12, 2), P.chainRevealAnimMs(999, 1)].join(','),
+    [P.GAME.CHAIN_REVEAL_DRAW_MIN_MS,
+      Math.round((P.GAME.CHAIN_REVEAL_DRAW_BASE_MS + 12 * P.GAME.CHAIN_REVEAL_DRAW_PER_STROKE_MS) / 2),
+      P.GAME.CHAIN_REVEAL_DRAW_MAX_MS].join(','));
   eq('isGameFast() 默认 false', PREFS.isGameFast(), false);
   process.env.GAME_FAST = '1';
   eq("isGameFast('1') = true", PREFS.isGameFast(), true);

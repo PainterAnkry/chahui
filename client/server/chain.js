@@ -160,6 +160,20 @@ function optSec(v) {
   return clampInt(n, 0, P.GAME.SETUP_SECONDS_MIN, P.GAME.SETUP_SECONDS_MAX) * 1000;
 }
 
+/**
+ * ★ v14：回放倍速的**服务端默认值**（房主没在面板上挑时用它）。
+ *
+ * GAME_CHAIN_REPLAY_SPEED 压的是「默认档」，不是强制值 —— 与其它 GAME_CHAIN_* 同一个口径。
+ * 只认协议里的三档，非法 / 没设 = P.GAME.CHAIN_REPLAY_SPEED_DEFAULT（1.5）。
+ * 自动化测试用它起「1x 的慢服务端」和「2x 的快服务端」各跑一遍。
+ */
+function envReplaySpeed() {
+  const v = process.env.GAME_CHAIN_REPLAY_SPEED;
+  if (v === undefined || v === null || String(v).trim() === '') return P.GAME.CHAIN_REPLAY_SPEED_DEFAULT;
+  const n = Number(String(v).trim());
+  return P.GAME.CHAIN_REPLAY_SPEEDS.indexOf(n) >= 0 ? n : P.GAME.CHAIN_REPLAY_SPEED_DEFAULT;
+}
+
 const CFG = {
   INIT_MS: envMs('GAME_CHAIN_INIT_MS', P.GAME.CHAIN_INIT_MS),
   WRITE_MS: envMs('GAME_CHAIN_WRITE_MS', P.GAME.CHAIN_WRITE_MS),
@@ -172,7 +186,23 @@ const CFG = {
   CHAIN_SCORE_MS: envMs('GAME_CHAIN_CHAIN_SCORE_MS', P.GAME.CHAIN_CHAIN_SCORE_MS),
   // 收格宽限：客户端倒计时到点后自动提交的包还在路上，多等这一小会儿再收格。
   // **GAME_FAST 不压它**（理由见 envGraceMs）
-  GRACE_MS: envGraceMs('GAME_CHAIN_GRACE_MS', P.GAME.CHAIN_GRACE_MS)
+  GRACE_MS: envGraceMs('GAME_CHAIN_GRACE_MS', P.GAME.CHAIN_GRACE_MS),
+  // ★ v14 用户要求：整条链最后一棒放完 → 先**定格**这一小会儿，再在画布中央弹出投票纸片。
+  //   3~5 秒里画面上只有最后一格，不弹任何面板（让人看清最后那张画）。
+  VOTE_FREEZE_MS: envMs('GAME_CHAIN_VOTE_FREEZE_MS', 3500),
+  // ★ v14：回放倍速的服务端默认档（房主没挑时用它；GAME_CHAIN_REPLAY_SPEED 压这个默认）
+  REPLAY_SPEED: envReplaySpeed(),
+  // ★ v15 回放节奏：起词 / 猜词格不再吃整份「每格预算」，各给短短一拍；
+  //   作画格后面紧跟猜词格时，尾巴上再留一段悬念倒计时（先亮人、数完才揭词）。
+  REVEAL_WORD_MS: envMs('GAME_CHAIN_REVEAL_WORD_MS', P.GAME.CHAIN_REVEAL_WORD_MS),
+  REVEAL_GUESS_MS: envMs('GAME_CHAIN_REVEAL_GUESS_MS', P.GAME.CHAIN_REVEAL_GUESS_MS),
+  REVEAL_TEASE_MS: envMs('GAME_CHAIN_REVEAL_TEASE_MS', P.GAME.CHAIN_REVEAL_TEASE_MS),
+  // ★ v16：作画格的动画时长**按笔数**算（用户实测：四笔的小图也被摊成八秒）
+  REVEAL_HOLD_MS: envMs('GAME_CHAIN_REVEAL_HOLD_MS', P.GAME.CHAIN_REVEAL_HOLD_MS),
+  REVEAL_DRAW_BASE_MS: envMs('GAME_CHAIN_REVEAL_DRAW_BASE_MS', P.GAME.CHAIN_REVEAL_DRAW_BASE_MS),
+  REVEAL_DRAW_PER_STROKE_MS: envMs('GAME_CHAIN_REVEAL_DRAW_PER_STROKE_MS', P.GAME.CHAIN_REVEAL_DRAW_PER_STROKE_MS),
+  REVEAL_DRAW_MIN_MS: envMs('GAME_CHAIN_REVEAL_DRAW_MIN_MS', P.GAME.CHAIN_REVEAL_DRAW_MIN_MS),
+  REVEAL_DRAW_MAX_MS: envMs('GAME_CHAIN_REVEAL_DRAW_MAX_MS', P.GAME.CHAIN_REVEAL_DRAW_MAX_MS)
 };
 
 function shuffle(arr) {
@@ -224,6 +254,8 @@ class ChainGame {
     this.guessMs = 0;          // 猜词一步
     this.revealMs = 0;         // 回放阶段
     this.voteMs = 0;           // 投票阶段
+    // ★ v14：回放倍速（每局设置，只允许 P.GAME.CHAIN_REPLAY_SPEEDS）。倍速越大 → 每格越短。
+    this.replaySpeed = P.GAME.CHAIN_REPLAY_SPEED_DEFAULT;
     this.chainLength = 0;      // 每条链传几手（含初始词格）；开局时定死
 
     this.ring = [];            // 传递顺序（开局时打乱一次，一局内固定）
@@ -260,6 +292,9 @@ class ChainGame {
     //   前端不再自己按定时器逐格翻 —— 各端时钟一抖，四个人看到的就不是同一格。
     //   revealStep = 当前回放到第几格（0 起，全局一格一格推进，每格停 revealLegMs()）。
     this.revealStep = 0;
+    // ★ v14：进投票后「定格」多久才在画布中央弹投票纸片（= CFG.VOTE_FREEZE_MS）。
+    //   快照里下发 voteFreezeMs，前端按它推迟那张纸片 —— 各端同时弹、同时能点。
+    this.voteFreezeMs = 0;
     // ⚠ 按链串行投票：现在轮到第几条链、已经结算了哪几条（见 settleChain）
     this.voteChainIndex = 0;
     this.chainSettled = [];
@@ -500,10 +535,53 @@ class ChainGame {
    *
    * 这就是用户说的「倍速处理」的服务端侧：倍速 = 总时长 / 格数，由服务端算好，
    * 客户端只管拿 legHoldMs 排动画，不用自己推。
+   *
+   * ★ v14：房主还能在开局面板挑「回放倍速」（1 / 1.5 / 2，默认 1.5）——
+   *   倍速越大 → 每格越短（这里直接除以它）。前端不再有倍速 / 翻格 / 播放控件。
+   *
+   * ★ v15：**按格类型分别给时长**（用户实测：起词格 / 猜词格干等太久）。
+   *   起词格只有一行词、猜词格只揭晓一个词 —— 各给 CFG.REVEAL_WORD_MS / GUESS_MS；
+   *   作画格才吃「总时长 / 格数 / 倍速」那份预算（兜 1500ms 地板），
+   *   若它的下一格是猜词格，再在尾巴上加一段 CFG.REVEAL_TEASE_MS 的悬念倒计时
+   *   （前端在这段时间里显示「下一棒 X 猜的是：」+ 3 → 2 → 1，数完那一格才开始放）。
+   *
+   * ★ v16：作画格的时长**改成按这一格的笔数算**（不再拿「回放总时长 × 比例」摊）——
+   *   用户实测报「笔迹回放时间太长了」，而正确的语义是「按倍速把笔迹播完，播完即定稿」。
+   *   公式见 P.chainRevealAnimMs：起步 + 每笔固定时长，夹上下限，再除以倍速；
+   *   后面再按需要加悬念尾（下一格是猜词）或一小段定格（否则）。
    */
-  revealLegMs() {
-    const total = this.revealMs || CFG.REVEAL_MS;
-    return Math.max(P.GAME.CHAIN_REVEAL_LEG_MS_MIN, Math.floor(total / Math.max(1, this.chainLength)));
+  legMsAt(k, chain) {
+    const idx = Math.max(0, Math.floor(Number(k) || 0));
+    const type = this.stepTypeOf(idx);
+    const c = chain || this.currentVoteChain() || this.chains[0] || null;
+    const steps = (c && c.steps) || null;
+    const n = Math.max(1, (steps && steps.length) || this.chainLength || 1);
+    // ★ v14 起的「回放倍速」（1 / 1.5 / 2，start() 里已夹取）——作画格的动画直接除以它
+    const speed = this.replaySpeed > 0 ? this.replaySpeed : 1;
+    if (type === STEP.WORD) return Math.max(600, CFG.REVEAL_WORD_MS);
+    if (type === STEP.GUESS) return Math.max(600, CFG.REVEAL_GUESS_MS);
+    const step = steps ? steps[idx] : null;
+    const strokes = (step && Array.isArray(step.content)) ? step.content.length : 0;
+    let ms = Math.max(CFG.REVEAL_DRAW_MIN_MS,
+      Math.min(CFG.REVEAL_DRAW_MAX_MS,
+        Math.round((CFG.REVEAL_DRAW_BASE_MS + strokes * CFG.REVEAL_DRAW_PER_STROKE_MS) / speed)));
+    const nextIsGuess = (idx + 1) < n && this.stepTypeOf(idx + 1) === STEP.GUESS;
+    ms += nextIsGuess ? Math.max(0, CFG.REVEAL_TEASE_MS) : Math.max(0, CFG.REVEAL_HOLD_MS);
+    return ms;
+  }
+
+  /** 这一格（默认 = 现在放到的这一格）要停多久。chain 不给就取现在这条链。 */
+  revealLegMs(k, chain) {
+    return this.legMsAt(typeof k === 'number' && isFinite(k) ? k : this.revealStep, chain);
+  }
+
+  /** 某条链**每一格**的时长表 —— 随快照下发，前端按它排动画 / 悬念倒计时。
+   *  ⚠ 用这条链**自己**的格数（分组时各组链长可能不同），别用 this.chainLength。 */
+  legMsOf(c) {
+    const n = (c && c.steps && c.steps.length) ? c.steps.length : Math.max(1, this.chainLength);
+    const out = [];
+    for (let k = 0; k < n; k++) out.push(this.legMsAt(k, c));
+    return out;
   }
 
   /* ------------------------------------------------------------ 快照 */
@@ -580,6 +658,9 @@ class ChainGame {
       revealStep: this.revealStep,
       revealLegs: this.chainLength,
       legHoldMs: this.revealLegMs(),
+      // ★ v15：当前这条链**每一格**的时长表（起词 / 猜词格短、作画格长 + 悬念尾）。
+      //   前端按它排「逐笔动画 + 3 秒倒计时」，换链 / 换局都会跟着变。
+      legMs: this.legMsOf(cur),
       // 进度骨架：第几格、这一格全场**同时**有几件事、交了几件 —— 不含任何内容。
       // v12：多组并行时同时进行的是「每个组各一条链」，所以 stepTotal = 最大的组多大
       // （4 人 1 组 = 4，8 人 2 组 × 4 = 4，不是 8 —— 同一步里不会出现 8 条链）。
@@ -627,6 +708,10 @@ class ChainGame {
       voteTotal: tally.total,
       voteDone: tally.voted,
       voteAgree: tally.agree,
+      // ★ v14：谁投了哪边（画布下方那排 √ / × 小标记）。只列**已投**的人。
+      voteMarks: this.chainVoteMarks(cur ? cur.chainId : null),
+      // ★ v14：进投票后先定格这么久再弹投票纸片（毫秒）。非投票阶段为 0。
+      voteFreezeMs: this.phase === CHAIN_PHASE.VOTE ? CFG.VOTE_FREEZE_MS : 0,
       chainCount: this.chains.length,
       settled: (this.chainSettled || []).map(r => ({
         chainId: r.chainId, ownerName: r.ownerName, firstWord: r.firstWord,
@@ -741,6 +826,11 @@ class ChainGame {
     this.guessMs = optSec(opts && opts.guessSeconds);
     this.revealMs = optSec(opts && opts.revealSeconds);
     this.voteMs = optSec(opts && opts.voteSeconds);
+    // ★ v14：回放倍速 —— 只收 [1, 1.5, 2]，其余（含缺省 / 非法 / 0）一律回**服务端默认档**
+    //   （CFG.REPLAY_SPEED = 1.5，可被 GAME_CHAIN_REPLAY_SPEED 压）。与秒数字段的
+    //   「0 = 用默认」一样：0 不是合法倍速，不会被夹成下限 1。
+    this.replaySpeed = P.GAME.CHAIN_REPLAY_SPEEDS.indexOf(Number(opts && opts.replaySpeed)) >= 0
+      ? Number(opts.replaySpeed) : CFG.REPLAY_SPEED;
     // 链长：默认 = **2 × 该组人数**（组内传遍）。每人占连续两格（画自己拿到的 + 猜下一格），
     // 所以组内整圈走完正好 2×组人数 格 —— 4 人房就是用户点名的 8 步：
     //   k=0 起词A k=1 画A k=2 猜B k=3 画B k=4 猜C k=5 画C k=6 猜D k=7 画D
@@ -1383,6 +1473,15 @@ class ChainGame {
     let m = this.votesKeep.get(userId);
     if (!m) { m = new Map(); this.votesKeep.set(userId, m); }
     m.set(cur.chainId, !!agree);
+    // ★ v14 用户要求：**全员投完就立刻进下一条链**，不用干等到投票时限。
+    //   未投的一律视为弃权（统计时按「没投 = 削弱 √ 方」算，见 chainVoteTally / settleChain）。
+    //   注意 fav（♥）不参与这个判定 —— 它跟「匹配吗」是两码事。
+    const t = this.chainVoteTally(cur.chainId);
+    if (t.total > 0 && t.voted >= t.total) {
+      this.api.sync();
+      this.settleChain();
+      return { ok: true, auto: true };
+    }
     this.api.sync();
     return { ok: true };
   }
@@ -1464,6 +1563,26 @@ class ChainGame {
       if (v) agree += 1; else against += 1;
     }
     return { agree, against, voted, total: voters.size };
+  }
+
+  /**
+   * ★ v14：当前这条链**已经投过的人**（画布下方那排 √ / × 小标记）。
+   *
+   * 只列投过的、按投票人名单的顺序（= 分组环序），没投的不出现 ——
+   * 前端拿它 + voteDone / voteTotal 就能画出「已投 x / y」和每个人投了哪边。
+   * 名字走 this.names（人走了也还显示得出来），只给这条链的合法投票人。
+   */
+  chainVoteMarks(chainId) {
+    const voters = this.votersFor(chainId);
+    const rows = [];
+    if (!chainId) return rows;
+    for (const uid of voters) {
+      const m = this.votesKeep.get(uid);
+      const v = m ? m.get(chainId) : undefined;
+      if (v === undefined) continue;
+      rows.push({ userId: uid, name: this.names.get(uid) || '某人', add: !!v });
+    }
+    return rows;
   }
 
   /** 当前这条链投完 → 结算它，然后把镜头交给下一条链（或最终结算） */
@@ -1626,7 +1745,7 @@ class ChainGame {
    * 房主按「立刻推进」：
    *   大厅   —— 全员视为已准备，直接开局
    *   写/画/猜 —— 不等超时，把没交的按「空」处理并收格
-   *   回放   —— 进入投票
+   *   回放   —— 进投票（v14：回放本身由服务端推，没有手动翻格）
    *   投票   —— 立刻结算
    *   结算   —— 回大厅
    * 返回 { ok, message }
@@ -1648,15 +1767,9 @@ class ChainGame {
       return { ok: true };
     }
     if (this.phase === CHAIN_PHASE.REVEAL) {
-      // ★ 房主「立刻推进」在回放里 = 推进**一格**；已经在最后一格才进投票。
-      //   以前这里是一步跳到投票 —— 那样房主一点就再也看不到后面几格了。
-      if (this.revealStep + 1 < this.chainLength) {
-        this.revealStep += 1;
-        this.deadline = Date.now() + this.revealLegMs();
-        this.api.sync();
-      } else {
-        this.enterVote();
-      }
+      // ★ v14：回放没有手动干预（前端那一排播放 / 翻格 / 倍速控件已经删掉），
+      //   房主的「立刻推进」= 这条链不看了，直接进投票（以前是推进一格）。
+      this.enterVote();
       return { ok: true };
     }
     if (this.phase === CHAIN_PHASE.VOTE) { return this.settleChain(); }
@@ -1686,7 +1799,8 @@ class ChainGame {
     if (this.phase === CHAIN_PHASE.REVEAL) {
       if (this.revealStep + 1 >= this.chainLength) return this.enterVote();
       this.revealStep += 1;
-      this.deadline = nowMs + this.revealLegMs();
+      // ★ v15：下一格停多久**由那一格自己决定**（起词 / 猜词格短、作画格长）
+      this.deadline = nowMs + this.revealLegMs(this.revealStep);
       this.api.sync();
       return;
     }

@@ -2402,6 +2402,61 @@ body.panel-dragging * { cursor: grabbing !important; }
   accent-color: var(--accent);
   cursor: pointer;
 }
+/* HUD 右侧按钮组：经典 / 画皮里它只是把尾巴那几颗按钮收在一起（外观不变；
+   接龙状态条里靠 margin-left:auto 整组推到最右，见下面的 .chain-strip）。 */
+.game-hud .gh-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* ---- 接龙：把 HUD 压成**画布上沿的一条细状态条**（v13） ----
+   用户实测：以前那是一个宽 460、高 139 的白色悬浮面板，居中钉在画布正中 ——
+   写词 / 猜词时正好挡住要看的画。现在它整条铺在画布上沿：
+     · 高 ≤ 40px（字号 12px、上下 4px 内边距、按钮 24px 高）
+     · 半透明 + 毛玻璃，和上沿那条快捷条同一套观感
+     · 只留「阶段 + 倒计时 · 第 X/Y 手 · 已完成」+ 右侧那几颗按钮；
+       #ghWord（一句话说明）与音量滑块收掉 —— 同一句话在画布 / 输入条上已经有一处了
+   #chainCanvasLayer 的 paddingTop 由 app.js 按这条**实测底边**算（见 syncChainCanvasPad），
+   所以画面内容一定从状态条下面开始，物理上不会被压住。 */
+#stage.chain-strip #gameHud {
+  left: 8px;
+  right: 8px;
+  top: calc(var(--qb-h, 40px) + 6px);
+  transform: none;
+  width: auto;
+  max-width: none;
+  min-height: 0;
+  height: 34px;
+  padding: 0 8px 0 12px;
+  gap: 10px;
+  box-sizing: border-box;
+  background: rgba(255, 255, 255, .8);
+  border-radius: 8px;
+  box-shadow: 0 2px 10px rgba(20, 30, 50, .10);
+  overflow: hidden;
+}
+#stage.chain-strip #gameHud .gh-actions { margin-left: auto; gap: 7px; flex: none; }
+/* 状态条里的按钮压到 24px 高：条子总共才 34px */
+#stage.chain-strip #gameHud .mini {
+  height: 24px;
+  min-height: 0;
+  padding: 0 9px;
+  line-height: 22px;
+}
+/* 阶段名 + 倒计时是条子上最该被看见的两个数：字号稍大、秒数等宽 */
+#stage.chain-strip #gameHud .gh-timer-phase { font-size: 12.5px; }
+#stage.chain-strip #gameHud .gh-timer-sec { font-size: 15px; min-width: 34px; }
+#stage.chain-strip #gameHud .gh-round { font-size: 11.5px; }
+/* 条子上不出现的三样：一句话说明 / 音量滑块 / 画皮人数（接龙没有这段） */
+#stage.chain-strip #gameHud .gh-word,
+#stage.chain-strip #gameHud .gh-vol { display: none; }
+
+/* 回放 / 投票 / 小结算期间（stage.replay-chrome，见 app.js 的 setChainStrip）：
+   状态条已经在上沿了，这里只做减法 —— 快捷条收起由 JS 负责，条子上再少一颗「计分」，
+   把横向空间全留给「第 X/Y 手 · 已完成」。 */
+#stage.replay-chrome #gameHud #ghScore { display: none; }
 
 .game-score {
   position: absolute;
@@ -2599,7 +2654,8 @@ body.panel-dragging * { cursor: grabbing !important; }
 #gameMask.mode-chain #rowChainWrite { order: 4; }
 #gameMask.mode-chain #rowChainGuess { order: 5; }
 #gameMask.mode-chain #rowChainReveal { order: 6; }
-#gameMask.mode-chain #rowVote { order: 7; }
+#gameMask.mode-chain #rowChainReplaySpeed { order: 7; }
+#gameMask.mode-chain #rowVote { order: 8; }
 #gameMask.mode-skin #rowTheme { order: 1; }
 #gameMask.mode-skin #rowDrawTime { order: 2; }
 #gameMask.mode-skin #rowSkinRounds { order: 3; }
@@ -2729,6 +2785,44 @@ body.panel-dragging * { cursor: grabbing !important; }
   flex-wrap: wrap;
 }
 .chain-task.collapsed .ct-body { display: none; }
+
+/* ---- 写词步（step === 'WORD'）：把选词区**居中**，画布腾出来 ----
+   这一步根本不用画（词选完才进作画），所以：
+     · appendChainWriteStep()（app.js）给 #stage 挂上 .chain-task-write；
+     · 画布层收掉（JS 本来就不给它铺东西），浮动层整块**不显示**，
+       不再从画布中央透出来占着视线；
+     · 题面卡片从「贴底全宽窄条」变成一块居中的选词面板（宽度封顶 560px）。
+   ⚠ 位置用 top:50% + translateY 居中：卡片高度随候选词个数变，
+     靠固定 top 算会偏，而且状态条在上沿、不能让它压到卡片。 */
+.stage.chain-task-write .chain-canvas-layer { display: none; }
+.chain-task.ct-centered {
+  left: 50%;
+  right: auto;
+  bottom: auto;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(560px, calc(100% - 32px));
+  max-height: 62vh;
+  background: rgba(255, 255, 255, .94);
+  box-shadow: 0 14px 40px rgba(20, 30, 50, .18);
+}
+.chain-task.ct-centered .ct-head { justify-content: center; padding: 6px 10px; }
+.chain-task.ct-centered .ct-step { font-size: 14px; }
+/* 居中的选词面板里，候选词一列排开、每个都够宽好点 */
+.chain-task.ct-centered .ct-body { flex-direction: column; align-items: stretch; gap: 8px; }
+.chain-task.ct-centered .ct-note { text-align: center; }
+.chain-task.ct-centered .ct-choices { flex-direction: column; }
+.chain-task.ct-centered .ct-choice {
+  text-align: center;
+  padding: 9px 12px;
+  font-size: 14px;
+  letter-spacing: 1px;
+}
+/* 写词时底部没有横条（没有输入条 / 回放条），但保险起见仍然别被 --cb-h 抬起来 */
+.stage.chain-task-write.chain-bar-on .chain-task { bottom: auto; }
+/* 写词步的「链条进度」小窗也让位：它原本贴右下角，会跟居中的选词面板挤在一条横线上，
+   这一步往上挪到状态条正下方（右上角）。 */
+.stage.chain-task-write .chain-progress { bottom: auto; top: calc(var(--qb-h, 40px) + 48px); }
 
 .ct-word {
   font-size: 21px;
@@ -3085,38 +3179,150 @@ body.panel-dragging * { cursor: grabbing !important; }
 .rp-verdict .rv-tag { font-size: 11.5px; padding: 2px 7px; border-radius: 10px; }
 .rp-verdict .rv-tag.ok { background: #e2f4e6; color: #2f7d43; }
 .rp-verdict .rv-tag.bad { background: #fbe9e8; color: var(--danger); }
-.rp-vote {
+/* ★ v14：画布中央的「纸片」投票面板（#rpVote，见 index.html）。
+   一条链**全部棒次回放完**、并定格几秒之后才出现。
+   它不是圆角矩形卡片，而是**一张撕下来的纸**：
+     · 撕痕 = app.js 的 tornPaperClip() 生成的 polygon，运行时写成内联 clip-path；
+     · 纸面 = 白底 + 极浅的横向扫描线（repeating-linear-gradient），像复印纸。
+   位置：`align-self:center` + 夹在上下窄带之间 → 落在**画布中央**，且压不到窄带。
+   内容自上而下、水平居中：起词 → ↓ → 最终猜词 → 「这个匹配吗？」→ 两个手绘圈按钮。 */
+.chain-canvas-layer .ccl-paper {
+  position: absolute;            /* 绝对居中：不受上下窄带 / 层内留白的影响 */
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: auto;          /* 层是 none，纸片上的按钮必须能点 */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: min(330px, 64%);
+  /* 撕痕会啃掉 1~3% 的边，所以内边距给足，字不会被裁 */
+  padding: 26px 34px 24px;
+  background:
+    repeating-linear-gradient(0deg, rgba(120, 140, 170, .07) 0 1px, transparent 1px 5px),
+    linear-gradient(180deg, #fdfdfb 0%, #f6f6f2 100%);
+  box-shadow: 0 16px 40px rgba(20, 30, 50, .28);
+}
+.chain-canvas-layer .ccl-paper.hidden { display: none; }
+.ccl-paper .pp-first,
+.ccl-paper .pp-last {
+  font-size: 22px;
+  line-height: 1.25;
+  letter-spacing: 1px;
+  color: var(--text);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ccl-paper .pp-last { font-size: 19px; }
+.ccl-paper .pp-arrow {
+  font-size: 15px;
+  line-height: 1;
+  color: var(--text-dim);
+}
+.ccl-paper .pp-ask {
+  margin-top: 8px;               /* 「空一行」：箭头/词与问句之间留一段 */
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.ccl-paper .pp-btns {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding-top: 4px;
+  justify-content: center;
+  gap: 18px;
+  margin-top: 2px;
 }
-.rp-vote .hint { flex: 1; font-size: 11.5px; color: var(--text-dim); }
-/* 投过的按钮：带个勾 + 轻微内凹，一眼看出「这条我投过了」 */
-.rp-vote .btn.voted::before {
-  content: '✓';
-  margin-right: 5px;
-  font-weight: 700;
+/* ---- 手绘圈按钮（✗ 红圈在左、✓ 绿圈在右）----
+   圈是内联 SVG（sketchDisk()），所以按钮本身去掉边框/底色，只留一个可点区域。 */
+.ccl-paper .pp-circle {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 4px 4px 2px;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  line-height: 1.2;
 }
+.ccl-paper .pp-circle:hover { background: transparent; }
+.ccl-paper .pp-circle:disabled { background: transparent; }
+.ccl-paper .pp-circle .pp-c { display: inline-flex; flex-direction: column; align-items: center; gap: 2px; }
+/* 圈下面那行小字（写在 SVG 里的 <u>，见 sketchDisk） */
+.ccl-paper .pp-circle .pp-c .pp-lab {
+  text-decoration: none;
+  font-size: 11.5px;
+  line-height: 1.2;
+}
+.ccl-paper .pp-circle.ok { color: #2f8f4e; }
+.ccl-paper .pp-circle.bad { color: var(--danger); }
+.ccl-paper .pp-circle.voted { font-weight: 700; }
+.ccl-paper .pp-circle.voted::after { content: '（已投）'; }
+.ccl-paper .pp-circle[data-voted=""]::after { content: ''; }
+.ccl-paper .pp-done { font-size: 11.5px; color: var(--text-dim); margin-top: 2px; }
+
+/* 画布区域内、纸片**下方**那排「全场玩家的投票」：每人一个圈（没投的是空圈）+ 已投 x / y。
+   位置不写死在 CSS 里 —— 纸片是绝对居中的、高度随内容变，所以由 app.js 渲染完量一次，
+   把它贴在纸片下沿（见 renderChainVoteMarks）；这里只负责居中和外观。 */
+.chain-canvas-layer .ccl-marks {
+  position: absolute;
+  left: 50%;
+  top: 50%;                      /* JS 量到纸片下沿后覆盖 */
+  transform: translateX(-50%);
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  max-width: 88%;
+  padding: 5px 14px;
+  background: rgba(255, 255, 255, .72);
+  border-radius: 16px;
+  backdrop-filter: blur(4px);
+}
+.chain-canvas-layer .ccl-marks.hidden { display: none; }
+.ccl-marks .rm-done {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text-dim);
+  margin-right: 2px;
+  white-space: nowrap;
+}
+.ccl-marks .rm {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.ccl-marks .rm.ok { color: #2f7d43; }
+.ccl-marks .rm.bad { color: var(--danger); }
+/* ★ v15：还没投的人 —— 占位空圈，浅灰、不抢眼 */
+.ccl-marks .rm.pending { color: #9aa4b2; }
+.ccl-marks .rm.pending svg { opacity: .75; }
+.ccl-marks .rm i { font-style: normal; }
+
 /* 点下去立刻反馈（不等服务端回快照） */
-.rp-vote .btn.pulse { animation: rpPulse .42s ease-out; }
+.rp-vote .btn.pulse,
+.ccl-paper .btn.pulse { animation: rpPulse .42s ease-out; }
 @keyframes rpPulse {
   0% { transform: scale(1); }
   35% { transform: scale(.94); box-shadow: 0 0 0 5px rgba(88, 132, 224, .22); }
   100% { transform: scale(1); }
 }
 
-/* 回放 / 投票开着时（stage.replay-chrome，见 app.js 的 setReplayChrome）：
-   把画布上沿那两条常驻浮层压到最小 —— 快捷条只留小箭头，HUD 只留
-   「阶段 + 倒计时 / 结束游戏 / 计分」。上窄带于是能贴到很靠上的位置，
-   中间那一格画面拿到尽可能多的高度。 */
-#stage.replay-chrome #gameHud .gh-word,
-#stage.replay-chrome #gameHud .gh-round,
-#stage.replay-chrome #gameHud #ghScore,
-#stage.replay-chrome #gameHud #ghSound,
-#stage.replay-chrome #gameHud .gh-vol,
-#stage.replay-chrome #gameHud #ghNext { display: none; }
-#stage.replay-chrome #gameHud { gap: 8px; padding: 4px 10px; }
+/* 回放 / 投票 / 小结算开着时（stage.replay-chrome，见 app.js 的 setChainStrip）：
+   状态条本身没变（已经在画布上沿，见上面 .chain-strip 那一套），这里只管
+   画布层顶部那条兜底留白 —— 正常情况下 app.js 的 syncChainCanvasPad 会按
+   状态条**实测底边**写 inline paddingTop，把它盖掉；这条只在测量之前管用。 */
+#stage.replay-chrome .chain-canvas-layer { padding-top: 52px; }
 
 /* 尊重系统的「减少动态效果」偏好 —— 前庭敏感的人看连续滑动会不适 */
 @media (prefers-reduced-motion: reduce) {
@@ -3615,6 +3821,10 @@ body.panel-dragging * { cursor: grabbing !important; }
   overflow: hidden;
 }
 .chain-canvas-layer .ccl-band.hidden { display: none; }
+/* ★ v16：回放/投票时 <img> 是**绝对定位到纸面**上的（见 app.js 的 crSyncImgToPaper），
+   此时这个 flex 列里只剩上下两条窄带 —— 用 margin-top:auto 把下带顶到底部，
+   否则两条带会挤在顶上。图片还在流里时（猜词步 / 点赞页）这条不起作用。 */
+.chain-canvas-layer .ccl-bottom { margin-top: auto; }
 .chain-canvas-layer .ccl-band .ccl-text {
   flex: 1 1 auto;
   min-width: 0;
@@ -3658,17 +3868,42 @@ body.panel-dragging * { cursor: grabbing !important; }
   padding-left: 8px;
   border-left: 1px solid var(--line-soft);
 }
+/* ★ v15：回放 / 看画的那一格**铺满整个画布区**（不再是中间一张带边框阴影的小卡片）。
+   用户实测的原话：「笔迹回放就直接用画画的画布区域展示好了，不要出现新窗口」——
+   以前这块是 flex:1 + align-self:center，元素盒跟着图片自身的宽高比缩，
+   看上去就是画布中间浮着一张白色的圆角卡片（还带 1px 边框 + 投影）。
+   现在：横向拉满、纵向吃满中间那一行、去掉边框/圆角/阴影，
+   object-fit: contain 保证**整幅画都看得见**（不裁切，多出来的部分由白底兜着，
+   和纸张的白色连成一片 —— 视觉上就是「画布上现在显示这幅画」）。 */
 .chain-canvas-layer .ccl-img {
   flex: 1 1 auto;
   min-height: 0;
-  max-width: 100%;
-  max-height: 100%;
-  align-self: center;
+  width: 100%;
+  align-self: stretch;
   object-fit: contain;
   background: #fff;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  box-shadow: 0 10px 30px rgba(20, 30, 50, .16);
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+/* ★ v15：下窄带里的悬念倒计时读数（3 → 2 → 1）。
+   它是「下一棒 <人> 猜的是：」后面的那个数字，字要大、要跳一下 ——
+   但**不能**写成猜词的词（词只在那一格自己的上窄带里揭晓）。 */
+.chain-canvas-layer .ccl-band .ccl-cd {
+  display: inline-block;
+  min-width: 1.6em;
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: 1px;
+  color: var(--accent);
+  text-align: center;
+}
+.chain-canvas-layer .ccl-band .ccl-cd.pulse { animation: cclCdPulse .5s ease-out; }
+@keyframes cclCdPulse {
+  0% { transform: scale(1.9); opacity: .35; }
+  60% { transform: scale(1); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
 }
 /* 空占位（老节点，永远 hidden 且为空）：画布上不再有任何大字 */
 .chain-canvas-layer .ccl-empty { display: none; }
@@ -3723,13 +3958,19 @@ body.panel-dragging * { cursor: grabbing !important; }
   background: var(--panel-2);
 }
 
-/* 猜词输入：横条里就地排开（不再是弹窗里那一列） */
+/* 猜词输入：横条里就地排开（不再是弹窗里那一列）。
+   ⚠ 这一条是「画布下方」的输入区，用户要求它 ≤ 60px 高 —— 所以里面每一样都压扁：
+   提示语折行会把条子顶高，所以给它 white-space:nowrap（窄屏靠 flex 收缩 + 省略号）。 */
 .chain-bar .ci-custom {
   margin-top: 0;
   flex: 1 1 320px;
   min-width: 200px;
   max-width: 560px;
 }
+.chain-bar .ci-custom input { height: 32px; padding: 0 10px; box-sizing: border-box; }
+.chain-bar .ci-custom .btn { height: 32px; line-height: 30px; padding: 0 12px; box-sizing: border-box; }
+.chain-bar .cb-title { overflow: hidden; text-overflow: ellipsis; }
+.chain-bar .cb-hint { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chain-bar .ci-preview { margin-top: 0; min-height: 0; white-space: nowrap; }
 
 /* ---- 回放控制条：矮、半透明、可折叠 ----
@@ -3753,16 +3994,26 @@ body.panel-dragging * { cursor: grabbing !important; }
 .chain-bar.rp-bar.folded #rpPills { display: none; }
 /* 投票 / 小结算行是**折叠也必须在**的（那是要点的按钮，藏了就没法投票） */
 .chain-bar.rp-bar.folded .cb-row.rp-vote { display: flex; }
+.chain-bar.rp-bar.folded .cb-row.rp-fav { display: flex; }
 .chain-bar.rp-bar.folded #rpFold { transform: rotate(-90deg); }
 
 /* 回放条里那一行结果：已挪进画面下沿的窄带（见 .chain-canvas-layer .rp-verdict），
    这里只留一条兜底 —— 万一它还在条里，也别撑高。 */
 .chain-bar .rp-verdict { flex: 1 1 auto; margin: 0; padding: 3px 10px; }
 
-/* 回放条里的投票行：去掉弹窗时代的上下留白 */
-.chain-bar .rp-vote { padding-top: 0; flex-wrap: wrap; }
-.chain-bar .rp-vote .btn { min-width: 46px; }
-.chain-bar .rp-fav-state { margin-left: 0; }
+/* ★ v14：投票不再占横条里的位置（√ / × 搬进了画布中央的纸片 #rpVote）——
+   这里只留「♥ 最喜欢这张」那一行，它和匹配投票是两码事，单独一行各投各的。 */
+/* 「♥ 最喜欢这张」**单独一行**（#rpFavRow），和纸片上的 √ / × 分开：
+   它投的是「这条链里我最喜欢的一幅画」，跟「首尾对得上吗」是两码事，
+   服务端也分开统计 —— 混在一行里点错就是投错票。 */
+.chain-bar .rp-fav {
+  gap: 8px;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 4px;
+}
+.chain-bar .rp-fav .cb-ask { color: var(--accent); font-size: 12px; }
+.chain-bar .rp-fav-state { margin-left: 0; flex: 1 1 auto; min-width: 0;
+  color: var(--text-dim); font-size: 11.5px; }
 
 /* ---- 最终结算第一步：「点赞最多的画」那条横条 ----
    画面本体铺在主画布上（#chainCanvasLayer 中间那一格），这条只放

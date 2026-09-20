@@ -368,6 +368,41 @@ const BANK = {
     tone({ freq: 560, to: 700, dur: 0.1, type: 'sine', gain: 0.32 });
   },
 
+  /* ---- ★ v15：回放的「下一棒猜的是什么」悬念 ---- */
+
+  // 起悬念：一段上滑（空气被抽紧的感觉）——「下一棒他猜的是什么？」
+  tease() {
+    tone({ freq: 240, to: 880, dur: 0.5, type: 'triangle', gain: 0.34 });
+    noise({ freq: 520, to: 2800, dur: 0.46, gain: 0.12, q: 1.4 });
+  },
+
+  // 倒计时的读数：3 → 2 → 1，越往后越高（opt.n = 还剩几）
+  countTick(opt) {
+    const left = Math.max(1, Math.min(3, (opt && opt.n) || 1));
+    tone({ freq: 500 + (3 - left) * 160, dur: 0.08, type: 'square', gain: 0.3 });
+  },
+
+  // 揭晓「他猜的是：X」——惊喜音：一下上行 + 高频闪光
+  reveal() {
+    tone({ freq: 523, to: 1046, dur: 0.14, type: 'triangle', gain: 0.55 });
+    [1046, 1319, 1568].forEach(function (f, i) {
+      tone({ freq: f, dur: 0.15, type: 'triangle', gain: 0.48, delay: 0.1 + i * 0.06 });
+    });
+    noise({ freq: 6000, to: 11000, dur: 0.3, gain: 0.18, q: 0.7, delay: 0.16 });
+  },
+
+  // 自己落下一票：纸片被「啪」地拍在桌上（印泥 + 纸响）
+  voteStamp() {
+    noise({ freq: 1700, to: 420, dur: 0.13, gain: 0.34, q: 0.9 });
+    tone({ freq: 300, to: 175, dur: 0.11, type: 'sine', gain: 0.3 });
+  },
+
+  // 别人落下一票（画布下沿那排圈多了一个）：很轻的一声，别抢自己的戏
+  voteLand() {
+    tone({ freq: 1240, dur: 0.05, type: 'sine', gain: 0.2 });
+    tone({ freq: 1660, dur: 0.06, type: 'sine', gain: 0.14, delay: 0.05 });
+  },
+
   /* ---- 结算 ---- */
 
   // 拿奖杯：上行琶音 + 高频闪光，整局里最华丽的一个音

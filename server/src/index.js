@@ -175,9 +175,23 @@ const server = http.createServer((req, res) => {
       // 忘了报它的话，测试没法判断端口上那台是不是自己配的那份计时。
       CHAIN_SCORE_MS: CHAIN_CFG.CHAIN_SCORE_MS,
       GRACE_MS: CHAIN_CFG.GRACE_MS,
-      // 回放**每一格**定格时长的地板（v11）：真实每格时长 = max(它, REVEAL_MS / 链长)，
-      // 链长每局都不一样（默认 2×人数），所以这里只能报这个地板。
-      REVEAL_LEG_MS_MIN: P.GAME.CHAIN_REVEAL_LEG_MS_MIN
+      // 回放**每一格**定格时长的地板（v11）：真实每格时长 = max(它, REVEAL_MS / 链长 / 回放倍速)，
+      // 链长与倍速每局都不一样，所以这里只能报地板。
+      REVEAL_LEG_MS_MIN: P.GAME.CHAIN_REVEAL_LEG_MS_MIN,
+      // ★ v15：回放节奏——起词 / 猜词格各自停多久、作画格后面的悬念倒计时多长。
+      //   自动化测试靠这几个值算「一局回放该跑多久」，不报就只能盲等。
+      REVEAL_WORD_MS: CHAIN_CFG.REVEAL_WORD_MS,
+      REVEAL_GUESS_MS: CHAIN_CFG.REVEAL_GUESS_MS,
+      REVEAL_TEASE_MS: CHAIN_CFG.REVEAL_TEASE_MS,
+      // ★ v16：作画格的动画**按笔数**算（起步 + 每笔 × 笔数，夹上下限，再除以倍速），
+      //   没有悬念尾时留一小段定格。测试要靠公式核对快照里的 legMs。
+      REVEAL_HOLD_MS: CHAIN_CFG.REVEAL_HOLD_MS,
+      REVEAL_DRAW_BASE_MS: CHAIN_CFG.REVEAL_DRAW_BASE_MS,
+      REVEAL_DRAW_PER_STROKE_MS: CHAIN_CFG.REVEAL_DRAW_PER_STROKE_MS,
+      REVEAL_DRAW_MIN_MS: CHAIN_CFG.REVEAL_DRAW_MIN_MS,
+      REVEAL_DRAW_MAX_MS: CHAIN_CFG.REVEAL_DRAW_MAX_MS,
+      // ★ v14：投票前的定格时长（进投票后先停这么久再弹投票纸片）——测试靠它对齐节奏
+      VOTE_FREEZE_MS: CHAIN_CFG.VOTE_FREEZE_MS
     },
     // 画皮的计时同理：自动化测试靠这几个值判断「端口上挂的是不是压缩计时的那个进程」。
     // 少了这一段，画皮 E2E 就只能盲跑，旧进程残留时会跑出一片假绿。

@@ -11,7 +11,7 @@ window.CHAHU_CONFIG = {
   defaultName: '',
   appName: '茶绘',
   // 版本号：关于页显示 + 和 GitHub 的最新 release 比对
-  appVersion: '2.0.6',
+  appVersion: '2.0.7',
   // 开源仓库（更新检测用）
   repo: 'PainterAnkry/chahui'
 };

@@ -40,7 +40,15 @@ const CHECKS = [
     // serverButtonAction 是「按按钮文案行事」那一下 —— 有它才说明不是旧的「关闭服务器」语义
     /importPsdBytes/, /toggleOffline/, /serverButtonAction/, /renderServerToggle/, /maskEdit/,
     // v2.0.2：GIF 表情不再 canvas 重编码（否则动画变静态第一帧）+ 头像方形裁剪
-    /GIF 无论大小都原样保留/, /openAvaCrop/, /acConfirm/]],
+    /GIF 无论大小都原样保留/, /openAvaCrop/, /acConfirm/,
+    // v2.0.7（第五轮）：回放铺满画布区（两张离屏画布，笔迹 1:1 落 raw 再整幅缩下来）、
+    // 起词/猜词格短、播完接悬念倒计时、纸片下方全场投票圈、投票音效
+    /chainRoster/, /crTeaseText/, /crStartTease/, /rawCtx/, /voteSeen/, /myVoteAt/,
+    // v2.0.7（第六轮）：回放**画在真画布上**（接管引擎的 replayCanvas，不再有 <img> 面板）、
+    // 作画格按笔数播动画、投票阶段留最后一棒的成图
+    /crCanvasTake/, /crCanvasShowArt/, /crHideImg/, /engine\.replayCanvas = a\.raw/,
+    // v2.0.7（第七轮）：离场收干净（投票纸片别留到下一局）+ 大厅名单过滤掉离场的人
+    /crHideVotePaper/, /p\.online !== false/]],
   // v2.0.4 追加：.sut（CSP 笔刷）导入 —— 列名感知的 SQLite 读取 + 真参数连表 + 空白缩略图拒绝
   ['renderer/brush-import.js', [/sqliteTableRows/, /sutBrushMeta/, /isFlatImage/, /cspColumnNames/]],
   ['renderer/project.js', [/groups/, /maskPng/]],
@@ -49,7 +57,13 @@ const CHECKS = [
   // PSD 导入（v2.0.1）：读字节的那一半。少了它，包里的「导入 PSD」会点了没反应
   ['renderer/psd-read.js', [/ChaPsdRead/, /8BPS/, /toProject/]],
   // 游戏音效（v1.10.0）：回合结算音 + 音量滑块
-  ['renderer/sfx.js', [/roundEnd/, /setVolume/]],
+  // v2.0.7（第五轮）：悬念倒计时 / 揭晓惊喜音 / 投票落章音
+  ['renderer/sfx.js', [/roundEnd/, /setVolume/, /tease\(\)/, /countTick/, /voteStamp/, /voteLand/]],
+  // v2.0.7：回放画面铺满画布区（去掉卡片外观）+ 悬念倒计时读数 + 空圈占位
+  ['renderer/styles.css', [/ccl-cd/, /ccl-img/, /rm\.pending/]],
+  // v2.0.7：每一格的时长不再一样（legMs 表）+ 16 版协议（按笔数播动画 / 猜词定格 2 秒）
+  ['server/protocol.js', [/CHAIN_REVEAL_TEASE_MS/, /CHAIN_REVEAL_DRAW_PER_STROKE_MS/,
+    /chainRevealAnimMs/, /PROTOCOL_VERSION = 16/]],
   // 头像（v1.10.0）：成员表那个白名单必须带上 avatar，否则别人永远收不到
   ['server/rooms.js', [/normalizeGroups/, /moveGroup/, /setLayerGroup/, /avatar/, /hasMask/, /dupLayer/]],
   ['server/index.js', [/GROUP_ADD/, /GROUP_UPD/, /MEMBER_AVATAR/, /GAME_GUESS/,
@@ -62,7 +76,15 @@ const CHECKS = [
     // v2.0.2：换一组必须仍在所选主题词库里（第三个参数是主题词池）
     /poolForTheme\(this\.theme\)/]],
   // v2.0.2：接龙不自画 / 掉线顶替 / 观众不投票
-  ['server/chain.js', [/pickStandIn/, /isPlayer/]],
+  // ⚠ 原来这里记的是 pickStandIn / isPlayer 两个函数名 —— 它们在后来的重构里改掉了
+  //   （掉线顶替 / 观战现在是 spectators + votersFor 这套），继续留着只会每次打包
+  //   报一条假的「缺少特征」。换成现在真实存在的两个：
+  //     · spectators：中途进房的人本局只观战（不进环、不投票）
+  //     · votersFor ：投票人 = **这条链那一组**的人（跨组不算票）
+  // v2.0.7（第五轮）：每格时长分开算（legMsAt / legMsOf）+ 起词猜词格的悬念尾
+  // v2.0.7（第六轮）：作画格按**笔数**算动画（chainRevealAnimMs + DRAW_* 常量）
+  ['server/chain.js', [/spectators/, /votersFor/, /legMsAt/, /legMsOf/, /REVEAL_TEASE_MS/,
+    /REVEAL_DRAW_PER_STROKE_MS/, /REVEAL_HOLD_MS/]],
   // 应用内一键隧道（v1.10.0）：模块本身也要真的进包
   ['tunnel.js', [/createTunnel/, /trycloudflare/]],
   // 离线模式（v2.0.1）：不占端口的那个客户端，必须在包里
