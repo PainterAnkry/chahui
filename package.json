@@ -19,6 +19,7 @@
     "brushes": "node tools/brush-metrics.js",
     "brush-sheet": "node tools/brush-sheet.js",
     "rooms": "node tools/rooms-admin.js",
+    "purge-rooms": "node tools/purge-test-rooms.js",
     "shots": "node tools/shots-readme.js",
     "shots:lan": "node tools/shots-lan.js",
     "shots:chain": "node tools/shots-chain.js",

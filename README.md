@@ -927,6 +927,9 @@ npm run verify2       # 第二轮反馈验收（选区语义 / 导航器 / 图�
 npm run verify3       # 第三轮反馈验收（魔棒框选套索 / 自动变换 / 撤销 / 翻转不越界）
 npm run brushes       # 笔刷客观量测（峰值浓度 / 边缘过渡带 / 沿线覆盖率）
 npm run rooms         # 房间存档体检与清理
+npm run purge-rooms   # 删掉跑批灌进来的测试房（只删「名字出现在 tools/ 里」和
+                      # 带 回归/验收/测试/复现… 字样的房，保留「房主的茶绘室」等）
+                      # 先 `node tools/purge-test-rooms.js --dry` 看一眼要删哪些
 npm run video:shoot   # 重拍介绍视频的分镜素材（真实操作茶绘 + 录屏）
 npm run video:build   # 重新合成介绍视频（标题卡 / 字幕 / 运镜 / BGM → MP4）
 npm run video:verify  # 验收视频：能播吗、多长、有没有声音
