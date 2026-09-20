@@ -215,6 +215,46 @@ function check(name, ok, extra) {
   check('.sut：parse() 出来的笔真的带笔尖位图（空壳 bug 回归）', sutTip.tip > 100, String(sutTip.tip));
   check('.sut：直径 / 硬度也从笔尖推出来了', sutTip.dia === 24 && sutTip.hard > 0, sutTip.dia + ' / ' + sutTip.hard);
 
+  /* ---------- 纯色笔尖：收下并打标记（真·方头笔 vs 空白缩略图的取舍） ----------
+   * 「方头」类笔刷的图案本来就是一块实心方块，跟素材库的空白预览图**解码后长得一模一样**
+   * （都是一片满值），单看图分不出来。所以现在不再一刀切拒掉，而是收下 + flat 标记，
+   * 由导入对话框给提醒。仍然直接拒的只有「盖上等于什么都不画」的近黑纯色图。
+   * 见 tools/_sutdraw 的实测：真导入这支「方头纯度上色」之后画出来是一条连续实心直线。 */
+  const flatTip = await page.evaluate(() => {
+    function mk(fill) {
+      const c = document.createElement('canvas');
+      c.width = c.height = 64;
+      const cx = c.getContext('2d');
+      cx.fillStyle = fill; cx.fillRect(0, 0, 64, 64);
+      const png = Uint8Array.from(atob(c.toDataURL('image/png').split(',')[1]), ch => ch.charCodeAt(0));
+      const head = new Uint8Array(64);
+      const magic = 'SQLite format 3\0';
+      for (let i = 0; i < magic.length; i++) head[i] = magic.charCodeAt(i);
+      const all = new Uint8Array(head.length + png.length + 8);
+      all.set(head, 0); all.set(png, head.length);
+      return all;
+    }
+    const out = {};
+    // 满值纯色（不透明黑 = 实心方块笔尖）
+    try {
+      const r = window.ChaBrushImport.parse('solid.sut', mk('rgba(0,0,0,1)'));
+      out.solid = { n: r.brushes.length, flat: !!(r.brushes[0] || {}).flat };
+    } catch (e) { out.solid = { err: e.message }; }
+    // 全透明（盖上什么都不画）
+    try {
+      const r2 = window.ChaBrushImport.parse('empty.sut', mk('rgba(0,0,0,0)'));
+      out.empty = { n: r2.brushes.length };
+    } catch (e) { out.empty = { err: e.message }; }
+    return out;
+  });
+  console.log('  纯色笔尖:', JSON.stringify(flatTip));
+  check('★ 实心纯色笔尖被收下（不再一刀切拒掉）', flatTip.solid && flatTip.solid.n === 1,
+    JSON.stringify(flatTip.solid));
+  check('★ 收下的同时打上 flat 标记（对话框据此提醒用户）',
+    !!(flatTip.solid && flatTip.solid.flat), JSON.stringify(flatTip.solid));
+  check('全透明笔尖仍然拒掉（盖上什么都不画）',
+    !!(flatTip.empty && flatTip.empty.err), JSON.stringify(flatTip.empty));
+
   // SQLite 头但没有图 → 必须「配置型」明确拒绝，不许含糊
   const sutCfg = await page.evaluate(() => {
     const head = 'SQLite format 3\0';
@@ -225,14 +265,20 @@ function check(name, ok, extra) {
   });
   check('.sut：SQLite 但没图 → 明确说「配置型」', /配置型/.test(sutCfg), sutCfg);
 
-  /* ---------- 5a-2) 空白缩略图不能当笔尖（「画出来是半个圆」的真凶） ---------- */
+  /* ---------- 5a-2) 纯色笔尖：收下但**必须打标记**（不能静默当正常笔尖） ---------- */
   //
   //  真实案例：「方头纯度上色.sut」。CSP 的素材 tar 里带 thumbnail/thumbnail.png，
-  //  那只是素材库列表里的预览图 —— 实测那张是 90000 像素里 89700 个纯白，
-  //  剩 300 个浅灰角标（极差 65，所以「看极差」的判定会被骗过去）。
-  //  老代码把它当笔尖收下 → 导入一支 300px 的大白方块 → 画出来一团白、
-  //  落在画布上就是不相连的「半个圆」。现在必须明确拒绝。
-  console.log('\n=== .sut（空白预览缩略图不许当笔尖） ===');
+  //  实测那张解码后是 90000 像素里 89700 个满值（极差 65，所以「看极差」的判定会被骗过去）。
+  //  老代码把它当笔尖收下 → 而且 diameter 用图片尺寸 300 → 导入一支 300px 大白方块 →
+  //  盖章间隔一拉就是一堆不相连的「半个圆」。
+  //
+  //  ⚠ 政策在 2026-09 变了：**「方头」类笔刷的图案本来就是一块实心方块**，
+  //  跟空白预览图解码后长得一模一样，单看图分不出来。所以不再一刀切拒，
+  //  改成「收下 + flat 标记」——导入对话框会亮黄条 + 写「⚠ 纯色笔尖」+ 笔尖预览，
+  //  由用户自己判断。这里必须钉住的是：**它绝不能不带标记地混进去**。
+  //  （真正拦「300px 大白块 + 半圆」的是尺寸：diameter 走库里的 BrushSize，
+  //    见下面 5a-3 的断言。）
+  console.log('\n=== .sut（纯色笔尖：收下但必须打 flat 标记） ===');
   const blankThumb = await page.evaluate(async () => {
     // 造一张「白底 + 极淡角标」的 300×300 PNG，模拟 CSP 的预览缩略图
     const c = document.createElement('canvas');
@@ -256,11 +302,17 @@ function check(name, ok, extra) {
     for (let i = 0; i < magic.length; i++) head[i] = magic.charCodeAt(i);
     const all = new Uint8Array(head.length + tar.length);
     all.set(head, 0); all.set(tar, head.length);
-    try { window.ChaBrushImport.parse('blank.sut', all); return 'no-error'; }
-    catch (e) { return e.message; }
+    try {
+      const r = window.ChaBrushImport.parse('blank.sut', all);
+      const b = r.brushes[0] || {};
+      return { ok: true, n: r.brushes.length, flat: !!b.flat, name: b.name };
+    } catch (e) { return { ok: false, err: e.message }; }
   });
-  check('.sut：只有空白缩略图时明确报错（不再偷偷交付白块笔）',
-    /私有容器|空白/.test(blankThumb), blankThumb);
+  console.log('  ' + JSON.stringify(blankThumb));
+  check('★ 纯色缩略图不再「静默」混进来（要么拒，要么必须带 flat 标记）',
+    (blankThumb.ok === false) || blankThumb.flat === true, JSON.stringify(blankThumb));
+  check('★ 收下时确实带上了 flat 标记（对话框据此亮黄条 + 提醒）',
+    blankThumb.ok && blankThumb.flat === true, JSON.stringify(blankThumb));
 
   /* ---------- 5a-3) 尺寸 / 间距必须读库里真值，不能硬编码 ---------- */
   //

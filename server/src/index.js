@@ -11,6 +11,7 @@ const { RoomStore } = require('./rooms');
 const { Game, PHASE, CFG: GAME_CFG } = require('./game');
 const { ChainGame, CHAIN_PHASE, CHAIN_PHASE_LABEL, CFG: CHAIN_CFG } = require('./chain');
 const { SkinGame, SKIN_PHASE, SKIN_PHASE_LABEL, ROLE_INFO, CAMP, CFG: SKIN_CFG } = require('./skin');
+const PREFS = require('./game-prefs');
 const THEMES = require('./themes');
 const WORDS = require('./words');
 
@@ -161,11 +162,19 @@ const server = http.createServer((req, res) => {
     publicUrl: currentPublicUrl(),
     lanUrls: lanUrls(),
     pid: process.pid,
+    // GAME_FAST=1 时三套 CFG 的阶段时长默认值全被压成 1000ms。
+    // 自动化测试**必须**靠这个字段判断「端口上挂的是不是那台一秒一阶段的进程」——
+    // 光看端口通不通分不出旧进程残留（那会跑出一片假绿）。
+    fast: PREFS.isGameFast(),
     game: { PICK_MS: GAME_CFG.PICK_MS, ROUND_MS: GAME_CFG.ROUND_MS, ROUND_END_MS: GAME_CFG.ROUND_END_MS },
     chain: {
       INIT_MS: CHAIN_CFG.INIT_MS, WRITE_MS: CHAIN_CFG.WRITE_MS, DRAW_MS: CHAIN_CFG.DRAW_MS,
       GUESS_MS: CHAIN_CFG.GUESS_MS, REVEAL_MS: CHAIN_CFG.REVEAL_MS, VOTE_MS: CHAIN_CFG.VOTE_MS,
-      SCORE_MS: CHAIN_CFG.SCORE_MS, GRACE_MS: CHAIN_CFG.GRACE_MS
+      SCORE_MS: CHAIN_CFG.SCORE_MS,
+      // CHAIN_SCORE_MS 是「按链串行投票时，每条链的小结算展示时长」——
+      // 忘了报它的话，测试没法判断端口上那台是不是自己配的那份计时。
+      CHAIN_SCORE_MS: CHAIN_CFG.CHAIN_SCORE_MS,
+      GRACE_MS: CHAIN_CFG.GRACE_MS
     },
     // 画皮的计时同理：自动化测试靠这几个值判断「端口上挂的是不是压缩计时的那个进程」。
     // 少了这一段，画皮 E2E 就只能盲跑，旧进程残留时会跑出一片假绿。
@@ -180,6 +189,10 @@ const server = http.createServer((req, res) => {
     },
     words: WORDS.length,
     customWords: WORDS.isCustom(),          // CHAHU_WORDS 是否生效（测试的「身份」判据之一）
+    // 开局设置面板的档位（秒数 / 人数上下限 / 换词次数 / 回合档位）。
+    // 全部从 protocol 的常量推出来（见 game-prefs.js 的 setupOptions），
+    // 前端照着它渲染下拉框即可 —— 别在客户端再抄一份数字。
+    setup: PREFS.setupOptions(),
     // 主题词库：给前端拿来填「接龙主题」下拉（含可读名），也给测试当身份判据。
     // 只给 id / name / 词数 —— 一个词都不下发，免得提前泄题。
     themes: THEMES.themeList().map(t => t.id),
@@ -498,10 +511,22 @@ function gameOf(room, mode) {
 }
 
 /**
- * 开一局指定玩法。两种玩法的 start() 都收 { rounds, theme, drawSeconds }：
- *   rounds      轮数（接龙 = 每条链走几圈）
- *   theme       主题词库 id（'' = 通用词库）
- *   drawSeconds 作画时限（秒，可省略 = 全局默认；限 30~300）
+ * 开一局指定玩法。三种玩法的 start() 都收同一套 opts（按 mode 取用，见 shared/protocol.js
+ * 的 C2S.GAME_START 字段表）：
+ *   theme            主题词库 id（'' = 通用词库）
+ *   drawSeconds      作画时限（秒，可省略 = 全局默认；限 30~300）
+ *   rounds           轮数（classic / skin）
+ *   repickLimit      每回合「换一组」的次数（classic）
+ *   roundEndSeconds  回合结算展示时长（classic）
+ *   chainLength      每条链几手（chain）
+ *   writeSeconds / guessSeconds / revealSeconds / voteSeconds   （chain）
+ *   nightSeconds / dawnSeconds / talkSeconds / voteSeconds      （skin）
+ *
+ * ⚠ **白名单必须跟着协议走**：漏一个字段 = 「前端发了、服务端收下、start() 永远拿不到」，
+ *   表现是下拉框选了没反应，而且不报错。白名单只有一份，在 game-prefs.js 的 pickStartOpts 里
+ *   （tools/test-game-setup.js 直接测那个函数，所以这里不会再漏）。
+ *   夹取仍由各自的 start() 负责 —— 这里**故意不夹**，`undefined` 原样透传，
+ *   老客户端不发新字段时行为与 v9 完全一致。
  */
 function startGameOf(room, mode, opts) {
   const g = gameOf(room, mode);
@@ -510,12 +535,7 @@ function startGameOf(room, mode, opts) {
     const label = running && GAME_MODES[running.mode] ? GAME_MODES[running.mode].label : '另一局游戏';
     return { ok: false, code: 'game_busy', message: '现在正在玩「' + label + '」，先点「结束游戏」再换' };
   }
-  const cfg = {
-    rounds: opts && opts.rounds,
-    theme: opts && opts.theme,
-    drawSeconds: opts && opts.drawSeconds,
-    chainLength: opts && opts.chainLength
-  };
+  const cfg = PREFS.pickStartOpts(opts);
   if (g.mode === 'chain') {
     snapshotArtwork(room);
     return g.start(cfg);
@@ -894,6 +914,9 @@ function transferOwnerIfNeeded(room, leaving) {
   if (!next) { room.ownerId = null; room.ownerName = ''; return null; }
   room.ownerId = next.userId;
   room.ownerName = next.name;
+  // 本局预设跟着房主走：换房主不该把大家已经看到的设置一起丢掉，但 by 要换成新人。
+  // （与 HOST_TRANSFER 同一条规则，两条路径都走这里/那里。）
+  PREFS.retargetGamePrefs(room, room.ownerId);
   return next;
 }
 
@@ -917,6 +940,8 @@ function leaveRoom(ws, silent) {
       id: P.rid('m'), userId: 'system', name: '系统', color: '#8b8b8b',
       text: '房主 ' + member.name + ' 离开了，' + newOwner.name + ' 成为新房主', ts: Date.now(), system: true
     });
+    // 预设里的 by 换了人，重新广播一次让面板跟上
+    if (room.pendingGame) roomBroadcast(room, P.S2C.GAME_PREFS, { prefs: room.pendingGame });
   }
   room.lastActiveAt = Date.now();
   store.markDirty(room);
@@ -1043,6 +1068,9 @@ function handle(ws, msg) {
       }
       if (ws._roomId) leaveRoom(ws, true);
       joinRoom(ws, target, sanitizeName(msg.user, '茶友'), msg.avatar);
+      // 房间里已经有一份「房主预设」时补给这个迟到的人 —— 否则他看到的设置面板是默认值，
+      // 而别人看到的是房主刚选的那套。GAME_PREFS 是幂等的，前端覆盖即可。
+      if (target.pendingGame) send(ws, P.S2C.GAME_PREFS, { prefs: target.pendingGame });
       return;
     }
 
@@ -1134,8 +1162,13 @@ function handle(ws, msg) {
       }
       room.ownerId = target.userId;
       room.ownerName = target.name;
+      // 本局预设**保留**（大家还能看见房主刚选的那套），但 by 换成新房主 ——
+      // 否则面板上挂的是「上一个房主留的设置」，而能改它的已经换人了。
+      PREFS.retargetGamePrefs(room, room.ownerId);
       // 成员是运行时状态，不落盘（同 MEMBER_ROLE）
       roomBroadcast(room, P.S2C.MEMBERS, { members: room.memberList() });
+      // by 变了要重新广播一次，不然前端面板上还写着「由老房主预设」
+      if (room.pendingGame) roomBroadcast(room, P.S2C.GAME_PREFS, { prefs: room.pendingGame });
       roomBroadcast(room, P.S2C.CHAT, {
         id: P.rid('m'), userId: 'system', name: '系统', color: '#8b8b8b',
         text: '房主 ' + member.name + ' 把管理权转给了 ' + target.name + '，' + target.name + ' 现在是房主',
@@ -1227,6 +1260,9 @@ function handle(ws, msg) {
       const mode = GAME_MODES[msg.mode] ? msg.mode : 'classic';
       const r = startGameOf(room, mode, msg);
       if (!r.ok) return send(ws, P.S2C.ERROR, { code: r.code || 'game_start', message: r.message });
+      // 开局成功 = 预设已经「用掉了」：清掉它，免得下一局的面板还挂着上一局的设置
+      // （而且房间列表/新进来的人也不该再看到一份过期的预设）。
+      PREFS.clearGamePrefs(room);
       const g = room.game;
       if (g.mode === 'chain') {
         console.log('[game] ' + room.id + ' 接龙大厅就绪（链长 ' + g.chainLength
@@ -1248,7 +1284,23 @@ function handle(ws, msg) {
       }
       if (!room.game) return;
       room.game.stop();
+      // 结束游戏也把预设清掉：一局结束 = 回到自由绘画，面板应该回到「默认」而不是留着旧值
+      PREFS.clearGamePrefs(room);
       gameChat(room, '房主结束了游戏，回到自由绘画');
+      return;
+    }
+
+    /**
+     * 房主的「本局预设」：他在设置面板上改任何一项就发一次（前端自己做防抖）。
+     *
+     * 只做三件事：**仅房主** → 逐字段白名单清洗 + 夹取 → 广播给全房间（含发送者）。
+     * 清洗后的那一份挂在 room.pendingGame 上（不落盘、不进 meta/summary），
+     * 别人据此看到「房主选的设置」。真正生效要等 GAME_START。
+     */
+    case P.C2S.GAME_PREFS: {
+      const r = PREFS.applyGamePrefs(room, member, msg);
+      if (!r.ok) return send(ws, P.S2C.ERROR, { code: r.code, message: r.message });
+      roomBroadcast(room, P.S2C.GAME_PREFS, { prefs: r.prefs });
       return;
     }
 

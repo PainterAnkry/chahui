@@ -31,15 +31,22 @@
  *     不是 SQLite → 多半是 SAI 的笔刷形状（裸灰度位图）。这两种暂不支持。
  *
  *     ⚠⚠ 两条**必须**守住的规则（都踩过坑，症状都是「导入的笔刷画出来是半个圆、不连成线」）：
- *     1. **缩略图不是笔尖。** 每个 material 里都带 thumbnail/thumbnail.png，那是素材库
+ *     1. **缩略图默认不当笔尖。** 每个 material 里都带 thumbnail/thumbnail.png，那是素材库
  *        列表里的预览图（尺寸是显示尺寸，内容常是纯白/纯色底板）。拿它当笔尖 →
  *        笔刷变成 300px 大白块，盖章间隔一拉就是一堆不相连的半圆。
- *        所以 thumbnail/preview/icon 一律只当「兜底候选」，且纯色图除非别无选择不用。
+ *        所以 thumbnail/preview/icon 一律只当「兜底候选」，且**纯色图排在最后**。
+ *        ⚠ 但纯色图**不能无条件拒**：「方头」类笔刷的图案本身就是一块实心方块，
+ *        跟空白缩略图在解码后长得一模一样。所以纯色图现在是**收下 + 打 flat 标记**，
+ *        由导入对话框给提醒（用户对着笔尖预览自己判断）；只有近黑的纯色图
+ *        （盖上什么都不画）才直接丢掉。见 parseSut 里的 flatLevel 用法。
  *     2. **尺寸和间距要读库里的真值，不能硬编码、更不能拿图片像素尺寸顶。**
  *        Node.NodeVariantID → Variant.VariantID 那一行里的 BrushSize（笔刷直径 px）和
  *        BrushInterval（占直径的百分比）才是真参数。老代码 spacing 写死 0.1、
  *        diameter 用图片尺寸，于是 1000px 的素材图直接变成 1000px 的笔刷。
  *        见 sutBrushMeta()；读不到时保守退回老行为，不瞎猜。
+ *        ★ 这条才是「半圆 / 连不成线」的**主因**：老代码 diameter=300（图片尺寸）
+ *        配上 spacing=0.1 → 每个章之间隔 30px，当然连不成线。现在 diameter=BrushSize=10
+ *        → 同一组 spacing 只隔 1px，线就接上了。
  *
  *     这张「方头纯度上色.sut」就是典型：Node 1 行（笔名）、Variant 2 行（一行真参数
  *     BrushSize=10 / BrushInterval=10，一行全 NULL 是模板）、MaterialFile 1 个 tar，
@@ -679,9 +686,30 @@
       try { img = decodePngGray(c.data); } catch (e) { return; }   // 解不出就跳过
       sawAnyImage = true;
       if (img.w < 4 || img.h < 4) return;                          // 太小的不可能是笔尖
-      // 空白/纯色图不是笔尖形状：CSP 的预览缩略图常是白底 + 极淡角标，
-      // 收下它只会得到一支画不出东西的笔（见 isFlatImage 注释）。
-      if (isFlatImage(img)) { sawBlank = true; return; }
+      // 纯色图有两种，**长得一模一样、意义完全相反**：
+      //   ① 空白缩略图（白底 + 极淡角标）—— 拿它当笔尖就是那个老 bug：
+      //      笔刷变成 300px 大白块，盖章间隔一拉就是一堆不相连的半圆；
+      //   ② **实心方头笔尖** —— 「方头」类笔刷的图案本来就是一块实心方块，
+      //      盖上正好是它该有的样子。
+      // 单看这一张图**没法区分**（解码后两者都是一片满值），所以不再一刀切拒掉：
+      // 收下、打上 `flat` 标记，导入对话框会连同笔尖预览一起给一行提醒，
+      // 是不是你要的形状用户看一眼就知道（见 app.js 的 showImportDialog）。
+      // 仍然直接拒的只有「盖上等于什么都不画」的纯色图，判据是**近黑 + 带 alpha**：
+      //   · 近黑但**不透明**（整张 alpha 都是 255）→ 那是 CSP 那种「黑色图案 = 实心」，
+      //     盖下去就是一块实心方块，该收；
+      //   · 近黑且**透明**（alpha≈0）→ 盖下去什么都不画，是真哑图，丢掉。
+      var lv = flatLevel(img);
+      if (lv >= 0) {
+        if (lv < 32 && img.hasAlpha) { sawBlank = true; return; }
+        brushes.push({
+          name: tipNameFromPath(c.name),
+          spacing: 0.1,
+          gray: img.gray, w: img.w, h: img.h,
+          png: c.data,
+          flat: true                       // 纯色笔尖：让导入对话框提醒一句
+        });
+        return;
+      }
       brushes.push({
         name: tipNameFromPath(c.name),
         spacing: 0.1,
@@ -727,23 +755,28 @@
     return /(^|\/)(thumbnail|thumb|preview|icon)s?\//i.test(String(p)) ? 'thumb' : 'tip';
   }
 
-  /** 整张图几乎只有一个值 → 不是笔尖形状（空白板 / 纯色缩略图）
+  /** 整张图几乎只有一个值？返回主色大致落在哪一档（0~255），不是纯色图返回 -1。
    *
    *  ⚠ 判定不能用「极差」：CSP 的预览缩略图常是**白底 + 极淡的角标/水印**，
    *  实测「方头纯度上色.sut」的 thumbnail 是 90000 像素里 89700 个纯白，
    *  剩 300 个浅浅的灰（176..191），极差 65 —— 用极差早就被骗过去了。
    *  可靠的做法是看**主色占比**：≥97% 的像素挤在很小的色域里就是「空白图」。
+   *
+   *  返回「落在哪一档」而不是布尔，是因为调用方还得区分**两种纯色图**：
+   *  近黑的（盖上什么都不画）和满值的（实心块笔尖）—— 见 parseSut 里的用法。
    */
-  function isFlatImage(img) {
+  function flatLevel(img) {
     var g = img.gray, n = img.w * img.h;
-    if (!n) return true;
-    // 用 16 档直方图找主峰，主峰占比 ≥97% 即视为空白/纯色
+    if (!n) return 0;
     var hist = new Array(16).fill(0);
     for (var i = 0; i < n; i++) hist[Math.min(15, g[i] >> 4)]++;
-    var top = 0;
-    for (var k = 0; k < 16; k++) if (hist[k] > top) top = hist[k];
-    return top / n >= 0.97;
+    var top = 0, topBin = 0;
+    for (var k = 0; k < 16; k++) if (hist[k] > top) { top = hist[k]; topBin = k; }
+    if (top / n < 0.97) return -1;                 // 不是纯色图
+    return topBin * 16 + 8;                        // 主色代表值（取档中）
   }
+
+  function isFlatImage(img) { return flatLevel(img) >= 0; }
 
   /* ---------- 从库里读 CSP 笔刷的真实参数 ----------
    * 位置：Node 表一行（笔刷名 + NodeVariantID）→ Variant 表用 VariantID 对应的一行。
@@ -1290,7 +1323,10 @@
         }
       }
     }
-    return { w: w, h: h, gray: gray };
+    // hasAlpha 透传出去：调用方靠它区分**两种近黑纯色图** ——
+    //   不透明的（CSP 那种「黑色图案 = 实心」的写法）当实心块收下；
+    //   透明的（盖上什么都不画）才是真·哑图。
+    return { w: w, h: h, gray: gray, hasAlpha: alphaSeen };
   }
 
   function concatBytes(list) {

@@ -267,70 +267,71 @@ async function drawStroke(p, dx) {
     /伪装者/.test(ruleTxt) && /匿名|摊开/.test(ruleTxt) && /放逐/.test(ruleTxt),
     '实际「' + ruleTxt.slice(0, 60) + '…」');
 
-  // ---- [3] 开局面板：转场 + 结构 + 门槛 ----
-  console.log('\n[3] 开局面板');
-  await host.click('#btnGameStart');
-  await sleep(700);
-  ok('从「游戏」弹窗转到了画皮自己的开局面板', await host.isVisible('#skinMask'));
-  ok('「游戏」弹窗自己关掉了', !(await host.isVisible('#gameMask')));
+  // ---- [3] 开局面板：三合一之后**不再有第二层面板**，参数就在 #gameMask 里 ----
+  //  （2026-09 面板合并：原来的 #skinMask / #skinTheme / #skinRounds / #btnSkinStart 整块删掉了）
+  console.log('\n[3] 开局面板（三合一）');
+  ok('画皮参数就在同一个开局面板里（没有第二层 #skinMask）',
+    !(await host.evaluate(() => !!document.querySelector('#skinMask'))));
+  ok('画皮该显示的参数行露出来了（轮数 / 夜 / 天亮 / 讨论 / 投票）',
+    await host.evaluate(() => ['#gameSkinRounds', '#gameNightTime', '#gameDawnTime',
+      '#gameTalkTime', '#gameVoteTime'].every(s => {
+      const el = document.querySelector(s);
+      return !!el && !el.closest('.form-row').classList.contains('hidden');
+    })));
 
   let themeOpts = await host.evaluate(() =>
-    Array.from(document.querySelectorAll('#skinTheme option')).map(o => o.value));
+    Array.from(document.querySelectorAll('#gameTheme option')).map(o => o.value));
   if (themeOpts.length <= 1) {
     await sleep(1100);
     themeOpts = await host.evaluate(() =>
-      Array.from(document.querySelectorAll('#skinTheme option')).map(o => o.value));
+      Array.from(document.querySelectorAll('#gameTheme option')).map(o => o.value));
   }
   ok('主题下拉已填充（含方舟 / 鸣潮 / 碧蓝档案）',
     themeOpts.indexOf('bluearchive') >= 0 && themeOpts.indexOf('arknights') >= 0
       && themeOpts.indexOf('wuthering') >= 0,
     JSON.stringify(themeOpts));
 
-  const rounds = await host.inputValue('#skinRounds');
+  const rounds = await host.inputValue('#gameSkinRounds');
   ok('轮数默认 6', rounds === '6', '实际 ' + rounds);
-  const playersTxt = await host.textContent('#skinPlayers');
+  const playersTxt = await host.textContent('#gamePlayers');
   ok('写明了人数门槛与当前人数', /6/.test(playersTxt) && /12/.test(playersTxt) && /人/.test(playersTxt),
     '实际「' + playersTxt + '」');
-  const startBtnTxt = await host.textContent('#btnSkinStart');
+  const startBtnTxt = await host.textContent('#btnGameStart');
   ok('人够了 → 按钮写「开始画皮」', /开始画皮/.test(startBtnTxt), '实际「' + startBtnTxt + '」');
   ok('人够了 → 按钮可点',
-    await host.evaluate(() => !document.querySelector('#btnSkinStart').disabled));
+    await host.evaluate(() => !document.querySelector('#btnGameStart').disabled));
 
   // 换一个玩法看一眼再切回来，确认分段控件是双向的
-  await host.evaluate(() => document.querySelector('#btnSkinClose').click());
-  await sleep(200);
-  await host.click('#btnGame');
-  await sleep(250);
   await host.click('#gmClassic');
-  await sleep(200);
+  await sleep(250);
   ok('能切回经典（按钮文案复位）',
     /开始游戏/.test(await host.textContent('#btnGameStart')));
+  ok('切回经典后画皮特有参数被收起来',
+    await host.evaluate(() => document.querySelector('#gameSkinRounds')
+      .closest('.form-row').classList.contains('hidden')));
   await host.click('#gmSkin');
-  await sleep(200);
-  await host.click('#btnGameStart');
-  await sleep(600);
-  ok('再切回来还是画皮面板', await host.isVisible('#skinMask'));
+  await sleep(250);
+  ok('再切回画皮，参数行又露出来',
+    await host.evaluate(() => !document.querySelector('#gameSkinRounds')
+      .closest('.form-row').classList.contains('hidden')));
 
   // 选主题 + 真的开局
-  await host.selectOption('#skinTheme', 'bluearchive');
+  await host.selectOption('#gameTheme', 'bluearchive');
   ok('能把主题切到「碧蓝档案」',
-    (await host.inputValue('#skinTheme')) === 'bluearchive');
+    (await host.inputValue('#gameTheme')) === 'bluearchive');
 
   /* ⚠ 这一局**选最短的 4 轮**，只为把「结算面板」那一段跑到。
      默认 6 轮，压缩计时下每轮 ~18 秒（夜 4 + 天亮 3 + 作画 4 + 讨论 2.5 + 投票 3
      + 结算 2），六轮 ≈ 110 秒 —— 远超 [10] 那段的耐心，于是它每次都跑不到结算，
      变成一条稳定的假红。
-     （websocket 层的 test-skin.js 早意识到了这点：它开局就传 rounds: 3。）
-     轮数的**默认值**上面那行已经断言过了（必须还是 6，这里不改默认）。
-     select 里没有 1 轮，最短就是 4；配合 [10] 里房主循环「立刻推进」把每段跳掉，
-     四轮几秒内就能收口。 */
-  await host.selectOption('#skinRounds', '4');
+     轮数的**默认值**上面那行已经断言过了（必须还是 6，这里不改默认）。 */
+  await host.selectOption('#gameSkinRounds', '4');
   ok('能把轮数选成 4（最短，只为让这一局尽快走到结算）',
-    (await host.inputValue('#skinRounds')) === '4');
+    (await host.inputValue('#gameSkinRounds')) === '4');
 
-  await host.click('#btnSkinStart');
+  await host.click('#btnGameStart');          // 三合一：一次点击直接开局
   await sleep(2000);
-  ok('开局面板关掉了', !(await host.isVisible('#skinMask')));
+  ok('开局面板关掉了', !(await host.isVisible('#gameMask')));
 
   // ---- [4] 身份卡：每人拿到自己的身份，且只看得到自己那份 ----
   console.log('\n[4] 身份卡');
@@ -895,12 +896,17 @@ async function drawStroke(p, dx) {
 
   // ---- [11] 收尾：结束游戏 → 回到自由绘画 ----
   console.log('\n[11] 结束游戏');
-  await host.evaluate(() => {
-    const b = document.querySelector('#btnSkinOverStop');
-    if (b && b.offsetParent) { b.click(); return; }
-    const s = document.querySelector('#btnSkinStop');
-    if (s) s.click();
+  // ⚠ 2026-09 面板合并后 #btnSkinStop 随二层 DOM 删掉了，
+  //    结束入口改成：结算面板上的「结束游戏」(#btnSkinOverStop) 、
+  //    HUD 上的 #ghStop、以及开局面板里的 #btnGameStop（三选一，谁在点上谁）
+  const stopPath = await host.evaluate(() => {
+    for (const sel of ['#btnSkinOverStop', '#ghStop', '#btnGameStop']) {
+      const b = document.querySelector(sel);
+      if (b && b.offsetParent) { b.click(); return sel; }
+    }
+    return '';
   });
+  console.log('  用的结束入口: ' + (stopPath || '（一个都没找到）'));
   await sleep(1800);
   const ended = await pageState(host);
   ok('游戏结束（phase=off 或 lobby）', ended.phase === 'off' || ended.phase === 'lobby',

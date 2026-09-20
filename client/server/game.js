@@ -45,8 +45,39 @@ function clampInt(v, d, a, b) {
 }
 
 function envMs(key, dflt) {
+  if (gameFast()) return 1000;
   const n = Math.floor(Number(process.env[key]));
   return isFinite(n) && n > 0 ? n : dflt;
+}
+
+/**
+ * GAME_FAST=1：把**所有阶段时长的默认值**压成 1 秒（自动化测试用，见 tools/test-game-setup.js）。
+ *
+ * ⚠ 只压「默认值」这一层：
+ *   - 房主在开局设置里显式设定的每局覆盖值仍然优先（`this.drawMs || CFG.ROUND_MS`），
+ *     否则「测试环境所有时间可配成 1 秒」会反过来把用户的选择吃掉。
+ *   - 宽限值（接龙的 GRACE_MS / 画皮的 WITCH_GRACE_MS）**不压** ——
+ *     那是给「倒计时到点时还在路上的包」留的余量，压掉等于把超时的人直接判死。
+ */
+function gameFast() {
+  const v = process.env.GAME_FAST;
+  if (!v) return false;
+  const s = String(v).trim().toLowerCase();
+  return !(s === '' || s === '0' || s === 'false' || s === 'no' || s === 'off');
+}
+
+/**
+ * 「每局覆盖」的秒数：0 / 缺省 / 非法 / 负数 = 用默认（返回 0），
+ * 否则夹到 [SETUP_SECONDS_MIN, SETUP_SECONDS_MAX] 并换成毫秒。
+ *
+ * 与 clampInt 的区别在 0 上：clampInt(0, d, 3, 600) = 3（下限），
+ * 而 0 在这里是「房主没设」的信号，必须原样变成 0 让调用处 `this.xxxMs || CFG.XXX_MS` 兜底。
+ */
+function optSec(v) {
+  if (v === null || v === undefined || typeof v === 'boolean') return 0;
+  const n = Math.floor(Number(v));
+  if (!isFinite(n) || n <= 0) return 0;
+  return clampInt(n, 0, P.GAME.SETUP_SECONDS_MIN, P.GAME.SETUP_SECONDS_MAX) * 1000;
 }
 
 /**
@@ -97,9 +128,11 @@ class Game {
     this.startedAt = 0;
     this.hint = null;            // 本回合的露字提示 { index, char }，没给提示时为 null
     this.repickLeft = 0;         // 本回合画手还能「换一组」几次
+    this.repickLimit = P.GAME.REPICK_LIMIT;  // 本局的换词次数上限（开局设置可覆盖，0 = 一次都不许换）
     this.theme = '';             // 本局用的主题词库（'' = 通用词库），开局时定下
     this.themeName = '';
     this.drawMs = 0;             // 本局的作画时长覆盖值（0 = 用全局默认 CFG.ROUND_MS）
+    this.roundEndMs = 0;         // 本局的回合结算展示时长覆盖值（0 = 用全局默认 CFG.ROUND_END_MS）
     // 中途进房的人：本回合先在旁边看，下一回合转正（见 onJoin / promoteSpectators）。
     // 他们**不在** playerList 里 —— 那一个池子决定「谁当画手」和「还差几个人没猜出来」，
     // 把看客算进去的话每回合都要干等到超时。
@@ -108,6 +141,9 @@ class Game {
 
   /** 本局的作画时限。开局设置里自定义的优先，否则用环境变量 / 协议默认 */
   roundMs() { return this.drawMs || CFG.ROUND_MS; }
+
+  /** 本局的「回合结算展示」时长。同上：开局设置优先 */
+  roundEndMsOf() { return this.roundEndMs || CFG.ROUND_END_MS; }
 
   /* ------------------------------------------------------------ 查询 */
 
@@ -253,8 +289,9 @@ class Game {
   /** 房主开局 */
   /**
    * 开一局。
-   * @param opts {number | {rounds, theme, drawSeconds}} 兼容旧的纯数字（=轮数）写法；
-   *        theme 是 themes.js 里的词库 id（'' = 通用），drawSeconds 单位秒。
+   * @param opts {number | {rounds, theme, drawSeconds, repickLimit, roundEndSeconds}}
+   *        兼容旧的纯数字（=轮数）写法；theme 是 themes.js 里的词库 id（'' = 通用）；
+   *        秒数单位是秒，0 / 缺省 = 用默认。见 shared/protocol.js 的 C2S.GAME_START 字段表。
    */
   start(opts) {
     if (typeof opts === 'number') opts = { rounds: opts };
@@ -271,6 +308,11 @@ class Game {
     this.drawMs = (isFinite(sec) && sec > 0)
       ? clampInt(sec, P.GAME.DRAW_SECONDS_DEFAULT, P.GAME.DRAW_SECONDS_MIN, P.GAME.DRAW_SECONDS_MAX) * 1000
       : 0;
+    // v10：本局的两项新设置。0 / 缺省 / 非法一律 = 用默认（v9 的老客户端只会发上面那三个字段，
+    // 到这里就是「用默认」，行为与以前完全一致）。
+    // ⚠ repickLimit 的 0 是**实义值**（这一局一次都不许换词），所以不能用 `|| 默认` 的写法。
+    this.repickLimit = clampInt(opts.repickLimit, P.GAME.REPICK_LIMIT, 0, 5);
+    this.roundEndMs = optSec(opts.roundEndSeconds);
     this.round = 0;
     this.usedWords = [];
     this.roundResult = null;
@@ -297,7 +339,7 @@ class Game {
     this.roundResult = null;
     this.hint = null;
     this.hintShown = false;
-    this.repickLeft = P.GAME.REPICK_LIMIT;
+    this.repickLeft = this.repickLimit;
 
     // 按开局时定下的顺序轮流出场；有人中途跑了就跳过（最多绕两圈，避免死循环）
     const onlineIds = online.map(p => p.userId);
@@ -370,7 +412,12 @@ class Game {
   repick(userId) {
     if (this.phase !== PHASE.PICK) return { ok: false, message: '现在不是选词阶段' };
     if (userId !== this.drawerId) return { ok: false, message: '只有画手可以换词' };
-    if (this.repickLeft <= 0) return { ok: false, message: '这一回合已经换过了' };
+    if (this.repickLeft <= 0) {
+      return {
+        ok: false,
+        message: this.repickLimit <= 0 ? '房主把这一局的「换一组」关掉了' : '这一回合已经换过了'
+      };
+    }
     this.repickLeft -= 1;
     this.choices.forEach(w => { if (this.usedWords.indexOf(w) < 0) this.usedWords.push(w); });
     // ⚠️ 第三个参数（主题词池）**必须带** —— 漏掉的话换出来的候选会掉回通用词库，
@@ -499,7 +546,7 @@ class Game {
       scores: this.scoreList()
     };
     this.phase = PHASE.ROUND_END;
-    this.deadline = Date.now() + CFG.ROUND_END_MS;
+    this.deadline = Date.now() + this.roundEndMsOf();
     this.api.sync();
   }
 
@@ -632,7 +679,7 @@ class Game {
         scores: this.scoreList()
       };
       this.phase = PHASE.ROUND_END;
-      this.deadline = Date.now() + CFG.ROUND_END_MS;
+      this.deadline = Date.now() + this.roundEndMsOf();
       this.api.systemChat('画手 ' + member.name + ' 掉线了，本回合提前结束');
       this.api.sync();
       return;

@@ -59,6 +59,15 @@
  *     投票（每条链「对得上吗」+ 全场「最喜欢的一张画」）→ 结算 → 回大厅。
  *   - C2S.GAME_ART 删除：作画的收格由服务端从房间笔迹表按作者摘取，
  *     客户端只需要发一个「画好了」的信号（C2S.GAME_SUBMIT 无参）。
+ *
+ * v10 变更（服务端支持「每局可配的游戏设置」）：
+ *   - C2S.GAME_START 的 opts 扩成完整一套：三个玩法各自的阶段时长 / 轮数 / 换词次数
+ *     都能按局设定（字段表见 C2S.GAME_START 那一段注释，档位见 GAME.SETUP_*）。
+ *     老客户端不发新字段时，行为与 v9 **完全一致**（缺省 = 用环境变量 / 协议默认）。
+ *   - 新增 C2S.GAME_PREFS / S2C.GAME_PREFS：房主把「本局预设」广播给全房间看（仅房主可发），
+ *     挂在 room.pendingGame 上、不落盘；GAME_START 成功或 GAME_STOP 之后清空。
+ *   - GAME_FAST=1 时服务端所有阶段时长的**默认值**变成 1000ms（自动化测试用；
+ *     收格宽限 GRACE_MS / WITCH_GRACE_MS 不变，否则超时的人反而被开后门）。
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
@@ -66,7 +75,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var PROTOCOL_VERSION = 9;
+  var PROTOCOL_VERSION = 10;
 
   // 客户端 -> 服务端
   var C2S = {
@@ -129,14 +138,25 @@
     PING: 'ping',                   // { at }
 
     // ---- 你画我猜（mode='classic'）----
-    // 三个玩法共用这一条开局消息，字段按 mode 取用：
-    //   classic { mode?, rounds?, theme? }
-    //   chain   { mode:'chain', chainLength?, theme?, drawSeconds? }
-    //   skin    { mode:'skin', rounds?, theme? }
+    // 三个玩法共用这一条开局消息，**字段按 mode 取用，全部可选，0 / 缺省 = 用默认**：
+    //   classic { mode?, theme?, drawSeconds?, rounds?, repickLimit?, roundEndSeconds? }
+    //   chain   { mode?, theme?, drawSeconds?, chainLength?, writeSeconds?, guessSeconds?, revealSeconds?, voteSeconds? }
+    //   skin    { mode?, theme?, drawSeconds?, rounds?, nightSeconds?, dawnSeconds?, talkSeconds?, voteSeconds? }
+    // 夹取：秒数字段一律夹到 [SETUP_SECONDS_MIN, SETUP_SECONDS_MAX] = [3, 600]，0 / 非法 / 负数 = 用默认；
+    //       **drawSeconds 是唯一的例外**（从 v4 起最短就是 DRAW_SECONDS_MIN = 30 秒），仍是 [30, 300]；
+    //       repickLimit 夹到 [0, 5]（0 = 这一局一次都不许「换一组」）；
+    //       rounds / chainLength 沿用各自原有的夹取（rounds 再按 mode 分 classic 与 skin 两套上限）。
+    // 白名单：每个玩法只认自己那几个键，多出来的字段会被丢掉（见 server/src/game-prefs.js 的 pickStartOpts）。
     // chainLength 由服务端 clampInt 夹到 [CHAIN_LENGTH_MIN, min(人数, CHAIN_LENGTH_MAX)]，
     // 而且大厅→开局时还会跟着当时的实际人数再夹一次（有人中途进出也不会越界）。
-    GAME_START: 'game:start',       // { mode?, rounds?, theme?, chainLength?, drawSeconds? } 房主开局
+    GAME_START: 'game:start',       // { mode?, theme?, drawSeconds?, rounds?, ... } 房主开局
     GAME_STOP: 'game:stop',         // 房主结束本局（回到自由绘画）
+    // 房主的「本局预设」：他在设置面板上改任何一项就发一次（前端自己做防抖）。
+    // **仅房主可发**：服务端逐字段白名单清洗 + 夹取后挂到 room.pendingGame
+    //（照 room.projectLoad 的先例：挂在房间上、不落盘、不进 meta()/summary()），
+    // 紧接着把清洗后的结果原样广播 S2C.GAME_PREFS 给全房间（含发送者）。
+    // 载荷与 GAME_START 的 opts 同一套字段（多出来的字段一律丢掉，绝不整包存下来）。
+    GAME_PREFS: 'game:prefs',
     GAME_PICK: 'game:pick',         // { index } 画手从候选词里挑一个
     GAME_REPICK: 'game:repick',     // 画手换一组候选词（每回合限次，见 GAME.REPICK_LIMIT）
 
@@ -193,6 +213,11 @@
     // 不另外开消息 —— 少一条消息就少一处「前端接了个永远不触发的 handler」。
     // GAME_STATE 是「按收件人裁剪过」的完整快照：猜手拿到的版本里没有 word 字段。
     GAME_STATE: 'game:state',           // { game }  含 phase / wordLen / deadline / roundResult / scores
+    // 房主的「本局预设」（清洗过的那一份），广播给全房间 —— 别人能看见房主选的设置。
+    // 形状固定，**逐字段列全**：{ mode, theme, rounds, drawSeconds, repickLimit, roundEndSeconds,
+    // chainLength, writeSeconds, guessSeconds, revealSeconds, voteSeconds,
+    // nightSeconds, dawnSeconds, talkSeconds, by, at }；0 = 该项用默认；by = 房主 userId。
+    GAME_PREFS: 'game:prefs',           // { prefs }
     GAME_WORD: 'game:word',             // { word, choices? } 只发给画手
     GAME_CORRECT: 'game:correct',       // { userId, name, rank, points } 有人猜对了
     // 猜词结果只回给猜的人自己（广播出去等于把「谁在猜」也变成信息）。
@@ -238,6 +263,10 @@
    */
   var GAME = {
     MIN_PLAYERS: 2,          // 少于两人开不了局
+    // 经典模式的**面板上限**（/api/share 的 setup.players.classic = [MIN_PLAYERS, MAX_PLAYERS]）。
+    // ⚠ 只是设置面板的档位：classic 的 start() 目前**不因为人多而拒绝开局** ——
+    //   加上这条拒绝会把现存的 10 人房当场变成开不了局，属于破坏性变更。
+    MAX_PLAYERS: 8,
     MAX_ROUNDS: 20,
     DEFAULT_ROUNDS: 6,       // 默认打 6 回合（每人当一次画手，人数多于回合数则轮流）
     CHOICES: 3,              // 选词时给画手几个候选
@@ -278,7 +307,9 @@
     CHAIN_GUESS_MS: 60000,   // 猜词一步的时限
     CHAIN_REVEAL_MS: 150000, // 回放阶段的时限（播放器可暂停 / 翻页，房主可提前推进）
     CHAIN_VOTE_MS: 60000,    // 投票时限
-    CHAIN_SCORE_MS: 20000,   // 结算展示时长（自动回大厅，分数保留）
+    CHAIN_SCORE_MS: 20000,   // 最终结算展示时长（自动回大厅，分数保留）
+    // 按链串行投票：每条链投完先亮一下「这条链过没过」再放下一条 —— 比最终结算短得多
+    CHAIN_CHAIN_SCORE_MS: 8000,
     CHAIN_GRACE_MS: 1500,    // 收格宽限：倒计时到点后，客户端自动提交的包还在路上
     CHAIN_MAX_GUESS_LEN: 20, // 单步猜词长度上限
     CHAIN_TROPHY_AGREE: 1,   // 首尾「对得上」且投票不反对时，链主拿几分
@@ -318,7 +349,20 @@
     SKIN_VOTE_MS: 45000,     // 放逐投票
     SKIN_VOTE_END_MS: 8000,  // 投票结算展示
     SKIN_ART_MAX: 900000,    // 单幅作品 PNG 的 base64 长度上限（~675KB，画布导出的典型量级）
-    SKIN_TALK_TEXT_MAX: 120  // 讨论阶段单条发言长度（比普通聊天宽松，要能讲清一句分析）
+    SKIN_TALK_TEXT_MAX: 120, // 讨论阶段单条发言长度（比普通聊天宽松，要能讲清一句分析）
+
+    /* ---- 开局设置面板的档位（GAME_START 的 opts / GAME_PREFS 的取值来源）----
+     * /api/share 的 setup 块由这些档位 + 各玩法的人数/回合常量**推**出来
+     * （见 server/src/game-prefs.js 的 setupOptions()），前端别在客户端再抄一份：
+     * 档位跟着服务端走，以后调一处就够。
+     */
+    SETUP_SECONDS: [0, 3, 5, 10, 20, 30, 60, 90, 120, 180, 300],  // 0 = 用默认
+    SETUP_SECONDS_MIN: 3,    // v10 新加的那些秒数（写词/猜词/回放/投票/夜里/天亮/讨论/回合结算）的下限
+    SETUP_SECONDS_MAX: 600,  // 上限 10 分钟。再长不如别开局（房主可以中途推进）
+    SETUP_REPICK: [0, 1, 2, 3],        // 每回合「换一组」的次数档位（0 = 这一局不许换）
+    // 回合档位阶梯：真正的档位 = 它 ∪ {DEFAULT_ROUNDS, SKIN_MAX_ROUNDS}，再按 MAX_ROUNDS 截断
+    //   → [1, 2, 3, 4, 6, 8, 12]
+    SETUP_ROUNDS_STEPS: [1, 2, 3, 4, 8]
   };
 
   // 用户配色（新成员按顺序取色）

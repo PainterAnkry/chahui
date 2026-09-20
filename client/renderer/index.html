@@ -456,14 +456,19 @@
     </div>
   </div>
 
-    <!-- 你画我猜 / 接龙：画布上沿的状态条。不在游戏模式时整条隐藏。 -->
+    <!-- 你画我猜 / 接龙 / 画皮：画布上沿的状态条。不在游戏模式时整条隐藏。 -->
     <div class="game-hud hidden" id="gameHud">
-      <span class="gh-phase" id="ghPhase">等待开始</span>
-      <b class="gh-timer" id="ghTimer">--</b>
+      <!-- 倒计时**带阶段名**：显示成「投票中 12 秒」。
+           光看一个裸数字不知道在等哪个阶段；三个玩法的所有阶段（含接龙的写词）
+           都共用这一个控件，所以每个阶段都有倒计时。 -->
+      <b class="gh-timer" id="ghTimer" title="当前阶段与剩余时间"><span class="gh-timer-phase" id="ghTimerPhase"></span><span class="gh-timer-sec" id="ghTimerSec">--</span></b>
       <span class="gh-word" id="ghWord">—</span>
       <span class="gh-round" id="ghRound"></span>
       <!-- 画皮专用：在场人数（全场最关心的那个数字） -->
       <span class="gh-skin-state hidden" id="ghSkinState"></span>
+      <!-- 房主的「结束游戏」入口：合并成一个开局面板之后 #chainMask / #skinMask
+           都没了，游戏进行中得有地方点到它（面板里那个也在，但开着面板挡画）。 -->
+      <button class="mini danger hidden" id="ghStop" title="结束本局，回到自由绘画">结束游戏</button>
       <button class="mini" id="ghScore" title="查看计分板">计分</button>
       <button class="mini" id="ghSound" title="游戏音效开关">🔊</button>
       <input type="range" class="gh-vol" id="ghVol" min="0" max="100" step="1" title="音效音量" />
@@ -489,8 +494,9 @@
       <div class="rc-next" id="rcNext"></div>
     </div>
 
-    <!-- 接龙：我这一步的题面。只有当事者看得到（候选词 / 要画的词 / 上家的笔迹）。
-         放在画布左下角，不挡着作画。 -->
+    <!-- 接龙：我这一步的题面。只有当事者看得到（候选词 / 要画的词）。
+         猜词那幅画现在铺在主画布上（#chainCanvasLayer），这里只留操作。
+         放在画布左下角，底部横条出现时会自动抬起来让位。 -->
     <div class="chain-task hidden" id="chainTask">
       <div class="ct-head">
         <span class="ct-step" id="ctStep">写词</span>
@@ -514,6 +520,57 @@
       <div class="cp-list" id="cpList"></div>
     </div>
 
+    <!-- 接龙：猜词的输入条。贴主画布下沿的一条横条 ——
+         不压暗、不遮挡，画（#chainCanvasLayer）和输入框能同时看见。 -->
+    <div class="chain-bar hidden" id="chainInputMask">
+      <div class="cb-row">
+        <b class="cb-title" id="ciTitle">这幅画画的是什么？</b>
+        <span class="pick-timer" id="ciTimer">60</span>
+        <span class="hint cb-hint" id="ciHint">猜一个词（英文、单字都行，不用管字数）</span>
+        <span class="spacer"></span>
+        <div class="ci-custom">
+          <input type="text" id="ciInput" maxlength="20" placeholder="你猜这幅画的是什么…" autocomplete="off">
+          <button class="btn primary" id="ciSubmit">提交答案</button>
+        </div>
+        <span class="ci-preview" id="ciPreview"></span>
+      </div>
+    </div>
+
+    <!-- 接龙：回放 / 投票 / 小结算的底部横条（画面本体在主画布上的 #chainCanvasLayer 里）。
+         跨链由服务端说了算（voteChainId），所以这里没有「上一条 / 下一条链」的箭头。 -->
+    <div class="chain-bar wide hidden" id="chainReplayBar">
+      <div class="cb-row">
+        <b class="cb-title" id="rpTitle">回放</b>
+        <b class="cb-index" id="rpIndex">1 / 1</b>
+        <span class="cb-head" id="rpChainHead"></span>
+        <span class="pick-timer" id="rpTimer">--</span>
+        <span class="spacer"></span>
+        <span class="rp-pills" id="rpPills"></span>
+        <button class="mini" id="rpPrevItem" title="上一步">⏮</button>
+        <button class="mini" id="rpPlay" title="自动播放 / 暂停">▶ 播放</button>
+        <button class="mini" id="rpNextItem" title="下一步">⏭</button>
+        <select id="rpSpeed" title="播放速度">
+          <option value="0.5">0.5×</option>
+          <option value="1" selected>1×</option>
+          <option value="2">2×</option>
+          <option value="4">4×</option>
+        </select>
+        <button class="btn primary hidden" id="btnRpNext">立刻结算</button>
+      </div>
+      <div class="cb-row second">
+        <div class="rp-verdict" id="rpVerdict"></div>
+      </div>
+      <div class="cb-row second rp-vote hidden" id="rpVote">
+        <b class="cb-ask" id="rpVoteHint">这两个匹配吗？</b>
+        <button class="btn ghost" id="rpVoteBad">×</button>
+        <button class="btn primary" id="rpVoteOk">√</button>
+        <span class="cb-done" id="rpVoteDone">已投 0 / 0</span>
+        <button class="mini hidden" id="rpFavBtn">♡ 最喜欢这张</button>
+        <span class="rp-fav-state" id="rpFavState"></span>
+      </div>
+      <div class="cb-row second chain-score-row hidden" id="chainScoreRow"></div>
+    </div>
+
   <div class="canvas-wrap" id="canvasWrap">
       <canvas id="view"></canvas>
       <canvas id="overlay"></canvas>
@@ -521,6 +578,15 @@
       <div class="brush-cursor hidden" id="brushCursor">
         <span class="bc-dot"></span>
       </div>
+    </div>
+
+    <!-- 接龙：把「这一格」摊在主画布上的一层。
+         猜词时放上家那幅画、回放时放当前格（画用 img，词用大字文本）。
+         只在接龙的猜词 / 回放 / 投票 / 小结算显示；层本身不吃指针事件，不挡作画。 -->
+    <div class="chain-canvas-layer hidden" id="chainCanvasLayer">
+      <div class="ccl-tag hidden" id="chainCanvasTag"></div>
+      <img class="ccl-img hidden" id="chainCanvasImg" alt="这一格的画">
+      <div class="ccl-text hidden" id="chainCanvasText"></div>
     </div>
 
     <div class="stage-empty" id="stageEmpty">
@@ -1178,15 +1244,27 @@
   </div>
 </div>
 
-<!-- ============ 你画我猜 ============ -->
+<!-- ============ 开局设置（三个玩法共用一个面板） ============
+     以前是「顶栏『游戏』→ #gameMask（你画我猜）→ 再点一次「开始」→ #chainMask /
+     #skinMask 第二层弹窗」的两三层套娃，同一个「主题词库 / 作画时间」要在两个面板里
+     各挑一次。现在只剩这一层：上方的「玩法」决定下面显示哪几行参数
+     （行 id 见下；顺序由 styles.css 里 #gameMask.mode-* 的 order 决定），
+     选完点**一次**「开始」就进游戏，不会再弹第二个设置页。
+
+     行 id ↔ 玩法：
+       通用            #rowTheme #rowDrawTime
+       你画我猜        #rowClassicRounds #rowClassicRepick #rowClassicRoundEnd
+       接龙            #rowChainLength #rowChainWrite #rowChainGuess #rowChainReveal
+       画皮            #rowSkinRounds #rowSkinNight #rowSkinDawn #rowSkinTalk
+       接龙 + 画皮共用  #rowVote（协议里都是 voteSeconds） -->
 <div class="modal-mask hidden" id="gameMask">
   <div class="modal game">
     <div class="modal-head">
-      <h3>你画我猜</h3>
+      <h3 id="gameTitle">开局设置</h3>
       <button class="icon-btn" id="btnGameClose">×</button>
     </div>
     <div class="modal-body">
-      <div class="form-row">
+      <div class="form-row" id="rowMode">
         <label>玩法</label>
         <div class="seg" id="gameModeSeg">
           <button class="seg-btn active" id="gmClassic" data-mode="classic">你画我猜</button>
@@ -1199,37 +1277,91 @@
         其他人在<b>聊天框</b>里打字猜。猜得越快分越高，画手也会因为别人猜出来而得分。
         回合之间画布会自动清空。
       </p>
-      <div class="form-row">
-        <label>回合数</label>
-        <select id="gameRounds">
-          <option value="2">2 回合</option>
-          <option value="4">4 回合</option>
-          <option value="6" selected>6 回合</option>
-          <option value="8">8 回合</option>
-          <option value="12">12 回合</option>
-        </select>
-        <span class="hint">每位画手出场的次数由回合数与人数共同决定</span>
-      </div>
-      <div class="form-row">
+      <p class="hint prefs-note hidden" id="gamePrefsNote"></p>
+
+      <!-- 通用：主题词库 / 作画时间（三个玩法共用同一份选择，不再各挑一次） -->
+      <div class="form-row hidden" id="rowTheme">
         <label>主题词库</label>
         <select id="gameTheme"></select>
         <button class="mini" id="btnGameThemeManage" title="新建 / 编辑自定义词库">管理…</button>
-        <span class="hint">只从选中的词库里出题（接龙面板、自定义词库共用这一份选择）</span>
+        <span class="hint">只从选中的词库里出题（三个玩法共用这一份选择）</span>
       </div>
-      <div class="form-row">
+      <div class="form-row hidden" id="rowDrawTime">
         <label>作画时间</label>
-        <select id="gameDrawTime">
-          <option value="">默认（80 秒）</option>
-          <option value="30">30 秒</option>
-          <option value="60">1 分钟</option>
-          <option value="90">1 分半</option>
-          <option value="120">2 分钟</option>
-          <option value="180">3 分钟</option>
-          <option value="300">5 分钟</option>
-        </select>
-        <span class="hint">每回合画手的作画时限</span>
+        <select id="gameDrawTime"></select>
+        <span class="hint" id="drawTimeHint">每回合画手的作画时限</span>
       </div>
+
+      <!-- 你画我猜 -->
+      <div class="form-row hidden" id="rowClassicRounds">
+        <label>回合数</label>
+        <select id="gameRounds"></select>
+        <span class="hint">每位画手出场的次数由回合数与人数共同决定</span>
+      </div>
+      <div class="form-row hidden" id="rowClassicRepick">
+        <label>换词次数</label>
+        <select id="gameRepickLimit"></select>
+        <span class="hint">画手在选词阶段能「换一组」几次</span>
+      </div>
+      <div class="form-row hidden" id="rowClassicRoundEnd">
+        <label>回合结算</label>
+        <select id="gameRoundEndTime"></select>
+        <span class="hint">每回合结束后亮分数的时间</span>
+      </div>
+
+      <!-- 接龙 -->
+      <div class="form-row hidden" id="rowChainLength">
+        <label>链长</label>
+        <select id="chainLength"></select>
+        <span class="hint">每条链传几手；默认 = 人数 + 1（写完自己先画自己的，刚好人人轮到）</span>
+      </div>
+      <div class="form-row hidden" id="rowChainWrite">
+        <label>写词时间</label>
+        <select id="chainWriteTime"></select>
+        <span class="hint">每人给自己那条链写初始词的时限</span>
+      </div>
+      <div class="form-row hidden" id="rowChainGuess">
+        <label>猜词时间</label>
+        <select id="chainGuessTime"></select>
+        <span class="hint">看上一手那幅画来猜词的时限</span>
+      </div>
+      <div class="form-row hidden" id="rowChainReveal">
+        <label>回放时间</label>
+        <select id="chainRevealTime"></select>
+        <span class="hint">一起看「这条链怎么跑偏的」的时间</span>
+      </div>
+
+      <!-- 画皮 -->
+      <div class="form-row hidden" id="rowSkinRounds">
+        <label>轮数</label>
+        <select id="gameSkinRounds"></select>
+        <span class="hint">打满轮数还没分出胜负 → 判伪装者获胜</span>
+      </div>
+      <div class="form-row hidden" id="rowSkinNight">
+        <label>夜晚时间</label>
+        <select id="gameNightTime"></select>
+        <span class="hint">夜里验人 / 刀人的时限</span>
+      </div>
+      <div class="form-row hidden" id="rowSkinDawn">
+        <label>天亮时间</label>
+        <select id="gameDawnTime"></select>
+        <span class="hint">天亮公告（谁走了 / 我验到了什么）的停留时间</span>
+      </div>
+      <div class="form-row hidden" id="rowSkinTalk">
+        <label>讨论时间</label>
+        <select id="gameTalkTime"></select>
+        <span class="hint">画都摊开后，看画 + 讨论的时限</span>
+      </div>
+
+      <!-- 接龙 / 画皮共用：投票时间（协议里都是 voteSeconds） -->
+      <div class="form-row hidden" id="rowVote">
+        <label>投票时间</label>
+        <select id="gameVoteTime"></select>
+        <span class="hint">投票的时限</span>
+      </div>
+
       <p class="game-state" id="gameState">当前：自由绘画</p>
+      <p class="hint" id="gamePlayers">需要 2 ~ 8 人</p>
     </div>
     <div class="modal-foot">
       <button class="btn danger hidden" id="btnGameStop">结束游戏</button>
@@ -1277,120 +1409,9 @@
   </div>
 </div>
 
-<!-- ============ 接龙（v9 重制：多链并行 Whisper） ============ -->
-<div class="modal-mask hidden" id="chainMask">
-  <div class="modal game">
-    <div class="modal-head">
-      <h3>接龙（Whisper · 传话绘画）</h3>
-      <button class="icon-btn" id="btnChainClose">×</button>
-    </div>
-    <div class="modal-body">
-      <p class="game-rule">
-        每个人先给自己那条链写一个词 → 沿打乱的顺序传给下一个人<b>照着画</b> →
-        再下一个人<b>看着画猜词</b> → 再下一个人照新词再画……
-        所有人同时进行、互看不到别人的内容。传完后一起看回放：
-        <b>一个「爱丽丝」是怎么变成「怪物卡车」的</b>。
-        最后投票：每条链首尾是否还对得上 + 全场最喜欢的一张画。
-      </p>
-      <div class="form-row">
-        <label>链长</label>
-        <select id="chainLength"></select>
-        <span class="hint" id="chainLengthHint">每条链传几手；默认 = 人数（每条链传遍全场）</span>
-      </div>
-      <div class="form-row">
-        <label>主题词库</label>
-        <select id="chainTheme"></select>
-        <button class="mini" id="btnThemeManage" title="新建 / 编辑自定义词库">管理…</button>
-        <span class="hint" id="chainThemeHint">写初始词时会优先给这个主题的词</span>
-      </div>
-      <div class="form-row">
-        <label>作画时间</label>
-        <select id="chainDrawTime">
-          <option value="">默认</option>
-          <option value="30">30 秒</option>
-          <option value="60">1 分钟</option>
-          <option value="90">1 分半</option>
-          <option value="120">2 分钟</option>
-          <option value="180">3 分钟</option>
-        </select>
-        <span class="hint">每一手「照词作画」的时限（写词 / 猜词另算）</span>
-      </div>
-      <p class="game-state" id="chainState">当前：自由绘画</p>
-      <p class="hint" id="chainPlayers">需要 4 ~ 16 人</p>
-    </div>
-    <div class="modal-foot">
-      <button class="btn danger hidden" id="btnChainStop">结束游戏</button>
-      <span class="spacer"></span>
-      <button class="btn" id="btnChainCancel">关闭</button>
-      <button class="btn primary" id="btnChainStart">进入大厅</button>
-    </div>
-  </div>
-</div>
+<!-- 接龙 / 画皮的「开局设置」已经在 #gameMask 里了（见上），这里不再有第二层弹窗。
 
-<!-- 接龙：猜词的输入框 -->
-<div class="modal-mask hidden" id="chainInputMask">
-  <div class="modal pick">
-    <div class="modal-head">
-      <h3 id="ciTitle">这幅画画的是什么？</h3>
-      <span class="pick-timer" id="ciTimer">60</span>
-    </div>
-    <div class="modal-body">
-      <p class="hint" id="ciHint">猜一个词（别人看不到你猜的）</p>
-      <div class="form-row ci-custom">
-        <input type="text" id="ciInput" maxlength="20" placeholder="你猜这幅画的是什么…" autocomplete="off">
-        <button class="btn primary" id="ciSubmit">提交答案</button>
-      </div>
-      <div class="ci-preview" id="ciPreview"></div>
-    </div>
-  </div>
-</div>
-
-<!-- 接龙：回放 + 投票（播放器：逐条链、逐格播放） -->
-<div class="modal-mask hidden" id="replayMask">
-  <div class="modal replay">
-    <div class="modal-head">
-      <h3 id="rpTitle">回放</h3>
-      <span class="chain-nav">
-        <button class="mini" id="rpPrev" title="上一条链">‹</button>
-        <b id="rpIndex">1 / 1</b>
-        <button class="mini" id="rpNext" title="下一条链">›</button>
-      </span>
-      <span class="pick-timer" id="rpTimer">--</span>
-    </div>
-    <div class="modal-body">
-      <div class="rp-chain-head" id="rpChainHead"></div>
-      <!-- 舞台：当前格的内容（词 / 画 / 猜词），播放器在这里逐格演 -->
-      <div class="rp-stage" id="rpStage"></div>
-      <!-- 播放控制 -->
-      <div class="rp-controls">
-        <button class="mini" id="rpPlay" title="自动播放 / 暂停">▶ 播放</button>
-        <button class="mini" id="rpPrevItem" title="上一步">⏮</button>
-        <button class="mini" id="rpNextItem" title="下一步">⏭</button>
-        <select id="rpSpeed" title="播放速度">
-          <option value="0.5">0.5×</option>
-          <option value="1" selected>1×</option>
-          <option value="2">2×</option>
-          <option value="4">4×</option>
-        </select>
-        <span class="rp-pills" id="rpPills"></span>
-      </div>
-      <div class="rp-verdict" id="rpVerdict"></div>
-      <div class="rp-vote hidden" id="rpVote">
-        <span class="hint" id="rpVoteHint">这条链首尾对得上吗？（说不通就投「跑偏了」）</span>
-        <button class="btn ghost" id="rpVoteBad">跑偏了</button>
-        <button class="btn primary" id="rpVoteOk">对得上</button>
-        <span class="rp-fav-state" id="rpFavState"></span>
-      </div>
-    </div>
-    <div class="modal-foot">
-      <button class="btn hidden" id="btnRpNext">进入投票</button>
-      <span class="spacer"></span>
-      <button class="btn" id="btnRpExit">收起（不影响别人）</button>
-    </div>
-  </div>
-</div>
-
-<!-- 接龙：本局结算（首尾对照 + 奖杯榜） -->
+     接龙：奖杯结算（最终结算才弹，一条链的小结算走底部横条） -->
 <div class="modal-mask hidden" id="trophyMask">
   <div class="modal over">
     <div class="modal-head">
@@ -1409,58 +1430,7 @@
   </div>
 </div>
 
-<!-- 画皮：开局面板 -->
-<div class="modal-mask hidden" id="skinMask">
-  <div class="modal game">
-    <div class="modal-head">
-      <h3>画皮（用「画」来发言的狼人杀）</h3>
-      <button class="icon-btn" id="btnSkinClose">×</button>
-    </div>
-    <div class="modal-body">
-      <p class="game-rule">
-        所有人都有身份。每轮天亮后<b>所有人画同一个主题</b>，限时各自画完匿名摊开 ——
-        看画猜作者想表达什么，讨论，然后投票放逐。<b>伪装者</b>混在画师里，
-        靠画风的破绽和言语的破绽被抓。
-        好人赢 = 放逐所有伪装者；伪装者赢 = 人数不少于画师。
-      </p>
-      <div class="form-row">
-        <label>轮数</label>
-        <select id="skinRounds">
-          <option value="4">4 轮</option>
-          <option value="6" selected>6 轮（推荐）</option>
-          <option value="8">8 轮</option>
-          <option value="12">12 轮</option>
-        </select>
-        <span class="hint">打满轮数还没分出胜负 → 判伪装者获胜</span>
-      </div>
-      <div class="form-row">
-        <label>主题词库</label>
-        <select id="skinTheme"></select>
-        <button class="mini" id="btnSkinThemeManage" title="新建 / 编辑自定义词库">管理…</button>
-        <span class="hint">每轮都从这套词库里取一个主题（一轮一个，不重复）</span>
-      </div>
-      <div class="form-row">
-        <label>作画时间</label>
-        <select id="skinDrawTime">
-          <option value="">默认（60 秒）</option>
-          <option value="30">30 秒</option>
-          <option value="60">1 分钟</option>
-          <option value="90">1 分半</option>
-          <option value="120">2 分钟</option>
-        </select>
-        <span class="hint">每轮天亮后的作画时限</span>
-      </div>
-      <p class="game-state" id="skinState">当前：自由绘画</p>
-      <p class="hint" id="skinPlayers">需要 6 ~ 12 人</p>
-    </div>
-    <div class="modal-foot">
-      <button class="btn danger hidden" id="btnSkinStop">结束游戏</button>
-      <span class="spacer"></span>
-      <button class="btn" id="btnSkinCancel">关闭</button>
-      <button class="btn primary" id="btnSkinStart">开始画皮</button>
-    </div>
-  </div>
-</div>
+<!-- 画皮的开局设置也在 #gameMask 里（见上），这里不再有第二层弹窗。 -->
 
 <!-- 画皮：作画阶段的「交稿」条（画布上沿，只有能画的人看得见） -->
 <div class="skin-drawbar hidden" id="skinDrawBar">

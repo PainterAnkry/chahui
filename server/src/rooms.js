@@ -181,6 +181,13 @@ class Room {
      * 同样**刻意不落盘**：服务端重启时装载本来就是中断的，留着半份图层表只会更脏。
      */
     this.projectLoad = null;
+    /**
+     * 房主的「本局游戏预设」（C2S.GAME_PREFS 清洗后的那一份，见 game-prefs.js）。
+     * 与 projectLoad 同一个规矩：**挂在房间上、不落盘、不进 meta()/summary()**。
+     * 房间列表页不需要它（那是给房间内的设置面板看的），所以 summary() 也不带。
+     * 时机：房主改设置就更新；GAME_START 成功 / GAME_STOP 清空；换房主只换 by。
+     */
+    this.pendingGame = null;
   }
 
   get online() { return this.members.size; }

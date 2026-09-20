@@ -17,7 +17,10 @@ const BASE = process.argv[2] || 'http://127.0.0.1:8440';
 const GAME_PORT = Number(process.env.GAME_TEST_PORT || 8446);
 const GAME_BASE = 'http://127.0.0.1:' + GAME_PORT;
 // 这三个文件必须打压缩计时的服务端
-const NEEDS_GAME_SERVER = ['test-skin.js', 'test-skin-ui.js', 'test-game-restore.js'];
+const NEEDS_GAME_SERVER = ['test-skin.js', 'test-skin-ui.js', 'test-game-restore.js',
+  // 接龙重写后的数据流（起词非空 / 自己画自己 / 逐链串行投票）——
+  // 它要跑完整整一局接龙，所以也要那台压缩计时的（见 GAME_ENV 里的 GAME_CHAIN_*）
+  'test-chain-serial.js'];
 
 /**
  * 「选词窗口要够长」的那一个：test-game-theme.js 要在选词阶段点「换一组」，
@@ -28,7 +31,7 @@ const NEEDS_GAME_SERVER = ['test-skin.js', 'test-skin-ui.js', 'test-game-restore
  */
 const PICK_LONG_PORT = GAME_PORT + 1;
 const PICK_LONG_BASE = 'http://127.0.0.1:' + PICK_LONG_PORT;
-const NEEDS_LONG_PICK = ['test-game-theme.js'];
+const NEEDS_LONG_PICK = ['test-game-theme.js', 'test-chain-flow.js'];
 
 const GAME_ENV = Object.assign({}, process.env, {
   PORT: String(GAME_PORT),
@@ -47,16 +50,36 @@ const GAME_ENV = Object.assign({}, process.env, {
   // 经典 / 接龙 / 还原（test-game-restore 靠这几个字段判「是不是压缩计时」）
   GAME_PICK_MS: '1200',
   GAME_ROUND_MS: '2500',
-  GAME_ROUND_END_MS: '800'
+  GAME_ROUND_END_MS: '800',
+  // 接龙的计时：test-chain-serial.js 要把「写词 → 作画 → 猜词 → 逐链回放投票」整条流程跑完，
+  // 默认（写词 60s、回放 150s、每条链一轮）一局要十几分钟。压到这里一局 ~40 秒。
+  GAME_CHAIN_INIT_MS: '1200',
+  GAME_CHAIN_WRITE_MS: '3000',
+  GAME_CHAIN_DRAW_MS: '4000',
+  GAME_CHAIN_GUESS_MS: '3000',
+  GAME_CHAIN_REVEAL_MS: '2500',
+  GAME_CHAIN_VOTE_MS: '3000',
+  GAME_CHAIN_SCORE_MS: '1500',
+  GAME_CHAIN_CHAIN_SCORE_MS: '1200'
 });
 
-// 「选词窗口够长」那台：其余计时与 GAME_ENV 一致，只把 PICK_MS 放大
+// 「窗口够长」那台：给 test-game-theme.js（要在选词阶段点「换一组」）和
+// test-chain-flow.js（4 个页面逐个点按钮走完整局接龙）用。
+// ⚠ 接龙这几项必须**宽**：压到 3~4 秒的话，测试还没点到投票，服务端就把整局自动跑完了。
 const PICK_LONG_ENV = Object.assign({}, GAME_ENV, {
   PORT: String(PICK_LONG_PORT),
   DATA_DIR: path.join(os.tmpdir(), 'chahui-picklong-' + Date.now().toString(36)),
   GAME_PICK_MS: '9000',
   GAME_ROUND_MS: '3000',
-  GAME_ROUND_END_MS: '800'
+  GAME_ROUND_END_MS: '800',
+  GAME_CHAIN_INIT_MS: '1200',
+  GAME_CHAIN_WRITE_MS: '8000',
+  GAME_CHAIN_DRAW_MS: '8000',
+  GAME_CHAIN_GUESS_MS: '8000',
+  GAME_CHAIN_REVEAL_MS: '9000',
+  GAME_CHAIN_VOTE_MS: '12000',
+  GAME_CHAIN_SCORE_MS: '5000',
+  GAME_CHAIN_CHAIN_SCORE_MS: '4000'
 });
 
 async function reachable(url, ms) {
@@ -210,10 +233,16 @@ const SUITE = [
   'test-avatar.js',
   'test-groups.js',
   'test-update.js',
-  'test-chain-ui.js',
+  // 接龙 UI 全流程（重写后）：画在主画布 / 输入条在下方 / 主画布回放 + 逐链串行投票。
+  // ⚠ 要那台「宽窗口」的服务端（回放 ≥6s、投票 ≥8s），见 NEEDS_LONG_PICK
+  'test-chain-flow.js',
   'test-passkeys.js',
   'test-mobile.js',
   'test-chain-sim.js',
+  // 「每局可配的游戏设置」：三个玩法的 start(opts) 覆盖值 / 夹取边界 / GAME_FAST /
+  // 房主预设 pendingGame 的清洗与权限 / /api/share 的 setup 档位。
+  // 纯 Node，不需要浏览器也不需要服务端。
+  'test-game-setup.js',
   // 画皮的离线状态机（发身份 / 验人刀人用药 / 自相残杀 / 四种胜负条件）。
   // 纯 Node，不需要浏览器也不需要服务端 —— 直接 new SkinGame 推状态。
   'test-skin-sim.js',
@@ -227,6 +256,9 @@ const SUITE = [
   'test-game-restore.js',
   // 接龙「私密作画」：并行作画时笔迹只回作者本人（#4/#5 的回归）
   'test-chain-private.js',
+  // 接龙重写后的数据流（ws 层）：起词非空 / 自己画自己的词 / 逐链串行投票 + √ 过半得奖杯。
+  // ⚠ 需要带 GAME_CHAIN_* 压缩计时的服务端（本脚本自己会起）
+  'test-chain-serial.js',
   // 你画我猜 · 主题词库接线：「再来一局」不能丢主题、「换一组」要立刻刷新候选词。
   // ⚠ 需要**长选词窗口**的服务端（本脚本自己会在 PICK_LONG_PORT 起一台）
   'test-game-theme.js',

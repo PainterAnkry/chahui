@@ -1,7 +1,23 @@
 /**
  * 茶绘 · 接龙模式端到端验收（虚拟客户端，不需要浏览器）
  *
- * 用法：
+ * ⚠⚠ **这份已经过时，跑起来是红的，别再拿它当验收标准。**
+ *   它写在 v9 之前，之后被打翻过两次：
+ *     ① v9 加了「大厅」：GAME_START 只进大厅，要全员 GAME_READY 才开打；
+ *        STEP 的值也从 `write/draw/guess` 改成了大写 `WORD/DRAWING/GUESS`
+ *        （本文件里到处还是在比小写，所以一堆断言在空值上假红）。
+ *     ② 2026-09 的接龙重写：**写完起词自己先画自己的词**（第 0、1 格都是链主）、
+ *        链长改成「人数 + 1」、投票改成**按链串行**。
+ *        本文件里「没有人画自己写的那条链（n≥4 保证）」这条现在**正好是反的**。
+ *
+ *   同一片覆盖现在由这三份负责（都在 `npm run test:all` 里）：
+ *     · tools/test-chain-sim.js     —— 状态机离线仿真（114 项，秒级）
+ *     · tools/test-chain-serial.js  —— 重写后的数据流（真 WebSocket，36 项）
+ *     · tools/test-chain-private.js —— 私密作画（真 WebSocket，24 项）
+ *   这一份留着只是因为里面还有些**没被搬走**的断言（任务字段结构白名单、
+ *   权限拒绝文案、泄题扫描）。要复活它，先按上面两条把断言改到新模型。
+ *
+ * 用法（改好之后）：
  *   GAME_CHAIN_WRITE_MS=2500 GAME_CHAIN_DRAW_MS=3000 GAME_CHAIN_REPLAY_MS=4000 \
  *     CHAHU_WORDS='长颈鹿,珍珠奶茶,冰淇淋,向日葵,太空漫步' PORT=8444 \
  *     node server/src/index.js
@@ -213,14 +229,22 @@ async function main() {
   /** 每个人给自己那条链写的词（后续几节都要用它来判断「谁拿到了谁的东西」） */
   const words = {};
   {
-    // rounds=3 = 词→画→猜，一个完整的接龙循环（2 圈只有词→画，猜不到东西）
-    sendTo(host, P.C2S.GAME_START, { mode: 'chain', rounds: 3 });
+    // rounds=3 在原模型里是「词→画→猜」；重写后链长 = 人数 + 1（第 0、1 格都是链主），
+    // 默认就是「起词 → 画1 → 猜1 → 画2 → 猜2」，不再用 rounds 控制。
+    sendTo(host, P.C2S.GAME_START, { mode: 'chain' });
     const started = await waitFor(() => host.gstate && host.gstate.mode === 'chain'
       && host.phase() !== 'off', 4000, '开局');
     ok('接龙开起来了', started);
     if (!started) { console.log('\n开局失败，后续断言跳过。'); return finish(); }
 
     ok('模式是 chain', host.gstate.mode === 'chain', host.gstate.mode);
+    // ⚠ v9 起 GAME_START 只进**大厅**，要全员点「准备」才开打（这一条以前漏了，
+    //    整份用例卡在 lobby 上，后面所有断言都在空数据上假红）
+    const inLobby = await waitFor(() => all.every(c => c.phase() === 'chain_lobby'), 6000, '大厅');
+    ok('全员落在大厅', inLobby, all.map(c => c.phase()).join(','));
+    all.forEach(c => sendTo(c, P.C2S.GAME_READY, { ready: true }));
+    ok('全员准备后进入开场鼓点', await waitFor(() => host.phase() === 'chain_init', 8000),
+      host.phase());
     ok('四个人的链都建了（chainCount=4）', host.gstate.chainCount === 4, 'chainCount=' + host.gstate.chainCount);
 
     const allGot = await waitFor(() => all.every(c => c.gstate && c.gstate.mode === 'chain'), 4000, '全员状态');

@@ -2090,6 +2090,10 @@ body.panel-dragging * { cursor: grabbing !important; }
 }
 .imp-row:last-child { border-bottom: 0; }
 .imp-row:hover { background: #f5f8fc; }
+/* 纯色笔尖：文件里只有一张「一片一个色」的图，形状可能是真的、也可能只是空白预览，
+   所以给行加一条左边线，跟确定有形状的笔尖区分开（提醒文案在 .imp-meta 里） */
+.imp-row.imp-flat { background: #fffaf0; box-shadow: inset 3px 0 0 #e8b34b; }
+.imp-row.imp-flat:hover { background: #fff5e2; }
 .imp-tip {
   width: 34px; height: 34px; flex: none;
   border-radius: 4px;
@@ -2301,6 +2305,10 @@ body.panel-dragging * { cursor: grabbing !important; }
      展开时也强制限宽，别占掉半屏 */
   .quickbar { top: 6px; max-width: calc(100% - 52px); }
 
+  /* 游戏 HUD：倒计时（阶段名 + 秒数）+ 结束/计分/音效/音量，窄屏一行放不下就换行，
+     别把倒计时挤出屏幕 */
+  .game-hud { flex-wrap: wrap; row-gap: 4px; }
+
   /* 浮动小窗（参考图等）别顶到屏幕外 */
   .float-win { right: 8px !important; left: 8px !important; width: auto !important; }
 }
@@ -2344,7 +2352,20 @@ body.panel-dragging * { cursor: grabbing !important; }
   color: var(--accent);
   white-space: nowrap;
 }
+/* 倒计时带阶段名：「投票中 12 秒」。阶段名和秒数在同一个控件里，
+   免得光看一个裸数字不知道在等哪个阶段（接龙的写词步以前就是这样）。 */
 .game-hud .gh-timer {
+  display: inline-flex;
+  align-items: baseline;
+  /* 阶段名与秒数之间的那个空格是文本里的（见 updateGameTimer），这里不再加 gap */
+  gap: 0;
+  white-space: nowrap;
+}
+.game-hud .gh-timer-phase {
+  font-weight: 600;
+  color: var(--accent);
+}
+.game-hud .gh-timer-sec {
   font-family: var(--mono);
   font-size: 17px;
   font-weight: 600;
@@ -2353,6 +2374,7 @@ body.panel-dragging * { cursor: grabbing !important; }
   color: var(--text);
 }
 .game-hud .gh-timer.warn { color: var(--danger); }
+.game-hud .gh-timer.warn .gh-timer-sec { color: var(--danger); }
 .game-hud .gh-word {
   color: var(--text-dim);
   /* 长词 / 长串 □ 遮罩允许折行，不再截成省略号 */
@@ -2535,7 +2557,8 @@ body.panel-dragging * { cursor: grabbing !important; }
   color: var(--accent);
 }
 .modal.pick { max-width: 360px; }
-.modal.game { max-width: 460px; }
+/* 三合一的开局设置面板：接龙最多 7 行参数，460px 太窄（标签 + 下拉 + 提示挤成两行） */
+.modal.game { max-width: 560px; }
 .modal.over { max-width: 400px; }
 .game-rule {
   margin: 0 0 12px;
@@ -2552,6 +2575,49 @@ body.panel-dragging * { cursor: grabbing !important; }
   color: var(--text-dim);
 }
 .game-state b { color: var(--accent); }
+
+/* ---- 开局面板：玩法决定参数行的顺序与显隐 ----
+ * 三种玩法的参数行都在同一个 DOM 里（重复的主题 / 作画时间已经删了），
+ * 靠 #gameMask 上的 mode-* 类和 order 把「本玩法这一套」按用户要的顺序排下来：
+ *   你画我猜  主题 → 作画时间 → 回合数 → 换词次数 → 回合结算
+ *   接龙      主题 → 作画时间 → 链长 → 写词 → 猜词 → 回放 → 投票
+ *   画皮      主题 → 作画时间 → 轮数 → 夜晚 → 天亮 → 讨论 → 投票
+ * 不显示的行由 app.js 加 .hidden（display:none），这里的 order 只管剩下的。 */
+.modal.game .modal-body { display: flex; flex-direction: column; }
+#gameMask #rowMode { order: 0; }
+#gameMask .form-row { order: 20; }
+#gameMask #gameState { order: 90; }
+#gameMask #gamePlayers { order: 91; }
+#gameMask.mode-classic #rowTheme { order: 1; }
+#gameMask.mode-classic #rowDrawTime { order: 2; }
+#gameMask.mode-classic #rowClassicRounds { order: 3; }
+#gameMask.mode-classic #rowClassicRepick { order: 4; }
+#gameMask.mode-classic #rowClassicRoundEnd { order: 5; }
+#gameMask.mode-chain #rowTheme { order: 1; }
+#gameMask.mode-chain #rowDrawTime { order: 2; }
+#gameMask.mode-chain #rowChainLength { order: 3; }
+#gameMask.mode-chain #rowChainWrite { order: 4; }
+#gameMask.mode-chain #rowChainGuess { order: 5; }
+#gameMask.mode-chain #rowChainReveal { order: 6; }
+#gameMask.mode-chain #rowVote { order: 7; }
+#gameMask.mode-skin #rowTheme { order: 1; }
+#gameMask.mode-skin #rowDrawTime { order: 2; }
+#gameMask.mode-skin #rowSkinRounds { order: 3; }
+#gameMask.mode-skin #rowSkinNight { order: 4; }
+#gameMask.mode-skin #rowSkinDawn { order: 5; }
+#gameMask.mode-skin #rowSkinTalk { order: 6; }
+#gameMask.mode-skin #rowVote { order: 7; }
+/* 非房主看到的那句「房主设置的当前配置（只读）」 */
+.prefs-note {
+  margin: -4px 0 10px;
+  padding: 6px 9px;
+  background: #f3f6fb;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
 
 .rank-list { display: flex; flex-direction: column; gap: 6px; }
 .rank-row {
@@ -3426,5 +3492,162 @@ body.panel-dragging * { cursor: grabbing !important; }
 @media (max-width: 1080px) {
   .skin-role, .skin-gallery { z-index: 12; }
   .skin-gallery { width: 220px; max-height: 50vh; }
+}
+
+/* ==========================================================================
+   接龙 v10：画布层 + 底部横条
+   --------------------------------------------------------------------------
+   用户在 v9 的实测反馈：猜词的画缩在左下角小窗里、输入框又是居中的压暗弹窗，
+   画和输入框没法同时看；回放更糟 —— 一个全屏遮罩把画布整个盖住了。
+   现在的分工：
+     #chainCanvasLayer  把「这一格」摊在**主画布**上（猜词的画 / 回放的当前格）；
+     #chainInputMask    猜词输入条，贴主画布下沿；
+     #chainReplayBar    回放控制 + 首尾对照 + 投票 + 小结算，同样贴下沿。
+   三条都不压暗、不遮挡画布。层级安排：
+     11  画布层 —— 在画布之上，但在所有悬浮面板（题面 34 / 进度 33 / HUD 35）之下；
+     37  底部横条 —— 高于 HUD(35)，低于 .modal-mask(40)：
+         点「结束游戏」回主菜单时，入口页必须能压住它。
+   ========================================================================== */
+
+.chain-canvas-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 11;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 14px 14px 108px;   /* 底部留出横条的位置，JS 按横条实测高度改写 */
+  overflow: hidden;
+  pointer-events: none;       /* 不吃指针：不影响作画，也不抢画布上的操作 */
+}
+.chain-canvas-layer .ccl-tag {
+  flex: none;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, .94);
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  padding: 3px 10px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chain-canvas-layer .ccl-img {
+  min-height: 0;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(20, 30, 50, .16);
+}
+.chain-canvas-layer .ccl-text {
+  min-height: 0;
+  max-width: 100%;
+  text-align: center;
+  font-size: clamp(22px, 4.6vw, 54px);
+  font-weight: 600;
+  letter-spacing: 3px;
+  line-height: 1.3;
+  color: var(--text);
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  background: rgba(255, 255, 255, .94);
+  border: 1px solid var(--line-soft);
+  border-radius: 14px;
+  padding: 14px 22px;
+}
+
+/* ---- 底部横条（猜词输入 / 回放控制 / 投票 / 小结算）---- */
+.chain-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 37;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px 10px;
+  max-height: 46vh;
+  overflow-y: auto;
+  background: rgba(255, 255, 255, .97);
+  border-top: 1px solid var(--accent-line);
+  box-shadow: 0 -6px 22px rgba(20, 30, 50, .12);
+  backdrop-filter: blur(6px);
+  font-size: 12.5px;
+}
+.chain-bar .cb-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.chain-bar .cb-title { color: var(--accent); font-size: 13px; white-space: nowrap; }
+.chain-bar .cb-index { font-family: var(--mono); color: var(--text-dim); white-space: nowrap; }
+.chain-bar .cb-head {
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 46vw;
+}
+.chain-bar .cb-head b { color: var(--text); }
+.chain-bar .cb-hint { flex: 1 1 auto; min-width: 110px; }
+.chain-bar .cb-ask { font-weight: 600; white-space: nowrap; }
+.chain-bar .cb-done { color: var(--text-dim); white-space: nowrap; }
+.chain-bar .spacer { flex: 1 1 auto; min-width: 6px; }
+.chain-bar .rp-pill { cursor: pointer; }
+.chain-bar select {
+  font-size: 11.5px;
+  padding: 2px 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+}
+
+/* 猜词输入：横条里就地排开（不再是弹窗里那一列） */
+.chain-bar .ci-custom {
+  margin-top: 0;
+  flex: 1 1 320px;
+  min-width: 200px;
+  max-width: 560px;
+}
+.chain-bar .ci-preview { margin-top: 0; min-height: 0; white-space: nowrap; }
+
+/* 回放条里的首尾对照 / 投票行：去掉弹窗时代的上下留白 */
+.chain-bar .cb-row.second > .rp-verdict { flex: 1 1 auto; margin-bottom: 0; padding: 7px 10px; }
+.chain-bar .rp-vote { padding-top: 0; flex-wrap: wrap; }
+.chain-bar .rp-vote .btn { min-width: 46px; }
+.chain-bar .rp-fav-state { margin-left: 0; }
+
+/* 小结算：这一条链的 √ / × 与「起词人有没有拿到奖杯」 */
+.chain-score-row { font-size: 13px; }
+.chain-score-row b { font-family: var(--mono); }
+.chain-score-row .cs-won { color: var(--ok); font-weight: 600; }
+.chain-score-row .cs-lost { color: var(--danger); font-weight: 600; }
+.chain-score-row .cs-flow { color: var(--text-dim); }
+
+/* 底部横条一出现，原本贴底的浮层得让位 —— 不然会被压在横条底下点不到 */
+.stage.chain-bar-on .chain-task,
+.stage.chain-bar-on .chain-progress,
+.stage.chain-bar-on .game-lock-tip { bottom: calc(var(--cb-h, 104px) + 18px); }
+
+/* 提示气泡也在底部正中。⚠ #toastWrap 挂在 <body> 下（不是 #stage 的兄弟），
+   所以开关也挂在 body 上（app.js 的 syncChainCanvasPad 一起切）——
+   接龙回放 / 投票时「全部传完了」这类提示必然会弹，得抬到横条上方。 */
+body.chain-bar-on .toast-wrap { bottom: calc(var(--cb-h, 104px) + 60px); }
+
+/* 窄屏：横条会折行变高，横条里的控件跟着收窄 */
+@media (max-width: 1080px) {
+  .chain-bar { padding: 6px 8px 8px; }
+  .chain-bar .cb-head { max-width: 62vw; }
+  .chain-bar .ci-custom { flex-basis: 200px; }
+  .chain-canvas-layer { padding-left: 8px; padding-right: 8px; }
 }
 

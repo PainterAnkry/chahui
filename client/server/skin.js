@@ -90,8 +90,41 @@ function clampInt(v, d, a, b) {
 }
 
 function envMs(key, dflt) {
+  if (gameFast()) return 1000;
   const n = Math.floor(Number(process.env[key]));
   return isFinite(n) && n > 0 ? n : dflt;
+}
+
+/** 宽限值专用：**不受 GAME_FAST 影响** —— 它压掉的是女巫的决策窗口，等于给人开后门 */
+function envGraceMs(key, dflt) {
+  const n = Math.floor(Number(process.env[key]));
+  return isFinite(n) && n > 0 ? n : dflt;
+}
+
+/**
+ * GAME_FAST=1：把**所有阶段时长的默认值**压成 1 秒（自动化测试用，见 tools/test-game-setup.js）。
+ *
+ * ⚠ 只压「默认值」这一层：
+ *   - 房主在开局设置里显式设定的每局覆盖值仍然优先（`this.drawMs || CFG.DRAW_MS`）；
+ *   - 女巫的决策窗口 WITCH_GRACE_MS **不压**（见 envGraceMs）—— 那是「狼投完刀之后、
+ *     天亮之前」专门留给她的几秒，压掉等于让女巫来不及用药，测试会跑出假绿。
+ */
+function gameFast() {
+  const v = process.env.GAME_FAST;
+  if (!v) return false;
+  const s = String(v).trim().toLowerCase();
+  return !(s === '' || s === '0' || s === 'false' || s === 'no' || s === 'off');
+}
+
+/**
+ * 「每局覆盖」的秒数：0 / 缺省 / 非法 / 负数 = 用默认（返回 0），
+ * 否则夹到 [SETUP_SECONDS_MIN, SETUP_SECONDS_MAX] 并换成毫秒。
+ */
+function optSec(v) {
+  if (v === null || v === undefined || typeof v === 'boolean') return 0;
+  const n = Math.floor(Number(v));
+  if (!isFinite(n) || n <= 0) return 0;
+  return clampInt(n, 0, P.GAME.SETUP_SECONDS_MIN, P.GAME.SETUP_SECONDS_MAX) * 1000;
 }
 
 const CFG = {
@@ -101,7 +134,8 @@ const CFG = {
   TALK_MS: envMs('GAME_SKIN_TALK_MS', P.GAME.SKIN_TALK_MS),
   VOTE_MS: envMs('GAME_SKIN_VOTE_MS', P.GAME.SKIN_VOTE_MS),
   VOTE_END_MS: envMs('GAME_SKIN_VOTE_END_MS', P.GAME.SKIN_VOTE_END_MS),
-  WITCH_GRACE_MS: envMs('GAME_SKIN_WITCH_GRACE_MS', P.GAME.SKIN_WITCH_GRACE_MS)
+  // 狼收齐之后留给女巫的决策窗口。它是**宽限**不是阶段时长，GAME_FAST 不压它
+  WITCH_GRACE_MS: envGraceMs('GAME_SKIN_WITCH_GRACE_MS', P.GAME.SKIN_WITCH_GRACE_MS)
 };
 
 function shuffle(arr) {
@@ -172,6 +206,11 @@ class SkinGame {
     this.maxRounds = P.GAME.SKIN_ROUNDS;
     this.theme = 'default';
     this.drawMs = 0;             // 作画时长的本局覆盖值（0 = 用全局默认）
+    // v10：本局的各项阶段时长覆盖值（0 = 用全局默认 / 环境变量）。秒数在 start() 里夹成毫秒。
+    this.nightMs = 0;            // 夜里做事
+    this.dawnMs = 0;             // 天亮公告
+    this.talkMs = 0;             // 看画 + 讨论
+    this.voteMs = 0;             // 放逐投票
 
     /**
      * 玩家表。开局的瞬间冻结，局中不动 —— 与接龙同一个理由：
@@ -524,14 +563,14 @@ class SkinGame {
     };
   }
 
-  /** 本阶段的时长 */
+  /** 本阶段的时长。房主在开局设置里定的每局覆盖值优先，否则用环境变量 / 协议默认 */
   phaseMs() {
     switch (this.phase) {
-      case SKIN_PHASE.NIGHT: return CFG.NIGHT_MS;
-      case SKIN_PHASE.DAWN: return CFG.DAWN_MS;
+      case SKIN_PHASE.NIGHT: return this.nightMs || CFG.NIGHT_MS;
+      case SKIN_PHASE.DAWN: return this.dawnMs || CFG.DAWN_MS;
       case SKIN_PHASE.DAY_DRAW: return this.drawMs || CFG.DRAW_MS;
-      case SKIN_PHASE.DAY_TALK: return CFG.TALK_MS;
-      case SKIN_PHASE.DAY_VOTE: return CFG.VOTE_MS;
+      case SKIN_PHASE.DAY_TALK: return this.talkMs || CFG.TALK_MS;
+      case SKIN_PHASE.DAY_VOTE: return this.voteMs || CFG.VOTE_MS;
       case SKIN_PHASE.VOTE_END: return CFG.VOTE_END_MS;
       default: return 0;
     }
@@ -603,8 +642,14 @@ class SkinGame {
     this.theme = (opts && THEMES.hasTheme(opts.theme)) ? opts.theme : 'default';
     const dsec = Math.floor(Number(opts && opts.drawSeconds));
     this.drawMs = (isFinite(dsec) && dsec > 0)
-      ? clampInt(dsec, 60, P.GAME.DRAW_SECONDS_MIN, P.GAME.DRAW_SECONDS_MAX) * 1000
+      ? clampInt(dsec, P.GAME.SKIN_DRAW_MS / 1000, P.GAME.DRAW_SECONDS_MIN, P.GAME.DRAW_SECONDS_MAX) * 1000
       : 0;
+    // v10：本局的各项阶段时长（夜里 / 天亮 / 讨论 / 投票）。0 / 缺省 = 用默认，
+    // 否则夹到 [SETUP_SECONDS_MIN, SETUP_SECONDS_MAX]。作画时长沿用上面的 drawSeconds（下限仍是 30 秒）。
+    this.nightMs = optSec(opts && opts.nightSeconds);
+    this.dawnMs = optSec(opts && opts.dawnSeconds);
+    this.talkMs = optSec(opts && opts.talkSeconds);
+    this.voteMs = optSec(opts && opts.voteSeconds);
 
     // 配身份：先把身份洗好，再按打乱的顺序发下去 ——
     // 分两步是为了让「谁是狼」既不与「谁先加进来的」相关、也不与「谁在列表里靠前」相关。
@@ -701,12 +746,12 @@ class SkinGame {
     this.pendingShot = '';
 
     this.phase = SKIN_PHASE.NIGHT;
-    this.deadline = Date.now() + CFG.NIGHT_MS;
+    this.deadline = Date.now() + this.phaseMs();
     // 夜里把画布清干净 —— 上一轮讨论时画布上可能还留着东西
     this.api.resetCanvas();
     this.api.sync();
     this.api.systemChat('第 ' + this.round + ' 夜 · 天黑请闭眼。预言家验人，伪装者决定今晚的猎物（'
-      + Math.round(CFG.NIGHT_MS / 1000) + ' 秒）');
+      + Math.round(this.phaseMs() / 1000) + ' 秒）');
   }
 
   /**
@@ -885,7 +930,7 @@ class SkinGame {
     }
 
     this.phase = SKIN_PHASE.DAWN;
-    this.deadline = Date.now() + CFG.DAWN_MS;
+    this.deadline = Date.now() + this.phaseMs();
     this.api.sync();
     this.api.systemChat('第 ' + this.round + ' 天天亮了：' + this.lastNightSummary.text);
 
@@ -915,14 +960,14 @@ class SkinGame {
     this.nightWolfVotes = new Map();
 
     this.phase = SKIN_PHASE.DAY_DRAW;
-    this.deadline = Date.now() + (this.drawMs || CFG.DRAW_MS);
+    this.deadline = Date.now() + this.phaseMs();
     // 作画阶段：**私密画**（privateDrawOn 在 index.js 里按这个 phase 打开）。
     // 清画布放在这里而不是入夜 —— 夜里清过一次了，但讨论阶段可能有人手贱画了两笔，
     // 这一笔会跟着私密画布一起交上去，所以这里再清一次最保险。
     this.api.resetCanvas();
     this.api.sync();
 
-    const secs = Math.round((this.drawMs || CFG.DRAW_MS) / 1000);
+    const secs = Math.round(this.phaseMs() / 1000);
     this.api.systemChat('第 ' + this.round + ' 轮作画 · 主题「' + this.currentWord() + '」'
       + '（' + secs + ' 秒，各自画，看不见别人 —— 交稿后匿名摊开）');
   }
@@ -1003,10 +1048,10 @@ class SkinGame {
     this.works = ordered;
 
     this.phase = SKIN_PHASE.DAY_TALK;
-    this.deadline = Date.now() + CFG.TALK_MS;
+    this.deadline = Date.now() + this.phaseMs();
     this.api.sync();
     this.api.systemChat('画都在墙上了 —— 匿名看一看，谁在装、谁是真画师。'
-      + '讨论 ' + Math.round(CFG.TALK_MS / 1000) + ' 秒后投票放逐');
+      + '讨论 ' + Math.round(this.phaseMs() / 1000) + ' 秒后投票放逐');
   }
 
   /* ------------------------------------------------------------ 白天：投票 */
@@ -1024,10 +1069,10 @@ class SkinGame {
     this.voteResult = null;
     this.pendingShot = '';
     this.phase = SKIN_PHASE.DAY_VOTE;
-    this.deadline = Date.now() + CFG.VOTE_MS;
+    this.deadline = Date.now() + this.phaseMs();
     this.api.sync();
     this.api.systemChat('投票放逐 —— 选出你觉得是伪装者的人（'
-      + Math.round(CFG.VOTE_MS / 1000) + ' 秒，票是公开的）');
+      + Math.round(this.phaseMs() / 1000) + ' 秒，票是公开的）');
   }
 
   /**
@@ -1112,7 +1157,7 @@ class SkinGame {
     };
 
     this.phase = SKIN_PHASE.VOTE_END;
-    this.deadline = Date.now() + CFG.VOTE_END_MS;
+    this.deadline = Date.now() + this.phaseMs();
     this.api.sync();
 
     if (exiled) {
