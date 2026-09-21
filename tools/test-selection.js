@@ -116,12 +116,12 @@ function check(name, ok, extra) {
   await sleep(200);
   await page.evaluate(() => { const e = document.querySelector('#sizeRange'); e.value = 40; e.dispatchEvent(new Event('input', { bubbles: true })); });
   let r = await drag([[200, 400], [1000, 400]]);
-  // ⚠ 选区笔是**变宽笔迹**（select 笔刷 pressSize=0.5 / minSize=0.6），
-  //   而 page.mouse 合成的指针事件压力恒为 0.5，所以实际带宽
-  //   = size * widthAt(0.5) = 40 * (1 - 0.5*(1 - 0.5^0.8)) ≈ 31.5px，不是 40px。
-  //   这里是**验收带宽随压感变化**：恒压拖拽必须得到一条宽度稳定、不漏白的带。
-  //   之前这条断言写死 32000±15%，把「40px」当成了恒压结果 —— 属测试预期错误。
-  //   恒压 ~31.5px × 800px ≈ 25000，留 ±15% 余量；同时单独卡「带宽」下限防回到半宽 bug。
+  // ⚠ 选区笔是**变宽笔迹**。宽度 = size * widthAt(0.5)（page.mouse 合成的指针事件压力恒 0.5，
+  //   但会被 app 的「疑似数位板」判定当成笔，于是 pressSize / minSize 生效）。
+  //   ⚠ 2.0.9 起选区笔的参数取自 SAI2 笔刷包（minSize 0.02 / pressSize 0.25），
+  //   所以恒压带宽 = 40 * (1 - 0.25*(1 - 0.5^0.8)) ≈ 35.7px（旧参数 0.6/0.5 时是 31.5px）。
+  //   这里是**验收带宽随压感变化**：恒压拖拽必须得到一条宽度稳定、不漏白的带，
+  //   同时卡住下限防回到「半宽」bug（那会让它掉到 ~18px）。
   const bandSpan = await page.evaluate(() => {
     const e = window.ChaApp.engine;
     const d = e.selection.ctx.getImageData(0, 0, e.width, e.height).data;
@@ -131,14 +131,14 @@ function check(name, ok, extra) {
       let up = -1, dn = -1;
       for (let y = 300; y < 500; y++) { if (d[(y * e.width + x) * 4 + 3] > 8) { if (up < 0) up = y; dn = y; } }
       const span = up < 0 ? 0 : dn - up + 1;
-      // 最窄的一段才是关键（半宽 bug 会让它掉到 ~16）
+      // 最窄的一段才是关键（半宽 bug 会让它掉到 ~18）
       if (colMax === 0 || span < colMax) colMax = span;
     }
     return colMax;
   });
-  check('选区笔：涂出一条带宽稳定的带（恒压 ≈31.5px，不是 40px）',
-    Math.abs(r.px - 25000) / 25000 < 0.15, r.px + ' 像素');
-  check('选区笔：带的竖直跨度 ≈31.5px（半宽 bug 回归防线）', bandSpan > 28 && bandSpan < 36, '最窄列跨度 ' + bandSpan + 'px');
+  check('选区笔：涂出一条带宽稳定的带（恒压 ≈36px，不是 40px）',
+    Math.abs(r.px - 29800) / 29800 < 0.06, r.px + ' 像素');
+  check('选区笔：带的竖直跨度 ≈36px（半宽 bug 回归防线）', bandSpan > 33 && bandSpan < 39, '最窄列跨度 ' + bandSpan + 'px');
 
   await page.click('#toolGrid .tool[data-item="marquee"]');
   await sleep(200);
@@ -152,12 +152,22 @@ function check(name, ok, extra) {
 
   await page.click('#toolGrid .tool[data-item="wand"]');
   await sleep(200);
+  // ★ 2.0.9：魔棒按 SAI2 的面板走，**默认是「被线条包围的透明区域」**；
+  //   这一条要验的是老行为（按颜色连片取样），所以先把取样模式切到「色差范围内的区域」。
+  //   魔棒选项本身（三种模式 / 容差 / 防止溢出 / 取样来源 / 抗锯齿 / 忽略已选）在 test-wand.js 里逐项验。
+  await page.click('#wandModeDiff');
+  await sleep(150);
+  await page.evaluate(() => {
+    const el = document.querySelector('#toleranceRange');
+    el.value = '32'; el.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await sleep(150);
   const wp = await mk(200, 200);
   await page.mouse.move(wp[0], wp[1]);
   await page.mouse.down(); await page.mouse.up();
   await sleep(1200);
   r = await selInfo();
-  check('魔棒：点蓝底只选中黑线左边那一半（600000，被黑线挡住）',
+  check('魔棒（色差范围内的区域）：点蓝底只选中黑线左边那一半（600000，被黑线挡住）',
     Math.abs(r.px - 600000) / 600000 < 0.03, r.px + ' 像素');
 
   /* ---------- 加选 / 减选 / 替换 ---------- */
@@ -227,7 +237,15 @@ function check(name, ok, extra) {
   await setSize(40);
   const eraseSize = await page.evaluate(() => window.ChaApp.state.brush.size);
   check('选区擦沿用设定的笔尖大小', eraseSize === 40, String(eraseSize));
+  // ⚠ 自动化里 page.mouse 的合成事件会被 app 的「疑似数位板」判定当成笔，于是压力 0.5 生效，
+  //   而 SAI2 选区擦带 pressOpacity 0.3 → alphaAt(0.5) = 0.7 + 0.3*0.5^0.7 ≈ 0.88，
+  //   destination-out 之后还剩 255*(1-0.88) ≈ 30 的 alpha（> 8 就算「还选着」）。
+  //   那是**真笔轻压**的正常手感，不是 bug；这一段要验的是「擦得掉」，所以先把压力关掉。
+  await page.evaluate(() => { window.ChaApp.state.pressure = false; });
+  await sleep(150);
   const b4 = await band(500);
+  await page.evaluate(() => { window.ChaApp.state.pressure = true; });
+  await sleep(150);
   console.log('  擦掉中间那笔后: ' + b4.px + '（期望 ≈ ' + (b3.px - b1.px) + '）');
   check('选区擦：擦掉中间一笔，另外两笔不受影响',
     Math.abs(b4.px - (b3.px - b1.px)) / (b3.px - b1.px) < 0.12, String(b4.px));

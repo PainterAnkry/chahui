@@ -13,7 +13,7 @@
  *   4. 折叠只影响面板，不影响画布
  *   5. 隐藏整组 = 组内图层都不参与合成（两端一致）
  *   6. 组的不透明度只乘一次（读像素：128；同条件不分组则 191）
- *   7. 组内图层不能靠「上移 / 下移」挪出组；整组能连着一起挪
+ *   7. 图层面板拖动排序（上移 / 下移按钮已去掉）：整组连着挪、散层拖进 / 拖出组
  *   8. 进 / 出组
  *   9. 头顶栏改的是「选中的组」，不会写到图层上
  *  10. 只对单层有意义的操作在选中组时会明说
@@ -304,45 +304,91 @@ async function join(page, room, nick) {
   ok('丙页面没有 JS 报错', errs.length === 0, errs.slice(0, 3).join(' ⏐ '));
   await C.close();
 
-  /* ================= 7) 组内挪不出去 / 整组一起挪 ================= */
-  console.log('\n=== 7) 组内图层挪不出组；整组连着挪 ===');
-  await A.evaluate(id => window.__pick(id), idTop);
-  await A.evaluate(() => window.__clearToasts());
-  await A.evaluate(() => window.__clickIn('#btnLayerDown'));
-  await sleep(400);
-  ok('组内最下面那层点「下移」：明说不能靠它出组',
-    /已经在组的最下面/.test(await A.evaluate(() => window.__toasts())),
-    await A.evaluate(() => window.__toasts()));
-  ok('并且真的没挪（顺序没变）',
-    (await A.evaluate(() => window.__ids())).join() === [idLow, idTop].join(),
-    JSON.stringify(await A.evaluate(() => window.__ids())));
+  /* ================= 7) 拖动排序：整组连着挪 / 成员拖进拖出 ================= */
+  console.log('\n=== 7) 图层面板拖动排序（上移 / 下移按钮已去掉）===');
+  // 面板是自上而下的，engine.layers 是自下而上的。此刻的状态：
+  //   engine [idLow, idTop]，idTop 在组里 ⇒ 面板 == [组行, idTop, idLow]
+  ok('面板里已经没有上移 / 下移按钮了（改成拖动排序）',
+    await A.evaluate(() => !document.querySelector('#btnLayerUp') && !document.querySelector('#btnLayerDown')));
 
-  await A.evaluate(g => window.__pickGroup(g), gid);
-  await A.evaluate(() => window.__clickIn('#btnLayerDown'));   // 选中组 → 整组下移
-  ok('整组下移一格：组整个换到了下面（两组图层次序互换）',
+  // 7a) 把整组拖到最下面：落点「第 3 行的前面」= 列表末尾
+  await A.evaluate(g => window.ChaApp.dragLayerTo({ kind: 'group', id: g }, 3), gid);
+  ok('整组拖到最下面：整块换位',
     await waitBoth(A, B, k => window.__ids().join() === k, [idTop, idLow].join(), 6000),
     JSON.stringify(await A.evaluate(() => window.__ids())));
-  ok('挪完之后仍然连续', await A.evaluate(() => window.__contiguous()) && await B.evaluate(() => window.__contiguous()));
+  ok('块挪完之后仍然连续',
+    await A.evaluate(() => window.__contiguous()) && await B.evaluate(() => window.__contiguous()));
 
-  await A.evaluate(g => window.__pickGroup(g), gid);
-  await A.evaluate(() => window.__clickIn('#btnLayerUp'));     // 挪回来
-  ok('再挪回来', await waitBoth(A, B, k => window.__ids().join() === k, [idLow, idTop].join(), 6000));
-
-  // 现在组在下面（span [0,0]），上面那一层是散着的 → 「上移」会撞到组的上沿
-  await A.evaluate(g => window.__pickGroup(g), gid);
-  await A.evaluate(() => window.__clickIn('#btnLayerDown'));   // 到最底了
-  await waitBoth(A, B, k => window.__ids().join() === k, [idTop, idLow].join(), 6000);
-  await A.evaluate(id => window.__pick(id), idTop);
-  await A.evaluate(() => window.__clearToasts());
-  await A.evaluate(() => window.__clickIn('#btnLayerUp'));
-  await sleep(400);
-  ok('组内最上面那层点「上移」：同样明说',
-    /已经在组的最上面/.test(await A.evaluate(() => window.__toasts())),
-    await A.evaluate(() => window.__toasts()));
-  await A.evaluate(g => window.__pickGroup(g), gid);
-  await A.evaluate(() => window.__clickIn('#btnLayerUp'));
-  ok('把组挪回上面，回到初始次序',
+  // 7b) 再拖回最上面
+  await A.evaluate(g => window.ChaApp.dragLayerTo({ kind: 'group', id: g }, 0), gid);
+  ok('整组拖回最上面，回到初始次序',
     await waitBoth(A, B, k => window.__ids().join() === k, [idLow, idTop].join(), 6000));
+
+  // 7c) 把组外那一层拖进组（落在组行与第一个成员之间 = 面板第 1 行的前面）
+  await A.evaluate(id => window.ChaApp.dragLayerTo({ kind: 'layer', id: id }, 1), idLow);
+  ok('把散层拖进组：组内变成 2 层',
+    await waitBoth(A, B, () => window.__groups()[0].count === 2, null, 6000),
+    JSON.stringify(await groupsOf(A)));
+  ok('两层都指向这个组（两端一致）',
+    (await metaOf(A, idLow)).groupId === gid && (await metaOf(B, idLow)).groupId === gid);
+  ok('拖进组后仍然连续',
+    await A.evaluate(() => window.__contiguous()) && await B.evaluate(() => window.__contiguous()));
+
+  // 7d) 再把它拖到列表最下面（组外）
+  await A.evaluate(id => window.ChaApp.dragLayerTo({ kind: 'layer', id: id }, 3), idLow);
+  ok('拖出组：组内回到 1 层',
+    await waitBoth(A, B, () => window.__groups()[0].count === 1, null, 6000),
+    JSON.stringify(await groupsOf(A)));
+  ok('拖出组后 groupId 清空（两端）',
+    (await metaOf(A, idLow)).groupId === null && (await metaOf(B, idLow)).groupId === null);
+  ok('拖出组后次序回到初始',
+    await waitBoth(A, B, k => window.__ids().join() === k, [idLow, idTop].join(), 6000));
+  ok('拖出组后仍然连续',
+    await A.evaluate(() => window.__contiguous()) && await B.evaluate(() => window.__contiguous()));
+
+  // 7e) 真正的「整组连着挪」：此刻组里只有 1 个成员，block 退化成单层，
+  //     验不出「多个成员一起走」。补一层散层、把 idLow 塞回组里凑够 2 层，
+  //     再整组一次拖到最上面 —— 两个成员必须一起移动，且挪完仍然连续。
+  await A.evaluate(() => window.__clickIn('#btnAddLayer'));
+  ok('7e 前置：补一层散层',
+    await waitBoth(A, B, () => window.__nLayers() === 3, null, 6000),
+    '甲=' + (await A.evaluate(() => window.__nLayers())));
+  const idNew = (await A.evaluate(() => window.__ids()))[2];   // 新层加在数组末尾（画布最上）
+  // 此刻面板 = [idNew, 组行, idTop, idLow]；插到第 2 行前面 = 落进组里
+  await A.evaluate(id => window.ChaApp.dragLayerTo({ kind: 'layer', id: id }, 2), idLow);
+  ok('7e 前置：idLow 拖进组，组里凑够 2 层',
+    await waitBoth(A, B, () => window.__groups()[0] && window.__groups()[0].count === 2, null, 6000),
+    JSON.stringify(await groupsOf(A)));
+  const before7e = await A.evaluate(() => window.__ids());
+
+  await A.evaluate(g => window.ChaApp.dragLayerTo({ kind: 'group', id: g }, 0), gid);
+  ok('整组（2 层）拖到最上面：两个成员一起走',
+    await waitBoth(A, B, k => window.__ids().join() === k, [idNew, idTop, idLow].join(), 6000),
+    JSON.stringify(await A.evaluate(() => window.__ids())) + '  ← 之前 ' + JSON.stringify(before7e));
+  ok('整组挪完还是 2 层（没被拖散）',
+    (await A.evaluate(() => window.__groups()[0] && window.__groups()[0].count)) === 2);
+  ok('整组挪完仍然连续',
+    await A.evaluate(() => window.__contiguous()) && await B.evaluate(() => window.__contiguous()));
+  ok('整组挪完成员归属没丢（两端）',
+    (await metaOf(A, idLow)).groupId === gid && (await metaOf(B, idLow)).groupId === gid
+    && (await metaOf(A, idTop)).groupId === gid && (await metaOf(B, idTop)).groupId === gid);
+
+  // 7e 收尾：把补的那层删掉、idLow 拖出组，还原成 7d 结束时「2 层、组里 1 层」，
+  // 因为后面的用例（尤其 12/13 节）是按那个层数写死的。
+  await A.evaluate(id => window.ChaApp.dragLayerTo({ kind: 'layer', id: id }, 3), idLow);
+  ok('7e 收尾：idLow 拖回组外（组里回到 1 层）',
+    await waitBoth(A, B, () => window.__groups()[0] && window.__groups()[0].count === 1, null, 6000),
+    JSON.stringify(await groupsOf(A)));
+  await A.evaluate(id => window.__pick(id), idNew);
+  await A.evaluate(() => window.__clickIn('#btnLayerDel'));   // 图标按钮 → 会弹确认框
+  await A.waitForSelector('#confirmMask:not(.hidden)', { timeout: 6000 });
+  await A.click('#confirmYes');
+  ok('7e 收尾：补的那层删掉，回到 2 层',
+    await waitBoth(A, B, () => window.__nLayers() === 2, null, 6000),
+    '甲=' + (await A.evaluate(() => window.__nLayers())));
+  ok('7e 收尾：次序也回到 7d 结束时（idLow 在下）',
+    (await A.evaluate(() => window.__ids())).join() === [idLow, idTop].join(),
+    JSON.stringify(await A.evaluate(() => window.__ids())));
 
   /* ================= 8) 进 / 出组 ================= */
   console.log('\n=== 8) 进 / 出组 ===');

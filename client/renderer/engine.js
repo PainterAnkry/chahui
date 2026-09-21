@@ -1100,6 +1100,11 @@
       opacity: typeof meta.opacity === 'number' ? meta.opacity : 1,
       locked: !!meta.locked,
       alphaLock: !!meta.alphaLock,
+      // ★ v2.0.10：SAI2 锁定行里的另外两颗（锁定画笔 / 锁定移动）
+      drawLock: !!meta.drawLock,
+      moveLock: !!meta.moveLock,
+      // ★ 2.0.9：指定为选区样本（整份文档同时只有一层，服务端保证互斥）
+      selSample: !!meta.selSample,
       blend: P.BLEND_MODES.indexOf(meta.blend) >= 0 ? meta.blend : 'normal',
       groupId: meta.groupId || null,
       baseSeq: meta.baseSeq || 0,
@@ -1292,6 +1297,7 @@
       return {
         id: l.id, name: l.name, visible: l.visible, opacity: l.opacity,
         locked: l.locked, alphaLock: l.alphaLock, blend: l.blend,
+        drawLock: !!l.drawLock, moveLock: !!l.moveLock, selSample: !!l.selSample,
         groupId: l.groupId || null, baseSeq: l.baseSeq,
         hasMask: !!l.hasMask, maskEnabled: l.maskEnabled !== false, clip: !!l.clip
       };
@@ -1311,6 +1317,9 @@
         l.name = meta.name; l.visible = meta.visible; l.opacity = meta.opacity;
         l.locked = !!meta.locked;
         l.alphaLock = !!meta.alphaLock;
+        l.drawLock = !!meta.drawLock;
+        l.moveLock = !!meta.moveLock;
+        l.selSample = !!meta.selSample;
         l.blend = P.BLEND_MODES.indexOf(meta.blend) >= 0 ? meta.blend : 'normal';
         l.groupId = meta.groupId || null;
         l.clip = !!meta.clip;
@@ -1414,6 +1423,15 @@
       // 漏掉的话 Shift / Alt 会被静默丢掉，加选退化成「替换」。
       add: !!info.add,
       subtract: !!info.subtract,
+      // ★ 2.0.9 魔棒选项（照 SAI2 的魔棒面板）。这几项**只在本机用** ——
+      //   魔棒那一笔不上传、不进历史，所以服务端的白名单里不需要它们，
+      //   但 newStroke 这道白名单漏了，wandMask 就永远只能按默认值取样（和笔刷漏字段同一个坑）。
+      selMode: ['wrap', 'diff', 'diffAll'].indexOf(info.selMode) >= 0 ? info.selMode : 'wrap',
+      transTol: clamp(Number(info.transTol) || 0, 0, 255),
+      bleed: clamp(Number(info.bleed) || 0, 0, 20),
+      selSource: ['layer', 'sample', 'merged'].indexOf(info.selSource) >= 0 ? info.selSource : 'layer',
+      antiAlias: info.antiAlias !== false,
+      ignoreSel: !!info.ignoreSel,
       // 导入的 PS / CSP 笔刷：笔尖位图 + 落点间隔
       spacing: br.spacing,
       tip: br.tip,
@@ -1963,6 +1981,13 @@
 
   /** 显示用的那份图层画布（没有开协作视图时就是文档本身，零开销） */
   CanvasEngine.prototype.displayCanvas = function (layer) {
+    // 变换中的那一层必须看**活画布**，不能走 viewCanvas。
+    // 为什么：beginTransform 把选区那块像素「拿起来」了，原地是直接挖空的 ——
+    // 这份状态只在 layer.canvas 上，既不在 baseImage 里、也不在笔迹历史里。
+    // 而开了「他人笔触淡化」时 viewCanvas 是从 baseImage + 笔迹重建的，
+    // 重建等于把挖掉的那块按旧底图补回来：屏幕上就变成「原位置残留一份、
+    // 浮层上又跟着鼠标一份」，松手确认后才消失。
+    if (this.transform && this.transform.layerId === layer.id) return layer.canvas;
     if (!this.dimOn()) return layer.canvas;
     this.syncView(layer);
     return layer.viewCanvas || layer.canvas;
@@ -2456,7 +2481,12 @@
     if (!this.selection) {
       var c = mkCanvas(this.width, this.height, false);
       var t = mkCanvas(this.width, this.height, false);
-      this.selection = { canvas: c.canvas, ctx: c.ctx, tint: t.canvas, tintCtx: t.ctx, active: false, bbox: null };
+      this.selection = {
+        canvas: c.canvas, ctx: c.ctx, tint: t.canvas, tintCtx: t.ctx, active: false, bbox: null,
+        // ★ 2.0.9：蚂蚁线要沿**选区的真实形状**走，这两块缓存就是干这个的
+        //   band = 蒙版的 1px 轮廓带；ants = 「轮廓带 ∩ 斜条纹」的成品（每帧重画一小块）
+        band: null, bandDirty: true, ants: null, antsCtx: null, antsKey: ''
+      };
     }
     return this.selection;
   };
@@ -2519,6 +2549,8 @@
     var layer = this.activeLayer();
     if (!layer) return null;
     if (layer.locked) { this.emit('transformError', { message: '图层「' + layer.name + '」已锁定' }); return null; }
+    // ★ v2.0.10：锁定移动 = 这一层不能整体搬走 / 变形（SAI2 锁定行里那个十字箭头图标）
+    if (layer.moveLock) { this.emit('transformError', { message: '图层「' + layer.name + '」锁定了移动' }); return null; }
 
     var hasSel = this.hasSelection();
     var rect;
@@ -2589,6 +2621,11 @@
         upToSeq: this.seq
       };
       if (layer) this.applyTransformResult(t.layerId, composed);
+      // ★ 用户报的 bug：变换确定之后图形移走了，**选区还留在原地**。
+      //   选区是「被拿起来的那一块」的蒙版，内容走到哪它就该跟到哪 —— 否则下一步
+      //   填色 / 再变换 / 擦除都会作用在空掉的老位置上（看着像「选区坏了」）。
+      //   跟完之后旧的蚂蚁线不会留在原地，包围盒也跟着刷新。
+      if (this.hasSelection()) this.followSelection(t);
     } else if (layer) {
       clearCtx(layer.ctx, this.width, this.height);
       layer.ctx.drawImage(t.saved, 0, 0);
@@ -2603,6 +2640,42 @@
     this.invalidate();
     this.emit('transform', { active: false, committed: !!commit, result: result });
     return result;
+  };
+
+  /**
+   * ★ 变换确定之后，让**选区跟着内容一起走**。
+   *
+   * 做法：把选区蒙版里「被拿起来的那一块」（= t.rect 那块）抠出来当成浮层，
+   * 用**同一条变换**（同一组四边形 / 网格控制点）渲到文档尺寸的画布上，
+   * 再拿它替换旧选区 —— 形状（含旋转 / 斜切 / 网格变形）和位置都跟着内容。
+   *
+   * 为什么不用「把旧选区整体平移」这种省事的办法：变形可以是网格变形 / 扭曲 / 翻转，
+   * 平移根本表达不了；而 t.render() 本来就是「把这块 buf 按当前变换画出来」，
+   * 换掉 buf 就能原样复用，不会和变换本身算出两套不一致的结果。
+   */
+  CanvasEngine.prototype.followSelection = function (t) {
+    var s = this.selection;
+    if (!s || !s.active || !t) return false;
+    var r = t.rect;
+    if (!r || r.w < 1 || r.h < 1) return false;
+    var sel = mkCanvas(r.w, r.h, false);
+    sel.ctx.drawImage(s.canvas, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
+    var out = mkCanvas(this.width, this.height, false);
+    var buf0 = t.buf;
+    t.buf = sel.canvas;
+    try {
+      t.render(out.ctx);
+    } catch (e) {
+      t.buf = buf0;
+      return false;
+    }
+    t.buf = buf0;
+    clearCtx(s.ctx, this.width, this.height);
+    s.ctx.drawImage(out.canvas, 0, 0);
+    s.active = true;
+    this.refreshSelectionTint();          // 染色层与包围盒一起刷新（蚂蚁线跟着走）
+    this.emit('selection', { active: true });
+    return true;
   };
 
   /**
@@ -2706,13 +2779,16 @@
     var mode = selComposite(stroke);
 
     if (isRegionSelect(stroke)) {
+      // ★ 「忽略已选择的区域」要的是**替换之前**那张选区蒙版 —— 下面那句 clearCtx 会先把它清掉，
+      //   等 wandMask 再去读就只能读到一张空蒙版（选项看着像没生效）。
+      var prevSel = (stroke.tool === 'wand' && stroke.ignoreSel) ? this.selectionMaskData() : null;
       if (mode === 'copy') clearCtx(s.ctx, this.width, this.height);
       s.ctx.save();
       s.ctx.setTransform(1, 0, 0, 1, 0, 0);
       s.ctx.globalAlpha = 1;
       s.ctx.globalCompositeOperation = mode === 'copy' ? 'source-over' : mode;
       s.ctx.fillStyle = '#ffffff';
-      this.paintSelectRegion(s.ctx, stroke);
+      this.paintSelectRegion(s.ctx, stroke, prevSel);
       s.ctx.globalCompositeOperation = 'source-over';
       s.ctx.restore();
     } else {
@@ -2745,7 +2821,7 @@
   };
 
   /** 把一次性选区工具（框选 / 套索 / 魔棒）的结果填进给定 ctx */
-  CanvasEngine.prototype.paintSelectRegion = function (ctx, stroke) {
+  CanvasEngine.prototype.paintSelectRegion = function (ctx, stroke, prevSel) {
     var pts = stroke.points || [];
     if (!pts.length) return;
     if (stroke.tool === 'marquee') {
@@ -2766,78 +2842,161 @@
       return;
     }
     if (stroke.tool === 'wand') {
-      var mask = this.wandMask(pts[0][0], pts[0][1], stroke.tolerance == null ? 32 : stroke.tolerance);
+      var mask = this.wandMask(pts[0][0], pts[0][1], {
+        // ★ 2.0.9：选项全部来自 SAI2 那张魔棒面板（app 里的 S.wand → 笔迹字段 → 这里）
+        mode: stroke.selMode || 'wrap',
+        transTol: stroke.transTol,
+        diffTol: stroke.tolerance,
+        bleed: stroke.bleed,
+        source: stroke.selSource || 'layer',
+        activeLayerId: stroke.layerId,
+        aa: stroke.antiAlias !== false,
+        ignore: !!stroke.ignoreSel,
+        // 「忽略已选择的区域」用的那张旧蒙版（由 applySelectionStroke 在 clearCtx 之前抓好递进来）
+        prevSel: prevSel || null
+      });
       if (mask) ctx.drawImage(mask, 0, 0);
     }
   };
 
   /**
-   * 魔棒：从 (sx,sy) 出发，按色差在**合并后的画面**上做扫描线洪水填充，
-   * 结果画成一张蒙版 canvas 返回（白 = 选中）。
-   * 取样用合并画面而不是当前图层：用户点是「看到的颜色」，这样最符合直觉。
+   * 魔棒的取样底图：到底从哪一份像素里读颜色。
+   *   layer  = 当前图层自己的像素
+   *   sample = 标了「指定为选区样本」的那些图层（服务端保证同时只有一层）
+   *   merged = 拼合图像（所有可见图层叠起来）
+   *
+   * 三种都不铺画布底色：**透明就是「这里什么都没有」**，正是「被线条包围的透明区域」
+   * 那一种取样模式要认的东西。铺上白底的话整张图都是不透明的，那种模式就永远选不出东西。
    */
-  CanvasEngine.prototype.wandMask = function (sx, sy, tolerance) {
+  CanvasEngine.prototype.wandSourceCanvas = function (source, activeLayerId) {
+    if (source === 'sample') {
+      var ids = this.layers
+        .filter(function (l) { return l.selSample && l.visible; })
+        .map(function (l) { return l.id; });
+      if (ids.length) return this.renderDocument({ transparentBackground: true, onlyLayers: ids });
+      source = 'layer';      // 没标样本层 → 退回当前图层（app 那边会先提示一句）
+    }
+    if (source === 'layer') {
+      var l = activeLayerId && this.getLayer(activeLayerId) ? this.getLayer(activeLayerId) : this.activeLayer();
+      if (l) return this.renderDocument({ transparentBackground: true, onlyLayer: l.id });
+    }
+    return this.renderDocument({ transparentBackground: true });
+  };
+
+  /** 当前选区蒙版的像素（「忽略已选择的区域」要用） */
+  CanvasEngine.prototype.selectionMaskData = function () {
+    var s = this.selection;
+    if (!s || !s.active) return null;
+    try { return s.ctx.getImageData(0, 0, this.width, this.height).data; } catch (e) { return null; }
+  };
+
+  /**
+   * 魔棒：按选项取一块选区，返回一张「白 = 选中」的蒙版 canvas。
+   *
+   * 三种取样模式（SAI2 原文）：
+   *   wrap    「被线条包围的透明区域」：从点的位置在**透明像素**里做洪水填充 ——
+   *           线条（不透明像素）天然就是边界，于是选中被线围住的那一整块。
+   *           多透明才算透明，由「透明容差范围」定（0 = 只有全透明算，255 = 什么都不算）。
+   *   diff    「色差范围内的区域」：只取**和点中的颜色相近且连成一片**的那块。
+   *   diffAll 「色差范围内的全部像素」：不连片 —— 整张图上和点中颜色相近的像素全都要。
+   *
+   * 「防止溢出范围」(bleed) 把结果往外长 N 像素：线稿的抗锯齿边缘是半透明的，
+   * 不长出去的话填色 / 变换会在边上留一圈白边（SAI 那边就是为了这个才有的参数）。
+   * 「消除锯齿」把硬边的 1-bit 蒙版做一次极小的模糊，让选区边缘是渐变的。
+   * 「忽略已选择的区域」把已经选中的像素当成边界，不再吃进来。
+   */
+  CanvasEngine.prototype.wandMask = function (sx, sy, opt) {
+    opt = opt || {};
     var W = this.width, H = this.height;
     var x0 = Math.round(sx), y0 = Math.round(sy);
     if (x0 < 0 || y0 < 0 || x0 >= W || y0 >= H) return null;
 
-    var doc = this.renderDocument({});
-    var d = doc.ctx.getImageData(0, 0, W, H).data;
+    var src = this.wandSourceCanvas(opt.source, opt.activeLayerId);
+    var d = src.ctx.getImageData(0, 0, W, H).data;
     var i0 = (y0 * W + x0) * 4;
     var r0 = d[i0], g0 = d[i0 + 1], b0 = d[i0 + 2], a0 = d[i0 + 3];
-    var tol = Math.max(1, tolerance || 32);
-    // 色差按「最大分量差」算，再留一点余量给半透明边缘
-    var lim = tol * 2.55;
+
+    var mode = opt.mode === 'diff' || opt.mode === 'diffAll' ? opt.mode : 'wrap';
+    // 透明容差：0..255（默认 19，和 SAI2 出场值一样）
+    var transTol = Math.max(0, Math.min(255, opt.transTol == null ? 19 : Math.round(opt.transTol)));
+    // 色差：按「最大分量差」算，1..120 → 0..255
+    var lim = Math.max(1, Math.min(120, opt.diffTol == null ? 32 : opt.diffTol)) * 2.55;
+    var selData = opt.ignore ? (opt.prevSel || this.selectionMaskData()) : null;
+
+    function blocked(p) {
+      return !!selData && selData[p * 4 + 3] > 127;
+    }
+    function match(p) {
+      var i = p * 4;
+      if (selData && blocked(p)) return false;
+      if (mode === 'wrap') return d[i + 3] <= transTol;
+      var m = Math.max(
+        Math.abs(d[i] - r0), Math.abs(d[i + 1] - g0),
+        Math.abs(d[i + 2] - b0), Math.abs(d[i + 3] - a0));
+      return m <= lim;
+    }
+
+    var bits = new Uint8Array(W * H);
+    if (mode === 'diffAll') {
+      // 「全部像素」：不连片，整张图扫一遍就完事
+      for (var p = 0; p < bits.length; p++) if (match(p)) bits[p] = 1;
+    } else {
+      if (!match(y0 * W + x0)) return null;     // 点在不匹配的地方 → 这一下什么都选不中
+      var seen = new Uint8Array(W * H);
+      var stack = [x0, y0];
+      while (stack.length) {
+        var cy = stack.pop(), cx = stack.pop();
+        if (cy < 0 || cy >= H) continue;
+        var row = cy * W;
+        var xl = cx;
+        while (xl >= 0 && !seen[row + xl] && match(row + xl)) xl--;
+        xl++;
+        var xr = cx;
+        while (xr < W && !seen[row + xr] && match(row + xr)) xr++;
+        xr--;
+        if (xl > xr) continue;
+        for (var x = xl; x <= xr; x++) { seen[row + x] = 1; bits[row + x] = 1; }
+        // 上下两行找种子
+        for (var dy = -1; dy <= 1; dy += 2) {
+          var ny = cy + dy;
+          if (ny < 0 || ny >= H) continue;
+          var nrow = ny * W;
+          var inRun = false;
+          for (var nx = xl; nx <= xr; nx++) {
+            var ok = !seen[nrow + nx] && match(nrow + nx);
+            if (ok && !inRun) { stack.push(nx, ny); inRun = true; }
+            else if (!ok) inRun = false;
+          }
+        }
+      }
+    }
+
+    // 防止溢出：把区域整体往外长 N 像素（分离式最大值滤波，和油漆桶共用一份实现）
+    var bleed = Math.max(0, Math.min(20, Math.round(opt.bleed || 0)));
+    if (bleed > 0) bits = growMask(bits, W, H, bleed);
 
     var out = document.createElement('canvas');
     out.width = W; out.height = H;
     var oc = out.getContext('2d');
     var img = oc.createImageData(W, H);
     var od = img.data;
-    var seen = new Uint8Array(W * H);
-
-    function match(i) {
-      if (d[i + 3] === 0 && a0 === 0) return true;
-      var dr = d[i] - r0, dg = d[i + 1] - g0, db = d[i + 2] - b0, da = d[i + 3] - a0;
-      var m = Math.max(Math.abs(dr), Math.abs(dg), Math.abs(db), Math.abs(da));
-      return m <= lim;
-    }
-
-    var stack = [x0, y0];
-    while (stack.length) {
-      var cy = stack.pop(), cx = stack.pop();
-      if (cy < 0 || cy >= H) continue;
-      var row = cy * W;
-      var xl = cx;
-      while (xl >= 0 && !seen[row + xl] && match((row + xl) * 4)) xl--;
-      xl++;
-      var xr = cx;
-      while (xr < W && !seen[row + xr] && match((row + xr) * 4)) xr++;
-      xr--;
-      if (xl > xr) continue;
-      for (var x = xl; x <= xr; x++) {
-        var p = row + x;
-        seen[p] = 1;
-        var o = p * 4;
-        od[o] = 255; od[o + 1] = 255; od[o + 2] = 255; od[o + 3] = 255;
-      }
-      // 上下两行找种子
-      for (var dy = -1; dy <= 1; dy += 2) {
-        var ny = cy + dy;
-        if (ny < 0 || ny >= H) continue;
-        var nrow = ny * W;
-        var inRun = false;
-        for (var nx = xl; nx <= xr; nx++) {
-          var np = nrow + nx;
-          var ok = !seen[np] && match(np * 4);
-          if (ok && !inRun) { stack.push(nx, ny); inRun = true; }
-          else if (!ok) inRun = false;
-        }
-      }
+    for (var q = 0; q < bits.length; q++) {
+      if (!bits[q]) continue;
+      var o = q * 4;
+      od[o] = 255; od[o + 1] = 255; od[o + 2] = 255; od[o + 3] = 255;
     }
     oc.putImageData(img, 0, 0);
-    // 魔棒选出来的是硬边 1-bit 蒙版，做一点点羽化外的「扩大」由 expand 参数控制，
-    // 这里不做，保持和 SAI 一样的硬边选区。
+
+    // 消除锯齿：硬边蒙版过一次极小的模糊，边缘就带上渐变（SAI2 那颗勾选就是这个意思）
+    if (opt.aa) {
+      var soft = document.createElement('canvas');
+      soft.width = W; soft.height = H;
+      var sc = soft.getContext('2d');
+      sc.filter = 'blur(0.7px)';
+      sc.drawImage(out, 0, 0);
+      sc.filter = 'none';
+      return soft;
+    }
     return out;
   };
 
@@ -2846,6 +3005,8 @@
     var s = this.selection;
     if (!s) return;
     clearCtx(s.tintCtx, this.width, this.height);
+    // ★ 2.0.9：蒙版变了 → 轮廓带（蚂蚁线用）作废，下次画 overlay 时重算
+    s.bandDirty = true;
     if (!s.active) { s.bbox = null; return; }
     s.tintCtx.setTransform(1, 0, 0, 1, 0, 0);
     s.tintCtx.drawImage(s.canvas, 0, 0);
@@ -2854,6 +3015,130 @@
     s.tintCtx.fillRect(0, 0, this.width, this.height);
     s.tintCtx.globalCompositeOperation = 'source-over';
     s.bbox = this.selectionBBox();
+  };
+
+  /* ---------------- ★ 2.0.9：选区轮廓（蚂蚁线）沿真实形状走 ----------------
+   *
+   * 以前这里是「给选区的包围盒描一圈虚线」（strokeRect(bbox)）——
+   * 套索套出来一个圆，屏幕上却是一个虚线方框。用户的原话：
+   *   「选区选完是什么形状就是什么形状，比如套索画个圈，选区外围就应该是虚线，
+   *     不应该是虚线方框」。
+   *
+   * 做法分两步，都不需要去追轮廓线（复杂形状 / 带洞 / 散块都能吃）：
+   *   ① buildSelectionBand：蒙版 **减去**「四个方向各平移 1px 的蒙版」——
+   *      剩下的就是「邻居里有没选中的像素」的那一圈，也就是 1px 宽的轮廓带。
+   *   ② drawSelectionAnts：把一块会随时间平移的斜条纹图案用 source-in 裁进这条带，
+   *      白 / 深两色交替且**都不透明** → 看上去就是沿着选区边缘爬的蚂蚁线。
+   *      只合成 bbox 那一小块，所以每帧的开销很小。
+   */
+
+  /** 斜条纹图案（按屏幕像素算尺寸，缩放变了换一块；缓存起来别每帧新建） */
+  var antsTiles = {};
+  function antsTile(cell) {
+    var k = String(cell);
+    if (antsTiles[k]) return antsTiles[k];
+    var t = document.createElement('canvas');
+    t.width = cell; t.height = cell;
+    var c = t.getContext('2d');
+    c.fillStyle = '#ffffff';
+    c.fillRect(0, 0, cell, cell);
+    c.save();
+    c.translate(cell / 2, cell / 2);
+    c.rotate(-Math.PI / 4);
+    c.fillStyle = 'rgba(20,24,32,.95)';
+    // 45° 等宽条纹，间距 = cell*√2（投到 x/y 上正好等于 cell）→ 平铺无缝
+    var span = cell * Math.SQRT2;
+    for (var i = -2; i <= 2; i++) c.fillRect(i * span, -span, span / 2, span * 3);
+    c.restore();
+    antsTiles[k] = t;
+    return t;
+  }
+
+  /** 轮廓带的粗细（文档像素）：按**屏幕**算 —— 缩得越小，腐蚀半径越大，
+   *  这样不管放大到 400% 还是缩到 20%，屏幕上那条蚂蚁线都差不多粗细（PS 就是这个手感）。 */
+  CanvasEngine.prototype.selectionBandRadius = function () {
+    return Math.max(1, Math.min(4, Math.round(1 / Math.max(0.05, this.scale || 1))));
+  };
+
+  CanvasEngine.prototype.buildSelectionBand = function () {
+    var s = this.selection;
+    if (!s) return;
+    var W = this.width, H = this.height;
+    if (!s.band) s.band = mkCanvas(W, H, false);
+    if (!s.bandTmp) s.bandTmp = mkCanvas(W, H, false);
+    if (!s.bandTmp2) s.bandTmp2 = mkCanvas(W, H, false);
+    var r = this.selectionBandRadius();
+    // ① 反复求「腐蚀」r 次：每一步 = 四个方向各平移 1px 的蒙版求交集 ——
+    //    留下的就是「四邻都被选中」的内部像素（贴画布边的那一圈会自然出局，
+    //    语义正好：边缘像素的邻居在画布外 = 没选中 → 它属于轮廓）。
+    var inC = s.canvas;
+    for (var k = 0; k < r; k++) {
+      var out = (k % 2 === 0) ? s.bandTmp : s.bandTmp2;
+      var oc = out.ctx;
+      clearCtx(oc, W, H);
+      oc.setTransform(1, 0, 0, 1, 0, 0);
+      oc.globalAlpha = 1;
+      oc.globalCompositeOperation = 'source-over';
+      oc.drawImage(inC, 1, 0);
+      oc.globalCompositeOperation = 'destination-in';
+      oc.drawImage(inC, -1, 0);
+      oc.drawImage(inC, 0, 1);
+      oc.drawImage(inC, 0, -1);
+      oc.globalCompositeOperation = 'source-over';
+      inC = out.canvas;
+    }
+    // ② 蒙版 − 腐蚀 = r 像素宽的轮廓带
+    var bc = s.band.ctx;
+    clearCtx(bc, W, H);
+    bc.setTransform(1, 0, 0, 1, 0, 0);
+    bc.globalAlpha = 1;
+    bc.globalCompositeOperation = 'source-over';
+    bc.drawImage(s.canvas, 0, 0);
+    bc.globalCompositeOperation = 'destination-out';
+    bc.drawImage(inC, 0, 0);
+    bc.globalCompositeOperation = 'source-over';
+    s.bandDirty = false;
+    s.bandRadius = r;
+  };
+
+  /** 把蚂蚁线画到 overlay 上（沿真实形状，不是包围盒） */
+  CanvasEngine.prototype.drawSelectionAnts = function (c) {
+    var s = this.selection;
+    if (!s || !s.active) return;
+    if (!s.bbox) return;
+    // 蒙版变了（bandDirty）或者缩放变了（粗细跟着屏幕走）都要重算轮廓
+    if (s.bandDirty || !s.band || s.bandRadius !== this.selectionBandRadius()) this.buildSelectionBand();
+    var bb = s.bbox;
+    var pad = 3;
+    var x = Math.max(0, Math.floor(bb.x) - pad);
+    var y = Math.max(0, Math.floor(bb.y) - pad);
+    var w = Math.min(this.width - x, Math.ceil(bb.w) + pad * 2);
+    var h = Math.min(this.height - y, Math.ceil(bb.h) + pad * 2);
+    if (w <= 0 || h <= 0) return;
+    // 屏幕上看着差不多大的斜条纹：cell 是**文档像素**，除以 scale 换算回屏幕
+    var cell = Math.max(4, Math.min(24, Math.round(8 / Math.max(0.05, this.scale || 1))));
+    if (!s.ants || s.ants.width !== w || s.ants.height !== h) {
+      s.ants = document.createElement('canvas');
+      s.ants.width = w; s.ants.height = h;
+      s.antsCtx = s.ants.getContext('2d');
+    }
+    var ac = s.antsCtx;
+    ac.setTransform(1, 0, 0, 1, 0, 0);
+    ac.globalAlpha = 1;
+    ac.globalCompositeOperation = 'source-over';
+    clearCtx(ac, w, h);
+    ac.drawImage(s.band.canvas, x, y, w, h, 0, 0, w, h);
+    ac.globalCompositeOperation = 'source-in';
+    var pat = ac.createPattern(antsTile(cell), 'repeat');
+    // 条纹随时间平移 = 蚂蚁在爬（大约每 300ms 走一格）
+    var phase = ((Date.now() / 300) % 1) * cell;
+    if (pat && pat.setTransform && typeof DOMMatrix === 'function') {
+      try { pat.setTransform(new DOMMatrix([1, 0, 0, 1, phase, phase])); } catch (e) { /* 老浏览器：不爬也行 */ }
+    }
+    ac.fillStyle = pat;
+    ac.fillRect(0, 0, w, h);
+    ac.globalCompositeOperation = 'source-over';
+    c.drawImage(s.ants, x, y);
   };
 
   /**
@@ -3134,6 +3419,8 @@
     }
     var includeActive = opts.includeActive !== false;
     var tmp = mkCanvas(w, h, false);
+    // 「只要这几层」：魔棒取样来源 = 指定为选区样本的图层时用（onlyLayer 只认一层）
+    var only = opts.onlyLayers || null;
     // 「只要一层」的调用（导出某层 / 合并 / 复制）不套组：它们要的是那一层自己的像素，
     // 把组的不透明度乘进来反而是错的。
     var useGroups = !opts.onlyLayer && !opts.rawLayer;
@@ -3144,13 +3431,16 @@
       var unit = units[u];
       if (unit.group) {
         if (!unit.group.visible) continue;
-        var mem = unit.layers.filter(function (x) { return x.visible; });
+        var mem = unit.layers.filter(function (x) {
+          return x.visible && (!only || only.indexOf(x.id) >= 0);
+        });
         if (!mem.length) continue;
         this.renderGroupInto(out.ctx, unit.group, mem, tmp, includeActive);
         continue;
       }
       var l = unit.layers[0];
       if (opts.onlyLayer && opts.onlyLayer !== l.id) continue;
+      if (only && only.indexOf(l.id) < 0) continue;
       if (!l.visible && !opts.onlyLayer) continue;
       // 图层覆盖（滤镜预览）这里也要认，否则会出现「画布上是预览效果、
       // 导出 / 导航器却还是原图」，两边对不上。
@@ -3253,6 +3543,8 @@
       layer.maskBase = null;
       layer.maskSnapshot = null;
       this.fillMaskWhite(layer);
+      // ★ v2.0.10：刚建出来的蒙版也要刷新那张缩略图（否则面板上是一块空白占位）
+      this.markLayerThumb(layer);
     }
     return { canvas: layer.maskCanvas, ctx: layer.maskCtx };
   };
@@ -3370,6 +3662,8 @@
       ctx.globalCompositeOperation = 'source-over';
     }
     this.releaseScratch(sc.canvas);
+    // ★ v2.0.10：蒙版改了就刷新那张蒙版缩略图（面板上要能看出遮住了哪块）
+    this.markLayerThumb(layer);
     if (!silent) { this.baseDirty = true; this.baseKey = ''; }
   };
 
@@ -3377,6 +3671,7 @@
   CanvasEngine.prototype.setMaskImage = function (layer, dataUrl) {
     var self = this;
     if (!layer) return;
+    this.markLayerThumb(layer);      // ★ v2.0.10：蒙版缩略图跟着刷新
     if (!dataUrl) {
       layer.maskBase = null;
       layer.hasMask = true;
@@ -3551,6 +3846,18 @@
           cx.fillStyle = '#fff'; cx.fillRect(0, 0, 60, 38);
           cx.drawImage(l.canvas, 0, 0, 60, 38);
           l.thumb = c.toDataURL('image/png');
+          // ★ v2.0.10：蒙版也有自己的缩略图（SAI2 在图层缩略图右边挂一张）——
+          //   没有它的话，面板上根本看不出这一层有没有蒙版、遮住了哪一块。
+          if (l.hasMask && l.maskCanvas) {
+            var mc = document.createElement('canvas');
+            mc.width = 60; mc.height = 38;
+            var mx = mc.getContext('2d');
+            mx.fillStyle = '#fff'; mx.fillRect(0, 0, 60, 38);
+            mx.drawImage(l.maskCanvas, 0, 0, 60, 38);
+            l.maskThumb = mc.toDataURL('image/png');
+          } else {
+            l.maskThumb = '';
+          }
         } catch (e) { /* ignore */ }
       });
       self.emit('thumbs', self.layers);
@@ -3729,26 +4036,14 @@
       c.restore();
     }
 
-    // 选区提示：半透明蓝 + 走动的虚线包围盒（蚂蚁线）
+    // 选区提示：半透明蓝 + **沿选区真实形状**的走动虚线（蚂蚁线）
     // 变换中不画：那时选区的像素已经被「拿起来」了，再罩一层蓝色只会挡住变换预览
     if (this.hasSelection() && !this.replayMode && !this.transform) {
       if (!this.selection.bbox) this.refreshSelectionTint();
       c.globalAlpha = 1;
       c.drawImage(this.selection.tint, 0, 0);
-      var bb = this.selection.bbox;
-      if (bb) {
-        c.save();
-        c.setLineDash([6 / this.scale, 4 / this.scale]);
-        c.lineDashOffset = -(this.selection.dashOffset || 0) / this.scale;
-        // 先描一圈白底再叠黑虚线：不管底下是深是浅都看得见（SAI / PS 的老办法）
-        c.lineWidth = 2.6 / this.scale;
-        c.strokeStyle = 'rgba(255,255,255,.95)';
-        c.strokeRect(bb.x, bb.y, bb.w, bb.h);
-        c.lineWidth = 1.4 / this.scale;
-        c.strokeStyle = 'rgba(20,24,32,.95)';
-        c.strokeRect(bb.x, bb.y, bb.w, bb.h);
-        c.restore();
-      }
+      // ★ 2.0.9：套索套出来的圈就是圈的虚线，不再是包围盒那个方框
+      this.drawSelectionAnts(c);
     }
 
     // 图像变换：浮层预览 + 变换框 + 手柄
@@ -3776,9 +4071,11 @@
         var a = pv.points[0], b = pv.points[pv.points.length - 1];
         c.rect(Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1]));
       } else {
+        // ★ 2.0.9：套索拖拽时**只画那条线**，绝不画回程 —— 和 PS 一样，
+        //   松手才闭合成圈（闭合那一刻的选区由 endStroke → applySelectionStroke 落下来）。
+        //   原来这里 closePath()，于是「一来就出现一个圈」，用户原话：「应该是画线连接后再出现圈」。
         c.moveTo(pv.points[0][0], pv.points[0][1]);
         for (var li = 1; li < pv.points.length; li++) c.lineTo(pv.points[li][0], pv.points[li][1]);
-        c.closePath();
       }
       c.stroke();
       c.strokeStyle = 'rgba(20,24,32,.95)';

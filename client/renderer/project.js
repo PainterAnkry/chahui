@@ -18,7 +18,7 @@
  *     doc: {
  *       width, height, background,
  *       groups: [{ id, name, visible, opacity, blend, collapsed }],
- *       layers: [{ name, visible, opacity, locked, alphaLock, blend, groupId,
+ *       layers: [{ name, visible, opacity, locked, alphaLock, drawLock, moveLock, blend, groupId,
  *                  clip, maskEnabled, maskPng, png }]
  *     }
  *   }
@@ -127,6 +127,9 @@
         opacity: isNum(list[i].opacity) ? list[i].opacity : 1,
         locked: !!list[i].locked,
         alphaLock: !!list[i].alphaLock,
+        drawLock: !!list[i].drawLock,
+        moveLock: !!list[i].moveLock,
+        selSample: !!list[i].selSample,
         blend: list[i].blend || 'normal',
         groupId: isGroupId(list[i].groupId) ? list[i].groupId : null,
         clip: !!list[i].clip,
@@ -235,6 +238,9 @@
         opacity: isNum(l.opacity) ? Math.max(0, Math.min(1, l.opacity)) : 1,
         locked: !!l.locked,
         alphaLock: !!l.alphaLock,
+        drawLock: !!l.drawLock,
+        moveLock: !!l.moveLock,
+        selSample: !!l.selSample,
         blend: isStr(l.blend) ? l.blend : 'normal',
         groupId: groups.some(function (g) { return g.id === l.groupId; }) ? l.groupId : null,
         clip: !!l.clip,

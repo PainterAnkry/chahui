@@ -86,15 +86,32 @@ function pickSpeed(v) {
 }
 
 /**
+ * ★ v17：接龙玩法（chainPlay）→ 只认 G.CHAIN_PLAYS 里的 id（classic / relay）。
+ * 缺省 / 非法一律回默认 classic —— 老客户端不发这个字段时行为与 v16 完全一致。
+ */
+function pickChainPlay(v) {
+  return G.CHAIN_PLAYS.indexOf(v) >= 0 ? v : G.CHAIN_PLAY_DEFAULT;
+}
+
+/**
+ * ★ v17：传词接龙的「传几轮」→ [1, 4]，缺省 / 非法 = 默认 2。
+ * 0 不是合法轮数（一轮都不传就没得玩了），所以按 rounds 那一套走 intOrDefault。
+ */
+function pickRelayRounds(v) {
+  return intOrDefault(v, G.CHAIN_RELAY_ROUNDS_DEFAULT, G.CHAIN_RELAY_ROUNDS_MIN, G.CHAIN_RELAY_ROUNDS_MAX);
+}
+
+/**
  * GAME_START / GAME_PREFS 认的全部字段（按 mode 取用）。
- * **顺序与形状就是这个顺序** —— pendingGame 的 14 个字段 + by/at 由 applyGamePrefs 补上。
+ * **顺序与形状就是这个顺序** —— pendingGame 的字段 + by/at 由 applyGamePrefs 补上。
  */
 const GAME_PREF_FIELDS = [
   'mode', 'theme', 'drawSeconds',
   // classic
   'rounds', 'repickLimit', 'roundEndSeconds',
-  // chain
-  'chainLength', 'writeSeconds', 'guessSeconds', 'revealSeconds', 'voteSeconds', 'replaySpeed',
+  // chain（v17：chainPlay = 接龙 / 传词接龙；relayRounds 只在传词玩法下用）
+  'chainLength', 'chainPlay', 'relayRounds',
+  'writeSeconds', 'guessSeconds', 'revealSeconds', 'voteSeconds', 'replaySpeed',
   // skin
   'nightSeconds', 'dawnSeconds', 'talkSeconds'
 ];
@@ -139,6 +156,10 @@ function normalizeGamePrefs(src) {
     // 注意 [3, 16] 只是**面板档位**的上限：真正的链长上限是 2 × min(人数, CHAIN_LENGTH_MAX)，
     // 由 chain.start()/beginGame() 按当时的人数再夹一次（链比 2×人数 长就会绕第二圈）。
     chainLength: intOrZero(src.chainLength, G.CHAIN_LENGTH_MIN, G.CHAIN_LENGTH_MAX),
+    // ★ v17：接龙玩法（classic = 猜完自己画 / relay = 猜完传给下家画）+ 传词接龙的轮数。
+    //   relay 下链长由轮数决定（1 + 轮数 × 人数），chainLength 那一项会被忽略。
+    chainPlay: pickChainPlay(src.chainPlay),
+    relayRounds: pickRelayRounds(src.relayRounds),
     writeSeconds: secOrZero(src.writeSeconds),
     guessSeconds: secOrZero(src.guessSeconds),
     revealSeconds: secOrZero(src.revealSeconds),
@@ -217,6 +238,17 @@ function setupOptions() {
       max: G.CHAIN_LENGTH_MAX,        // 是**人数**的封顶（真实链长上限 = 它的 2 倍）
       perPlayer: 2                    // 默认 / 上限的倍数：链长 = perPlayer × 人数
     },
+    // ★ v17：接龙玩法（classic / relay）与传词接龙的轮数档位 —— 前端照着渲染那两行。
+    //   relay 的链长不在面板上选：链长 = 1 + 轮数 × 人数（服务端算）。
+    chainPlay: {
+      list: G.CHAIN_PLAYS.slice(),
+      default: G.CHAIN_PLAY_DEFAULT
+    },
+    relayRounds: {
+      min: G.CHAIN_RELAY_ROUNDS_MIN,
+      max: G.CHAIN_RELAY_ROUNDS_MAX,
+      default: G.CHAIN_RELAY_ROUNDS_DEFAULT
+    },
     repick: G.SETUP_REPICK.slice(),
     rounds: rounds,
     // ★ v14：回放倍速的档位 + 默认值（前端照着渲染那一行下拉，别在客户端再抄一份）。
@@ -252,5 +284,7 @@ module.exports = {
   intOrZero,
   intOrDefault,
   pickSpeed,
+  pickChainPlay,
+  pickRelayRounds,
   clampInt
 };

@@ -257,6 +257,7 @@ body.panel-dragging .right-sections.empty::after {
 }
 .group h4 .h4-btn { margin-left: auto; }
 .group h4 em + .h4-btn { margin-left: 6px; }
+.group h4 .h4-tip { margin-left: 6px; font-size: 10px; font-weight: 400; color: var(--text-dim); }
 
 /* 注意：.section-grip 的正式样式在后面「左栏面板排序」一节里。
    这里绝对不能再留一个空的 `.section-grip {` —— 少一个 } 会让之后所有规则
@@ -389,6 +390,86 @@ input[type=range]::-webkit-slider-thumb {
 }
 .lock-item input { accent-color: var(--accent); }
 
+/* ---- ★ v2.0.10：SAI2 那张「锁定」行 —— 四颗图标开关（透明像素 / 画笔 / 移动 / 全部） ----
+   每一颗就是一个 <input type=checkbox>，用 CSS 把它画成图标按钮（而不是把 input 藏起来），
+   这样键盘可达、自动化也能直接 check / uncheck，外观和 SAI2 一样是一排小图标。 */
+.lock-row.locks {
+  flex-direction: row; align-items: center; gap: 6px; margin: 7px 0 4px;
+}
+.lock-row.locks .lb { flex: none; font-size: 11.5px; color: var(--text-dim); }
+.lock-ic {
+  position: relative;
+  width: 30px; height: 24px; flex: none;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--line-soft); border-radius: 5px;
+  background: #fff; color: var(--text-dim); cursor: pointer;
+}
+.lock-ic:hover { background: #eef3fa; color: var(--text); border-color: var(--accent-line); }
+.lock-ic input {
+  appearance: none; -webkit-appearance: none;
+  position: absolute; inset: 0; margin: 0;
+  border: 0; background: transparent; cursor: pointer;
+}
+.lock-ic:has(input:checked) {
+  background: var(--accent-soft); border-color: var(--accent-line);
+  box-shadow: 0 0 0 1px var(--accent-line) inset;
+}
+.lock-ic:has(input:checked) svg { color: var(--accent); }
+.lock-ic:has(input:disabled) { opacity: .38; cursor: default; }
+.lock-ic svg {
+  width: 16px; height: 16px; pointer-events: none;
+  fill: none; stroke: currentColor; stroke-width: 1.6;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.lock-ic .lock-tip {
+  position: absolute; left: 50%; top: 100%; transform: translateX(-50%);
+  margin-top: 4px; white-space: nowrap;
+  font-size: 11px; color: #fff; background: rgba(30, 40, 55, .92);
+  padding: 3px 7px; border-radius: 5px; z-index: 60;
+  opacity: 0; pointer-events: none; transition: opacity .12s;
+}
+.lock-ic:hover .lock-tip { opacity: 1; }
+
+/* 「创建剪贴蒙版」——SAI2 里是锁定行下面的一行勾选 */
+.row-line.clip-line { margin: 4px 0 6px; }
+.clip-chk {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11.5px; color: var(--text); cursor: pointer;
+}
+.clip-chk input { accent-color: var(--accent); }
+
+/* ★ 2.0.9「指定为选区样本」——SAI2 里紧跟创建剪贴蒙版的那颗圆点 */
+.row-line.sample-line { margin: 0 0 6px; }
+.sel-sample {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11.5px; color: var(--text); cursor: pointer;
+}
+.sel-sample input { accent-color: var(--accent); }
+.sel-sample input:disabled { cursor: default; }
+.row-line.sample-line.off { opacity: .45; }
+
+/* ★ 2.0.9 魔棒选项面板（照 SAI2「魔棒」那张图） */
+.wand-opts {
+  border: 1px solid var(--line-soft); border-radius: var(--radius-sm);
+  background: #fbfcfe; padding: 6px 7px 4px; margin: 4px 0 6px;
+}
+.wand-opts .wo-head {
+  font-size: 11.5px; font-weight: 600; color: var(--text);
+  margin: 2px 0 3px;
+}
+.wand-opts .wo-rad, .wand-opts .wo-chk {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 11.5px; color: var(--text); cursor: pointer;
+  padding: 1px 0 1px 2px;
+}
+.wand-opts .wo-rad input, .wand-opts .wo-chk input { accent-color: var(--accent); margin: 0; flex: none; }
+.wand-opts .wo-rad.off, .wand-opts .wo-chk.off { opacity: .45; }
+.wand-opts .wo-chk { margin-top: 3px; }
+.wand-opts .row-line { margin: 3px 0 3px; }
+.wand-opts .row-line .lb { width: 74px; }
+.wand-opts .row-line b { width: 40px; }
+.wand-opts .wo-rad + .row-line { margin-top: 4px; }
+
 /* ============================== 工具栏九宫格 ============================== */
 
 .tool-grid {
@@ -516,7 +597,17 @@ body.tool-dragging { cursor: grabbing; user-select: none; }
 
 /* ============================== 色轮 / 调色板 ============================== */
 
-.wheel-wrap { display: grid; place-items: center; margin-bottom: 7px; }
+.wheel-wrap { display: grid; place-items: center; margin-bottom: 7px; position: relative; }
+/* 取色区形状切换按钮：钉在色轮右上角（那一块正好是圆的空地，不挡色环） */
+.wheel-shape {
+  position: absolute; right: 2px; top: 2px;
+  width: 24px; height: 24px; padding: 0;
+  border: 1px solid var(--line); border-radius: 7px;
+  background: rgba(255,255,255,.92); color: var(--text-dim);
+  font-size: 13px; line-height: 1; cursor: pointer;
+  transition: background .12s, color .12s, border-color .12s;
+}
+.wheel-shape:hover { background: #eef2f8; color: var(--text); border-color: var(--accent-line); }
 #colorWheel {
   width: 168px; height: 168px;
   cursor: crosshair;
@@ -742,7 +833,17 @@ body.tool-dragging { cursor: grabbing; user-select: none; }
   max-height: 210px;
   overflow-y: auto;
   margin: 6px 0;
+  position: relative;
 }
+/* 拖动排序：被拖的行淡下去，落点用一条线标出来 */
+.layer-list.dragging-list { user-select: none; cursor: grabbing; }
+.layer-item.dragging { opacity: .4; }
+.layer-drop {
+  position: absolute; left: 4px; right: 4px; height: 2px;
+  background: var(--accent); border-radius: 2px;
+  pointer-events: none; z-index: 3;
+}
+.layer-tip { font-size: 10.5px; color: var(--text-dim); margin: 2px 0 4px; line-height: 1.4; }
 .layer-item {
   display: flex; align-items: center; gap: 6px;
   padding: 4px 5px;
@@ -839,6 +940,29 @@ body.tool-dragging { cursor: grabbing; user-select: none; }
   background: #fff center/cover no-repeat;
   image-rendering: auto;
 }
+/* ★ v2.0.10：**蒙版缩略图** —— 照 SAI2 挂在图层缩略图右边，并且往里缩进一点、
+   换成虚线边 + 灰底，一眼能和「普通图层缩略图」区分开（用户要求「往里面缩进、显示差异化」）。 */
+.layer-item .thumb.mask-thumb {
+  margin-left: 8px;                 /* 往里缩进：和图层缩略图拉开距离 */
+  width: 30px; height: 26px;
+  border: 1px dashed var(--line);
+  border-radius: 3px;
+  background-color: #f1f3f7;
+  position: relative;
+  cursor: pointer;
+}
+.layer-item .thumb.mask-thumb::after {
+  content: '蒙版';
+  position: absolute; left: 50%; bottom: -1px; transform: translateX(-50%);
+  font-size: 8px; line-height: 1; color: var(--text-dim);
+  background: rgba(255, 255, 255, .82); padding: 0 2px; border-radius: 2px;
+  pointer-events: none;
+}
+.layer-item .thumb.mask-thumb.on {
+  border: 1px solid var(--accent); border-style: solid;
+  box-shadow: 0 0 0 1px var(--accent-line) inset;
+}
+.layer-item .thumb.mask-thumb.off { opacity: .45; border-style: dotted; }
 .layer-item .lname { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
 .layer-item .lname > span:first-child {
   font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -850,6 +974,31 @@ body.tool-dragging { cursor: grabbing; user-select: none; }
 .layer-ops { display: flex; gap: 4px; margin-top: 5px; }
 .layer-ops .mini { flex: 1 1 auto; }
 .layer-ops .mini.wide { flex: 1 1 100%; }
+
+/* 图层操作图标按钮：文字都在 title 里，眼睛上只留图形 */
+.layer-ops.icons { gap: 3px; margin: 6px 0 5px; flex-direction: column; }
+/* ★ 2.0.9：照 SAI2 那张图分成**两排**，而且整排搬到图层列表**上面** */
+.layer-ops .lic-row { display: flex; align-items: center; gap: 4px; }
+.layer-ops .lic-row .lic-gap { flex: 1 1 auto; }
+.layer-ops .lic {
+  flex: 1 1 0; min-width: 0; height: 26px;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0; border: 1px solid var(--line-soft); border-radius: 5px;
+  background: #fff; color: var(--text-dim); cursor: pointer;
+}
+.layer-ops .lic:hover { background: #eef3fa; color: var(--text); border-color: var(--accent-line); }
+.layer-ops .lic:active { transform: translateY(1px); }
+.layer-ops .lic[disabled] { opacity: .38; cursor: default; transform: none; }
+.layer-ops .lic.on {
+  background: var(--accent-soft); color: var(--accent);
+  border-color: var(--accent-line); box-shadow: 0 0 0 1px var(--accent-line) inset;
+}
+.layer-ops .lic.danger:hover { background: #fbe0e0; color: #b03030; border-color: #e9b8b8; }
+.layer-ops .lic svg {
+  width: 16px; height: 16px;
+  fill: none; stroke: currentColor; stroke-width: 1.6;
+  stroke-linecap: round; stroke-linejoin: round;
+}
 
 /* ============================== 画布区 ============================== */
 
@@ -873,6 +1022,8 @@ body.tool-dragging { cursor: grabbing; user-select: none; }
 #view { background: transparent; }
 #overlay { pointer-events: none; }
 .stage.drawing .canvas-wrap { cursor: none; }
+/* 吸管状态（按住 Alt 或选中吸管工具）也把系统光标藏掉 —— 只留我们画的那支吸管 */
+.stage.eyedropping .canvas-wrap { cursor: none; }
 .stage.panning .canvas-wrap { cursor: grabbing; }
 /* 双指手势进行中（见 app.js bindTouchGestures）：这一会儿不是在画画，
    把画笔光标收掉，免得手指挪动时那个圈跟着乱跳 */
@@ -921,6 +1072,22 @@ body.tool-dragging { cursor: grabbing; user-select: none; }
   padding: 0;
 }
 .brush-cursor.cross .bc-dot { width: 1px; height: 1px; box-shadow: none; }
+
+/* 吸管光标：按住 Alt 临时取色、或选中吸管工具时，把圆环换成一支吸管。
+   为什么单独做一个（而不是沿用系统 crosshair）：用户反馈「按住 Alt 不知道
+   自己在取色」—— 以前只是把圆环藏掉，屏幕上只剩一个跟落笔一模一样的十字，
+   点下去到底是画还是取色全靠记忆。现在形状变了，一眼能看出来。
+   盒子固定 22px、不随笔刷大小变：吸管跟笔刷大小没关系，跟着放大只会让人
+   误以为取色的范围也变大了。 */
+.brush-cursor.eyedrop {
+  box-shadow: none;
+  border-radius: 0;
+  background-image: none;
+  overflow: visible;
+}
+.brush-cursor.eyedrop .bc-dot { display: none; }
+.brush-cursor .bc-drop { display: none; width: 22px; height: 22px; grid-area: 1 / 1; }
+.brush-cursor.eyedrop .bc-drop { display: block; }
 
 /* 远端光标 */
 .cursors { position: absolute; inset: 0; pointer-events: none; }
@@ -2650,12 +2817,16 @@ body.panel-dragging * { cursor: grabbing !important; }
 #gameMask.mode-classic #rowClassicRoundEnd { order: 5; }
 #gameMask.mode-chain #rowTheme { order: 1; }
 #gameMask.mode-chain #rowDrawTime { order: 2; }
-#gameMask.mode-chain #rowChainLength { order: 3; }
-#gameMask.mode-chain #rowChainWrite { order: 4; }
-#gameMask.mode-chain #rowChainGuess { order: 5; }
-#gameMask.mode-chain #rowChainReveal { order: 6; }
-#gameMask.mode-chain #rowChainReplaySpeed { order: 7; }
-#gameMask.mode-chain #rowVote { order: 8; }
+/* ★ v17：接龙玩法（接龙 / 传词接龙）——「链长」与「传几轮」占同一行位，
+   由 app.js 按玩法切换 hidden（传词下链长由轮数算，不用手选）。 */
+#gameMask.mode-chain #rowChainPlay { order: 3; }
+#gameMask.mode-chain #rowChainLength { order: 4; }
+#gameMask.mode-chain #rowChainRelayRounds { order: 4; }
+#gameMask.mode-chain #rowChainWrite { order: 5; }
+#gameMask.mode-chain #rowChainGuess { order: 6; }
+#gameMask.mode-chain #rowChainReveal { order: 7; }
+#gameMask.mode-chain #rowChainReplaySpeed { order: 8; }
+#gameMask.mode-chain #rowVote { order: 9; }
 #gameMask.mode-skin #rowTheme { order: 1; }
 #gameMask.mode-skin #rowDrawTime { order: 2; }
 #gameMask.mode-skin #rowSkinRounds { order: 3; }

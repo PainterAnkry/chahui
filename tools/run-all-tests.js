@@ -31,7 +31,7 @@ const NEEDS_GAME_SERVER = ['test-skin.js', 'test-skin-ui.js', 'test-game-restore
  */
 const PICK_LONG_PORT = GAME_PORT + 1;
 const PICK_LONG_BASE = 'http://127.0.0.1:' + PICK_LONG_PORT;
-const NEEDS_LONG_PICK = ['test-game-theme.js', 'test-chain-flow.js'];
+const NEEDS_LONG_PICK = ['test-game-theme.js', 'test-chain-flow.js', 'test-chain-relay.js'];
 
 const GAME_ENV = Object.assign({}, process.env, {
   PORT: String(GAME_PORT),
@@ -232,6 +232,7 @@ const SUITE = [
   'test-menu-narrow.js',
   'test-shell.js',
   'test-wheel.js',
+  'test-alt-picker.js',
   'test-mesh.js',
   'test-filters.js',
   'test-export.js',
@@ -265,9 +266,21 @@ const SUITE = [
   // 接龙 UI 全流程（重写后）：画在主画布 / 输入条在下方 / 主画布回放 + 逐链串行投票。
   // ⚠ 要那台「宽窗口」的服务端（回放 ≥6s、投票 ≥8s），见 NEEDS_LONG_PICK
   'test-chain-flow.js',
+  // ★ v17：接龙的第二种玩法「传词接龙」（猜完不画、交给下家画）—— 同一条线上的一条用例，
+  //   和 test-chain-flow.js（接龙模式）配对：两条都绿才算两种玩法都没坏。
+  //   同样要那台宽窗口服务端（4 个页面逐个点按钮走完 9 手）。
+  'test-chain-relay.js',
   'test-passkeys.js',
   'test-mobile.js',
   'test-chain-sim.js',
+  // ★ v2.0.10：图层面板（SAI2 版面 + 三把锁 + 蒙版缩略图）与 SAI2 笔刷包替换
+  'test-layer-panel.js',
+  'test-brushes-sai2.js',
+  // ★ 2.0.9：魔棒面板（三种取样模式 / 容差 / 防止溢出 / 取样来源 / 抗锯齿 / 忽略已选）
+  //   + 套索「先画线、松手才成圈」
+  'test-wand.js',
+  // ★ 2.0.9：接龙逐笔回放的节奏（喂假笔迹 + 时长，验「窗口紧时倍速播完、不会啪的一下跳到成图」）
+  'test-chain-anim.js',
   // 「每局可配的游戏设置」：三个玩法的 start(opts) 覆盖值 / 夹取边界 / GAME_FAST /
   // 房主预设 pendingGame 的清洗与权限 / /api/share 的 setup 档位。
   // 纯 Node，不需要浏览器也不需要服务端。

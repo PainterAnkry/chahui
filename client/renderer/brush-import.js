@@ -1568,6 +1568,273 @@
     return Math.max(0.05, Math.min(1, 1 - soft * 5));
   }
 
+  /* ============================================================ SAI2 笔刷 */
+
+  /**
+   * 读 BMP 成灰度。SAI2 的笔尖形状（blotmap）与各种材质都是 BMP：
+   * 8 位调色板最常见（1000×1000 的材质也是），也有 24 / 32 位的。
+   * 约定是**黑底白形**，所以直接取调色板 / 像素的亮度就是「形状的浓度」。
+   */
+  function decodeBmpGray(bytes) {
+    if (asciiOf(bytes, 0, 2) !== 'BM') throw new Error('不是 BMP 图片');
+    var dataOff = u32le(bytes, 10);
+    var hdrSize = u32le(bytes, 14);
+    var w = bytes[18] | (bytes[19] << 8) | (bytes[20] << 16) | (bytes[21] << 24);
+    var hs = bytes[22] | (bytes[23] << 8) | (bytes[24] << 16) | (bytes[25] << 24);   // 负 = 自上而下
+    var bpp = bytes[28] | (bytes[29] << 8);
+    var comp = u32le(bytes, 30);
+    var h = Math.abs(hs);
+    if (!w || !h) throw new Error('BMP 的尺寸是 0');
+    if (comp !== 0 && comp !== 3) throw new Error('BMP 用了不支持的压缩方式 ' + comp);
+    if (bpp !== 8 && bpp !== 24 && bpp !== 32) throw new Error('BMP 位深不支持：' + bpp);
+
+    var pal = null;
+    if (bpp === 8) {
+      var palN = u32le(bytes, 46) || 256;
+      var palOff = 14 + hdrSize;
+      pal = new Uint8Array(palN * 3);
+      for (var q = 0; q < palN; q++) {
+        var o = palOff + q * 4;                 // 调色板每项 4 字节 BGRX
+        pal[q * 3] = bytes[o + 2]; pal[q * 3 + 1] = bytes[o + 1]; pal[q * 3 + 2] = bytes[o];
+      }
+    }
+    var stride = Math.ceil((w * bpp / 8) / 4) * 4;
+    if (dataOff + stride * h > bytes.length) throw new Error('BMP 像素数据越界（文件被截断了？）');
+
+    var gray = new Uint8Array(w * h);
+    for (var y = 0; y < h; y++) {
+      var src = dataOff + (hs < 0 ? y : (h - 1 - y)) * stride;
+      for (var x = 0; x < w; x++) {
+        var v;
+        if (bpp === 8) {
+          var pi = bytes[src + x] * 3;
+          v = pal[pi] * 0.299 + pal[pi + 1] * 0.587 + pal[pi + 2] * 0.114;
+        } else {
+          var b0 = src + x * (bpp / 8);
+          v = bytes[b0 + 2] * 0.299 + bytes[b0 + 1] * 0.587 + bytes[b0] * 0.114;
+        }
+        gray[y * w + x] = v | 0;
+      }
+    }
+    return { w: w, h: h, gray: gray };
+  }
+
+  /**
+   * .saitdat / .saitset 是**纯文本** key=value：
+   *   name=U:钢筆          字符串（UTF-8，前面是类型标签）
+   *   cursize=I:40         数字
+   *   fomcat=I:2 fomnam=U:圆笔   笔尖形状引用（2 = 笔尖形状 blotmap，1 = 笔刷纹理，0 = 无）
+   *   .                    一节结束（一个文件里可能有好几节，参数按节覆盖）
+   *   --EOF--              文件结束
+   * 所以这里只做「逐行拆字段」，值一律转成数字 / 字符串。
+   */
+  function saitdatFields(bytes) {
+    var text = utf8Of(bytes);
+    if (!/--EOF--|tidstr\s*=/.test(text)) throw new Error('不像 SAI2 的笔刷定义（没找到 tidstr / --EOF--）');
+    var map = {};
+    text.split(/\r?\n/).forEach(function (line) {
+      var i = line.indexOf('=');
+      if (i <= 0) return;
+      var k = line.slice(0, i).trim();
+      if (!k) return;
+      var v = line.slice(i + 1);
+      var tag = v.slice(0, 2);
+      if (tag === 'I:') map[k] = parseInt(v.slice(2), 10);
+      else if (tag === 'S:' || tag === 'U:') map[k] = v.slice(2);
+      else map[k] = v;
+    });
+    return map;
+  }
+
+  /** SAI2 里这几个 tidstr 不是「能画的笔」，导入进来只会让人莫名其妙 */
+  var SAI_NOT_BRUSH = { selpen: 1, selers: 1, selbkt: 1, bucket: 1 };
+
+  function clampNum(v, a, b) { return v < a ? a : (v > b ? b : v); }
+
+  /** 合成一个圆形笔尖（没带笔尖形状图时用），边缘软硬跟着「硬度」走 */
+  function roundTipGray(hardness, n) {
+    n = n || 64;
+    var g = new Uint8Array(n * n), r = n / 2;
+    var soft = Math.max(0.03, 1 - hardness);
+    for (var y = 0; y < n; y++) {
+      for (var x = 0; x < n; x++) {
+        var d = Math.sqrt((x + 0.5 - r) * (x + 0.5 - r) + (y + 0.5 - r) * (y + 0.5 - r)) / r;
+        var a = d >= 1 ? 0 : clampNum((1 - d) / soft, 0, 1);
+        g[y * n + x] = Math.round(Math.pow(a, 0.7) * 255);
+      }
+    }
+    return { gray: g, w: n, h: n };
+  }
+
+  /** SAI2 的字段 → 茶绘的笔刷参数 */
+  function mapSai(f) {
+    function num(k, d) {
+      var v = f[k];
+      return (typeof v === 'number' && isFinite(v)) ? v : d;
+    }
+    var pct = function (k, d) { return clampNum(num(k, d), 0, 100) / 100; };
+    var minSize = pct('minsize', 0);
+    var minDens = pct('mindens', 0);
+    return {
+      size: Math.round(clampNum(num('cursize', 40), 6, 200)),
+      opacity: pct('curdens', 100),
+      hardness: pct('hardness', 50),
+      // 最小直径 / 最小浓度是「笔压压到底时还剩多少」；都留一点，别变成一根针
+      minSize: clampNum(minSize, 0.02, 1),
+      pressSize: pct('szsens', 100),
+      // 最小浓度盖住的是一部分「压感浓度」：它越大，压力对浓度的影响越小
+      pressOpacity: pct('dnsens', 100) * (1 - minDens),
+      scatter: 0,
+      mix: pct('blend', 0),
+      grain: 0,
+      grainScale: 1,
+      // SAI 的笔是「一路铺过去」的，落点间隔给密一点才不会有颗粒感
+      spacing: 0.06
+    };
+  }
+
+  /**
+   * 解析 SAI2 的 .saitdat / .saitset。
+   *
+   * 笔尖形状图（blotmap）是**单独放在 brushfom/blotmap/ 目录**里的 BMP，
+   * 笔刷文件本身只写了一个名字（fomnam）。文件系统读不到，所以做法是：
+   * 用户在文件选择框里把 .saitdat 和它的 .bmp 一起选上时，按名字配起来用
+   * （extras.siblings）；没有就按「硬度」合成一个圆笔尖。
+   */
+  function parseSaitdat(bytes, extras) {
+    var f = saitdatFields(bytes);
+    var tid = String(f.tidstr || '');
+    if (SAI_NOT_BRUSH[tid.toLowerCase()]) {
+      throw new Error('这是「' + tid + '」（选区 / 填充类工具），不是笔刷');
+    }
+    var opts = mapSai(f);
+    var name = (typeof f.name === 'string' && f.name) ? f.name : '';
+
+    // 找配对过来的笔尖形状 / 纹理 BMP
+    var tip = null, tipName = '';
+    var fom = (typeof f.fomnam === 'string' && f.fomnam) ? f.fomnam : '';
+    if (fom && fomcatOf(f) > 0 && extras && extras.siblings) {
+      var want = fom.toLowerCase().replace(/\.[a-z0-9]{2,5}$/i, '');
+      extras.siblings.forEach(function (s) {
+        if (tip) return;
+        var base = String(s.name || '').split(/[\\/]/).pop().replace(/\.[a-z0-9]{2,5}$/i, '');
+        if (base.toLowerCase() !== want) return;
+        try { tip = decodeBmpGray(asBytes(s.bytes)); tipName = s.name; } catch (e) { /* 认不出就算了 */ }
+      });
+    }
+    if (!tip) tip = roundTipGray(opts.hardness);
+
+    return {
+      kind: 'sai', version: 0,
+      brushes: [{
+        name: name || 'SAI 笔刷',
+        w: tip.w, h: tip.h,
+        gray: tip.gray,
+        spacing: opts.spacing,
+        diameter: opts.size,
+        opts: opts,
+        note: tipName ? ('笔尖形状取自 ' + tipName) : '',
+        eraseHint: /eraser/i.test(tid)
+      }]
+    };
+  }
+
+  function fomcatOf(f) { return (typeof f.fomcat === 'number' && isFinite(f.fomcat)) ? f.fomcat : 0; }
+
+  /* ============================================================ 画世界 Pro */
+
+  /**
+   * 解析画世界 / 画世界Pro 的 .bru。
+   *
+   * ⚠ 这个后缀**没有公开的格式文档**，社区里流传的文件也不是同一种容器
+   * （官方笔刷商城下发的包、网友分享的包、以及「把 .abr 改个名」的假 .bru 都有）。
+   * 所以这里按「能认出来的容器」挨个试，认出来就用，认不出来就直说：
+   *   1) 8BPS → 其实是 PS 的 .abr 改了后缀（社区教程里最常见的一招）→ 走 abr
+   *   2) PK…  → ZIP 包 → 先按 Procreate 那套找，退而求其次取里面最大的一张图当笔尖
+   *   3) 裸容器 → 扫内嵌 PNG，取最大的一张当笔尖
+   */
+  function parseBru(bytes) {
+    // 1) 假 .bru：其实是 .abr 改的后缀
+    //    （社区教程里最常见的一招：「找到下载的笔刷，重命名改成 .bru」）
+    //    .abr 没有文件签名，开头直接就是版本字（1/2/6/7/10），按这个认。
+    if (bytes[0] === 0 && (bytes[1] === 1 || bytes[1] === 2 || bytes[1] === 6 ||
+        bytes[1] === 7 || bytes[1] === 10)) {
+      try { return parseAbr(bytes); } catch (e) { /* 不是 abr，接着往下试 */ }
+    }
+
+    // 2) ZIP 容器
+    if (bytes[0] === 0x50 && bytes[1] === 0x4b) {
+      try { return parseProcreate(bytes); } catch (e) { /* 不是 Procreate 布局，继续 */ }
+      var zip = null;
+      try { zip = readZip(bytes); } catch (e2) { zip = null; }
+      if (zip) {
+        var best = pickBiggestImage(zip.entries);
+        if (best) return bruFromImage(best.img, best.name, 'ZIP 包里的笔尖图');
+      }
+    }
+
+    // 3) 裸容器里的 PNG
+    var ranges = findPngRanges(bytes);
+    var pack = null;
+    ranges.forEach(function (r) {
+      var chunk = bytes.subarray(r.start, r.end);
+      var img;
+      try { img = decodePngGray(chunk); } catch (e3) { return; }
+      if (!img) return;
+      if (!pack || img.w * img.h > pack.img.w * pack.img.h) pack = { img: img, name: '' };
+    });
+    if (pack) return bruFromImage(pack.img, pack.name, '包内嵌的笔尖图');
+
+    throw new Error('认不出这份 .bru：画世界没有公开的笔刷格式。如果是 PS 的 .abr 改名的，' +
+      '把后缀改回 .abr 再导入；也可以直接把笔尖图片当普通图片铺到画布上');
+  }
+
+  /** 在一堆 ZIP 条目里挑面积最大的一张图当笔尖 */
+  function pickBiggestImage(entries) {
+    var best = null;
+    (entries || []).forEach(function (e) {
+      var img = null;
+      try {
+        if (isPng(e.data)) img = decodePngGray(e.data);
+        else if (asciiOf(e.data, 0, 2) === 'BM') img = decodeBmpGray(e.data);
+      } catch (err) { img = null; }
+      if (!img) return;
+      if (!best || img.w * img.h > best.img.w * best.img.h) best = { img: img, name: e.name };
+    });
+    return best;
+  }
+
+  function bruFromImage(img, name, from) {
+    var tip = packTip(img.gray, img.w, img.h);
+    var hardness = hardnessOf(img.gray, img.w, img.h);
+    var opts = {
+      size: Math.round(clampNum(Math.max(img.w, img.h) * 0.4, 6, 200)),
+      opacity: 1,
+      hardness: hardness,
+      minSize: 0.35,
+      pressSize: 0.6,
+      pressOpacity: 0.6,
+      scatter: 0,
+      mix: 0,
+      grain: 0,
+      grainScale: 1,
+      spacing: 0.12
+    };
+    return {
+      kind: 'bru', version: 0,
+      brushes: [{
+        name: tipNameFromPath(name) || '画世界笔刷',
+        w: img.w, h: img.h,
+        tip: tip,
+        hardness: hardness,
+        diameter: opts.size,
+        spacing: opts.spacing,
+        opts: opts,
+        note: from || ''
+      }]
+    };
+  }
+
   /* ============================================================ 统一出口 */
 
   /**
@@ -1575,26 +1842,33 @@
    * @returns {{kind:'abr'|'sut'|'procreate', version:number,
    *            brushes:[{name,w,h,gray?,png?,spacing,tip,hardness?,diameter?,opts?}]}}
    */
-  function parse(fileName, buf) {
+  function parse(fileName, buf, extras) {
     var bytes = asBytes(buf);
     var name = String(fileName || '').toLowerCase();
     var res, kind;
 
     if (/\.(brush|brushset|prbr)$/.test(name)) {
       res = parseProcreate(bytes); kind = 'procreate';
+    } else if (/\.(saitdat|saitset|sai)$/.test(name)) {
+      res = parseSaitdat(bytes, extras); kind = 'sai';
+    } else if (/\.bru$/.test(name)) {
+      res = parseBru(bytes); kind = 'bru';
     } else if (/\.abr$/.test(name)) {
       res = parseAbr(bytes); kind = 'abr';
     } else if (/\.sut$/.test(name)) {
       res = parseSut(bytes); kind = 'sut';
+    } else if (bytes[0] === 0 && (bytes[1] === 1 || bytes[1] === 2 || bytes[1] === 6 || bytes[1] === 7 || bytes[1] === 10)) {
+      res = parseAbr(bytes); kind = 'abr';
     } else {
       // 后缀不可信时按内容猜：
       //   'PK'      → ZIP，多半是 Procreate（.brushset 常常被人改名叫 .zip）
       //   0x00 + 版本号 → .abr
+      //   带 tidstr / --EOF-- → SAI2 的定义文件（有人把它改成 .txt 传来传去）
       //   其余      → 按 .sut 试（CSP 的库文件没有稳定签名）
       if (bytes[0] === 0x50 && bytes[1] === 0x4b) {
         res = parseProcreate(bytes); kind = 'procreate';
-      } else if (bytes[0] === 0 && (bytes[1] === 1 || bytes[1] === 2 || bytes[1] === 6 || bytes[1] === 7 || bytes[1] === 10)) {
-        res = parseAbr(bytes); kind = 'abr';
+      } else if (/tidstr\s*=/.test(asciiOf(bytes.subarray(0, Math.min(bytes.length, 4096)), 0, Math.min(bytes.length, 4096)))) {
+        res = parseSaitdat(bytes, extras); kind = 'sai';
       } else {
         res = parseSut(bytes); kind = 'sut';
       }
@@ -1635,6 +1909,10 @@
     parseAbr: function (buf) { return parseAbr(buf); },
     parseSut: function (buf) { return parseSut(buf); },
     parseProcreate: function (buf) { return parseProcreate(buf); },
+    parseSaitdat: function (buf, extras) { return parseSaitdat(buf, extras); },
+    parseBru: function (buf) { return parseBru(buf); },
+    decodeBmpGray: decodeBmpGray,
+    saitdatFields: saitdatFields,
     packTip: packTip,
     unpackTip: unpackTip,
     hardnessOf: hardnessOf,

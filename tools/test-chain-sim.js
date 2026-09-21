@@ -1078,6 +1078,131 @@ console.log('\n[22] ★ 跨组投票不计入统计：别组的票不算');
     g.snapshotFor(aMembers[0]).voteGroupId);
 }
 
+console.log('\n[24] ★ v17 传词接龙（chainPlay = relay）：猜完不画，把词传给下家画');
+{
+  // 4 人 2 轮（默认）→ 链长 = 1 + 2×4 = 9 格
+  const { g, room } = makeGame(['甲', '乙', '丙', '丁'], { chainPlay: 'relay' });
+  ok('★ 传词模式默认 2 轮 → 链长 = 1 + 2 × 4 = 9 格', g.chainLength === 9, String(g.chainLength));
+  ok('★ 快照带 chainPlay / relayRounds（前端要显示玩法与轮数）',
+    g.snapshotFor('u1').chainPlay === 'relay' && g.snapshotFor('u1').relayRounds === 2,
+    JSON.stringify({ p: g.snapshotFor('u1').chainPlay, r: g.snapshotFor('u1').relayRounds }));
+
+  toGrid(g, room, 0, 'free');
+  ok('★ 组链长也按玩法算（relay：1 + 轮数 × 组人数）', g.groupLengths().g1 === 9, JSON.stringify(g.groupLengths()));
+  const ring = g.groups[0].ring;                    // 组内环序（开局打乱过，按它来断言）
+  const C = g.groups[0].chainIds[0];                // 环首那人的链
+  const chain = g.chains.find(c => c.chainId === C);
+  const owner = chain.ownerPlayerId;
+  const oi = ring.indexOf(owner);
+  const types = [];
+  const authors = [];
+  for (let k = 0; k < 9; k++) {
+    types.push(g.stepTypeOf(k));
+    const who = g.authorOf(chain, k);
+    authors.push(ring.indexOf(who));               // 记偏移，顺着环读更直观
+  }
+  console.log('  类型: ' + JSON.stringify(types));
+  console.log('  作者偏移: ' + JSON.stringify(authors) + '（环序 ' + ring.join('→') + '，链主 ' + owner + '）');
+  ok('★ 类型序列 = 词,画,猜,画,猜,画,猜,画,猜（起词 + 4 画 + 4 猜）',
+    types.join(',') === 'WORD,DRAWING,GUESS,DRAWING,GUESS,DRAWING,GUESS,DRAWING,GUESS', types.join(','));
+  // 用户给的验收例子：A起词→A画→B猜→C画→D猜→A画→B猜→C画→D猜
+  //   → 相对链主的偏移 [0,0,1,2,3,0,1,2,3]
+  ok('★ 作者偏移 = [0,0,1,2,3,0,1,2,3]（正是验收例子：A起词→A画→B猜→C画→D猜→A画→B猜→C画→D猜）',
+    authors.join(',') === '0,0,1,2,3,0,1,2,3', authors.join(','));
+  ok('★ 猜的人**不画**：第 3 格（猜）的作者与第 4 格（画）的作者不是同一个人',
+    g.authorOf(chain, 2) !== g.authorOf(chain, 3),
+    g.authorOf(chain, 2) + ' / ' + g.authorOf(chain, 3));
+  ok('★ 第 4 格（画）的作者 = 第 3 格（猜）的下家',
+    g.authorOf(chain, 3) === ring[(oi + 2) % 4] && g.authorOf(chain, 2) === ring[(oi + 1) % 4],
+    JSON.stringify({ guess: g.authorOf(chain, 2), draw: g.authorOf(chain, 3) }));
+
+  // 每一格都是「组内人人恰好一格」的一一映射（与 classic 同一条不变式）
+  let bijection = true;
+  for (let k = 0; k < 9; k++) {
+    const seen = new Set();
+    for (const uid of ring) {
+      const cell = g.cellOf(uid, k);
+      if (!cell || seen.has(cell.chainId)) { bijection = false; break; }
+      seen.add(cell.chainId);
+    }
+    if (seen.size !== ring.length) bijection = false;
+  }
+  ok('★★ 每一格组内 4 人各拿到一条不同的链（不重不漏，9 格全查）', bijection);
+  let intact = true;
+  for (let k = 0; k < 9; k++) if (!g.assertChainIntact(k).ok) intact = false;
+  ok('★★ 9 格逐格自检链条不断（assertChainIntact 全过）', intact);
+
+  // 内容流：猜完的词交给下家画
+  for (let k = 0; k < 9; k++) {
+    const t = g.taskFor(ring[0], k);
+    void t;
+    playGrid(g, room, 'free');
+  }
+  ok('★ 传完 9 格 → 进回放（不会无限传下去）', g.phase === CHAIN_PHASE.REVEAL, g.phase);
+  const steps = chain.steps;
+  ok('★ 每条链 9 格都落齐（steps.length = chainLength）', steps.length === 9, String(steps.length));
+  ok('★ 第 0 格是起词（词，非空）',
+    steps[0].type === 'WORD' && typeof steps[0].content === 'string' && steps[0].content.length > 0,
+    JSON.stringify(steps[0].content));
+  ok('★ 第 3 格（猜）的作者，正是验收里「B猜」那个人；他后面那一格由别人画',
+    steps[2].playerId === ring[(oi + 1) % 4] && steps[3].playerId === ring[(oi + 2) % 4],
+    JSON.stringify([steps[2].playerId, steps[3].playerId]));
+  ok('★ 首尾判定看的是「起词 vs 最后一手猜词」',
+    g.chainRevealRow(chain).firstWord === steps[0].content
+      && g.chainRevealRow(chain).lastWord === steps[8].content,
+    JSON.stringify([g.chainRevealRow(chain).firstWord, g.chainRevealRow(chain).lastWord]));
+  void types;
+}
+
+console.log('\n[25] ★ v17 传词接龙的轮数夹取 + 分组（8 人 2 组）');
+{
+  const mk = (opts, names) => makeGame(names || ['甲', '乙', '丙', '丁'], opts);
+  ok('★ 1 轮 → 链长 = 1 + 1 × 4 = 5', mk({ chainPlay: 'relay', relayRounds: 1 }).g.chainLength === 5,
+    String(mk({ chainPlay: 'relay', relayRounds: 1 }).g.chainLength));
+  ok('★ 3 轮 → 链长 = 1 + 3 × 4 = 13', mk({ chainPlay: 'relay', relayRounds: 3 }).g.chainLength === 13,
+    String(mk({ chainPlay: 'relay', relayRounds: 3 }).g.chainLength));
+  ok('★ 轮数夹到 [1, 4]：99 轮 → 4 轮（链长 17，不会无限传）',
+    mk({ chainPlay: 'relay', relayRounds: 99 }).g.relayRounds === P.GAME.CHAIN_RELAY_ROUNDS_MAX
+      && mk({ chainPlay: 'relay', relayRounds: 99 }).g.chainLength === 17,
+    JSON.stringify({ r: mk({ chainPlay: 'relay', relayRounds: 99 }).g.relayRounds,
+      len: mk({ chainPlay: 'relay', relayRounds: 99 }).g.chainLength }));
+  ok('★ 非法轮数（0）→ 默认 2 轮',
+    mk({ chainPlay: 'relay', relayRounds: 0 }).g.relayRounds === P.GAME.CHAIN_RELAY_ROUNDS_DEFAULT);
+  ok('★ 非法玩法 → 默认 classic（老客户端不发这个字段时行为不变）',
+    mk({ chainPlay: 'nope' }).g.chainPlay === 'classic' && mk({}).g.chainLength === 8,
+    JSON.stringify({ p: mk({ chainPlay: 'nope' }).g.chainPlay, len: mk({}).g.chainLength }));
+  ok('★ relay 下**忽略**面板上的 chainLength（链长只由轮数决定）',
+    mk({ chainPlay: 'relay', chainLength: 6 }).g.chainLength === 9,
+    String(mk({ chainPlay: 'relay', chainLength: 6 }).g.chainLength));
+
+  // 8 人 2 组：每组 4 人 → 链长 = 1 + 2×4 = 9
+  const { g, room } = mk({ chainPlay: 'relay' }, ['甲', '乙', '丙', '丁', '戊', '己', '庚', '辛']);
+  ok('★ 8 人 2 组：链长 = 1 + 2 × 4 = 9（不是 1 + 2×8 = 17）', g.chainLength === 9, String(g.chainLength));
+  toGrid(g, room, 0, 'free');
+  let crossGroup = 0, dupCell = 0;
+  for (let k = 0; k < 9; k++) {
+    for (const grp of g.groups) {
+      const seen = new Set();
+      for (const uid of grp.ring) {
+        const cell = g.cellOf(uid, k);
+        if (!cell) { dupCell++; continue; }
+        if (grp.chainIds.indexOf(cell.chainId) < 0) crossGroup++;
+        if (seen.has(cell.chainId)) dupCell++;
+        seen.add(cell.chainId);
+      }
+    }
+  }
+  ok('★★ 传词模式也不串组、不派重复（9 格 × 2 组全查）',
+    crossGroup === 0 && dupCell === 0, JSON.stringify({ crossGroup, dupCell }));
+  while (g.isPlaying()) playGrid(g, room, 'free');
+  ok('★ 8 人 2 组传词也能跑到回放（9 格 × 2 组并行）', g.phase === CHAIN_PHASE.REVEAL, g.phase);
+  ok('★ 每条链的作者全在本组（链只在组内传）',
+    g.chains.every(c => {
+      const grp = g.groupOfChain(c);
+      return c.steps.every(s => !s.playerId || grp.ring.indexOf(s.playerId) >= 0);
+    }));
+}
+
 console.log('\n' + '─'.repeat(46));
 console.log('  通过 ' + pass + ' / ' + (pass + fail));
 if (fail) process.exitCode = 1;

@@ -1,6 +1,6 @@
 {
   "name": "chahui",
-  "version": "2.0.7",
+  "version": "2.0.9",
   "private": true,
   "description": "茶绘 · 多人实时协作绘画聊天室（桌面端 + 公网服务端，SAI2 风格笔刷体系）",
   "scripts": {
@@ -28,6 +28,8 @@
     "test:embed": "node tools/test-embed.js",
     "test:lan": "node tools/test-lan.js",
     "test:selection": "node tools/test-selection.js",
+    "test:wand": "node tools/test-wand.js",
+    "test:chain-anim": "node tools/test-chain-anim.js",
     "test:transform": "node tools/test-transform-buttons.js",
     "test:overlay": "node tools/test-overlay.js",
     "test:import": "node tools/test-brush-import.js",
@@ -43,6 +45,7 @@
     "test:menu": "node tools/test-menu.js",
     "abr:corpus": "node tools/abr-corpus.js",
     "test:wheel": "node tools/test-wheel.js",
+    "test:alt-picker": "node tools/test-alt-picker.js",
     "test:feel": "node tools/test-brush-feel.js",
     "test:shell": "node tools/test-shell.js",
     "test:mesh": "node tools/test-mesh.js",
@@ -64,7 +67,7 @@
     "test:collab": "node tools/test-collab-view.js",
     "test:game": "node tools/test-game.js",
     "test:chain": "node tools/test-chain.js",
-    "test:chain-ui": "node tools/test-chain-ui.js",
+    "test:chain-ui": "node tools/test-chain-flow.js",
     "test:passkeys": "node tools/test-passkeys.js",
     "test:mobile": "node tools/test-mobile.js",
     "test:chain-sim": "node tools/test-chain-sim.js",

@@ -453,13 +453,16 @@ const waitAllPhase = async (pages, want, ms) => {
             viewW: view ? view.width : 0
           };
         });
-        // ★ v14：♥ 只在「这一格画正在回放播放 / 定格」时可点，播完置灰（过时不候）。
+        // ★ v19：♥ 不再「那一格播完就置灰（过时不候）」—— 只要这一棒还停在屏幕上
+        //   就点得动。于是判据从「抓到过 finished=false 的窗口」翻成：
+        //   **chain_reveal 期间不许出现「显示着但点不动」(blockedInReveal)**。
         //   ⚠ 它**不能放在这一坨里等**（窗口很窄，一等等 6 秒就把后面的
         //     窄带 / 逐笔动画采样拖到下一格去了）—— 这里只起一个后台观察，
         //     剩下的采样照旧立刻做（见 revChecks.order / bands / anim）。
         revChecks.fav = await host.evaluate(() => new Promise(res => {
           const t0 = performance.now();
-          const st = { everOpen: false, closedAfter: false, openType: '', closedType: '', seq: [] };
+          const st = { everOpen: false, closedAfter: false, blockedInReveal: false,
+                       openType: '', closedType: '', seq: [] };
           window.__favWatchOff = false;
           const timer = setInterval(() => {
             const b = document.querySelector('#rpFavBtn');
@@ -473,10 +476,12 @@ const waitAllPhase = async (pages, want, ms) => {
               + (item && item.type === 'DRAWING' ? 'D' : '.')
               + (a.finished ? 'f' : 'p') + (shown ? (b.disabled ? 'X' : 'o') : '-');
             if (st.seq[st.seq.length - 1] !== mark) st.seq.push(mark);
-            if (shown && b && !b.disabled && !a.finished) {
+            if (shown && b && !b.disabled) {
               st.everOpen = true;
               st.openType = item ? item.type : '';
             }
+            // ★ 新规则的反例：回放期间只要抓到一次「显示着 + 置灰」就说明还是旧的过时不候
+            if (shown && b && b.disabled && g.phase === 'chain_reveal') st.blockedInReveal = true;
             if (shown && b && b.disabled && (a.finished || g.phase !== 'chain_reveal')) {
               st.closedAfter = true;
               st.closedType = item ? item.type : '';
@@ -550,13 +555,16 @@ const waitAllPhase = async (pages, want, ms) => {
           return rows;
         });
       }
-      // ★ v14：♥ 的「播完就置灰」要跨格观察（每格动画演完才关），所以每次进回放都补一小段采样，
-      //   凑齐「播放中可点 + 播完之后置灰」两条就收工。
+      // ★ v19：♥ 的「还点不点得动」以前是**每格动画演完就关一次门**，所以要跨格观察；
+      //   现在一整条链的展示期间都不该关门（每一棒都能投），这里继续跨格采样，
+      //   盯着「有没有出现过显示着却置灰」。
       if (!revChecks.fav || !(revChecks.fav.closedAfter || revChecks.fav.hiddenAfter)) {
         const more = await host.evaluate(() => new Promise(res => {
           const t0 = performance.now();
-          const st = window.__favSt || { everOpen: false, closedAfter: false, openType: '', closedType: '' };
+          const st = window.__favSt || { everOpen: false, closedAfter: false, blockedInReveal: false,
+                                         openType: '', closedType: '' };
           st.seq = st.seq || [];
+          if (st.blockedInReveal === undefined) st.blockedInReveal = false;
           const timer = setInterval(() => {
             const b = document.querySelector('#rpFavBtn');
             const cr = window.ChaApp.state.cr || {};
@@ -569,10 +577,11 @@ const waitAllPhase = async (pages, want, ms) => {
               + (item && item.type === 'DRAWING' ? 'D' : '.')
               + (a.finished ? 'f' : 'p') + (shown ? (b.disabled ? 'X' : 'o') : '-');
             if (st.seq[st.seq.length - 1] !== mark) st.seq.push(mark);
-            if (shown && b && !b.disabled && !a.finished) {
+            if (shown && b && !b.disabled) {
               st.everOpen = true;
               st.openType = item ? item.type : '';
             }
+            if (shown && b && b.disabled && g.phase === 'chain_reveal') st.blockedInReveal = true;
             if (shown && b && b.disabled && (a.finished || g.phase !== 'chain_reveal')) {
               st.closedAfter = true;
               st.closedType = item ? item.type : '';
@@ -916,13 +925,16 @@ const waitAllPhase = async (pages, want, ms) => {
       && crv.cw === crv.ew && crv.ch === crv.eh && crv.cw > 100, crv);
   ok('★ 回放期间**没有独立窗口**：那块 <img> 白面板收掉了',
     crv.imgHidden === true && crv.imgSrc <= 0, crv);
-  // ★ v14：♥ 只在「这一格画正在回放」时可点，那一格播完就置灰（过时不候）
-  ok('★ 回放中 ♥ 可点（这一格是画、正在播）',
+  // ★ v19：♥ 改成「**每一棒的展示期间都能投**」—— 以前那一格播完立刻置灰（过时不候），
+  //   实际用起来是手速跟不上回放，只有头一棒来得及点（用户反馈的「只有链首才投得上」）。
+  ok('★ 回放中 ♥ 可点（这一格是画、还停在屏幕上）',
     !!revChecks.fav && revChecks.fav.everOpen === true && revChecks.fav.openType === 'DRAWING',
     revChecks.fav);
-  ok('★ 那一格播完之后 ♥ 就不能再投了（置灰或收起 —— 过时不候）',
-    !!revChecks.fav && (revChecks.fav.closedAfter === true || revChecks.fav.hiddenAfter === true),
-    revChecks.fav);
+  ok('★ 每一棒展示期间 ♥ 一直可点：chain_reveal 里从不出现「显示着却点不动」',
+    !!revChecks.fav && revChecks.fav.blockedInReveal !== true,
+    revChecks.fav && { seq: revChecks.fav.seq, everOpen: revChecks.fav.everOpen,
+                       blockedInReveal: revChecks.fav.blockedInReveal,
+                       closedAfter: revChecks.fav.closedAfter, hiddenAfter: revChecks.fav.hiddenAfter });
   // 全页面文本里不许出现 [object Object]（内层文本全扫一遍）
   const objText = await Promise.all(pages.map(p => p.evaluate(() => {
     const hits = [];

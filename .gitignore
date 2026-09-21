@@ -13,7 +13,7 @@ server/data/
 
 # 测试/探针产物
 screenshots/
-tools/_*.js
+tools/_*
 tools/bin/
 *.log
 # 有些用例把房间存档直接落在仓库根目录（相对路径没写全时就会这样），别带进版本库

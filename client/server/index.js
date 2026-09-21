@@ -1599,6 +1599,25 @@ function handle(ws, msg) {
       return;
     }
 
+    case P.C2S.LAYER_ORDER: {
+      // 面板拖动排序：客户端把整套目标顺序发过来（见 rooms.reorderLayers）。
+      // 校验不过就整条丢弃，房间保持原样 —— 不回声、不报错，客户端下一次
+      // 收到 broadcastLayers 就会自己回到真实状态。
+      if (!room || !member) return;
+      if (writeBlocked(ws, room, member)) return;
+      const order = Array.isArray(msg.order)
+        ? msg.order.slice(0, MAX_LAYERS).map(id => sanitizeText(id, 40))
+        : null;
+      const ok = room.reorderLayers(order, {
+        layerId: typeof msg.layerId === 'string' ? sanitizeText(msg.layerId, 40) : null,
+        groupId: typeof msg.groupId === 'string' ? sanitizeText(msg.groupId, 40) : null
+      });
+      if (!ok) return;
+      store.markDirty(room);
+      broadcastLayers(room);
+      return;
+    }
+
     case P.C2S.LAYER_DUP: {
       if (!room || !member) return;
       if (writeBlocked(ws, room, member)) return;

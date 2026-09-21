@@ -166,6 +166,8 @@
     cursorStyle: ['auto', 'ring', 'cross'].indexOf(lsGet('chahu.cursor', 'auto')) >= 0 ? lsGet('chahu.cursor', 'auto') : 'auto',
     recent: [],
     hue: 0, sv: { s: 1, v: 1 },
+    // 色轮取色区形状（'square' 默认 / 'triangle'），记住上次的选择
+    svShape: loadSvShape(),
     publicUrl: '',            // 服务端开了公网隧道时由 /api/share 带回
     // 桌面端「公网联机」的状态（主进程推过来）：off / downloading / starting / on
     tunnel: { phase: 'off', url: '', error: '', percent: 0 },
@@ -190,6 +192,9 @@
     modAlt: false,
     // 框选 / 套索 / 魔棒画完之后自动弹出变换面板（用户反馈第 2 条）
     autoTransform: lsGet('chahu.autoTransform', '1') !== '0',
+    // ★ 2.0.9 魔棒选项（照 SAI2 的魔棒面板）：取样模式 / 透明容差 / 防止溢出 / 取样来源 / 消除锯齿 / 忽略已选
+    //   下面那一块（WAND_DEFAULTS + loadWandOpts）定义在 S 之后，所以这里先占位、随后再填。
+    wand: null,
     // 统一撤销栈：笔迹 / 选区 / 变换等像素操作按发生顺序排在一起，
     // 这样「撤回」才能真正撤回上一步，而不是只认笔迹。
     opUndo: [],
@@ -205,6 +210,42 @@
     var raw = JSON.parse(lsGet('chahu.brushes', '{}'));
     if (raw && typeof raw === 'object') S.overrides = raw;
   } catch (e) { S.overrides = {}; }
+
+  /* ---- ★ 2.0.9 魔棒选项（SAI2 那张「魔棒」面板，逐项都有实际作用） ----
+   * 存在 localStorage 里跟着人走：取样模式 / 透明容差 / 防止溢出范围 /
+   * 取样来源 / 消除锯齿 / 忽略已选择的区域。色差范围复用画笔的 tolerance 滑块。 */
+  var WAND_DEFAULTS = {
+    mode: 'wrap',       // wrap=被线条包围的透明区域 / diff=色差范围内的区域 / diffAll=色差范围内的全部像素
+    transTol: 19,       // 透明容差范围（SAI2 出场值就是 19）
+    bleed: 0,           // 防止溢出范围（px）
+    source: 'layer',    // layer=当前图层 / sample=指定为选区样本的图层 / merged=拼合图像
+    aa: true,           // 消除锯齿
+    ignore: false       // 忽略已选择的区域
+  };
+  var WAND_MODES = ['wrap', 'diff', 'diffAll'];
+  var WAND_SOURCES = ['layer', 'sample', 'merged'];
+  var WAND_MODE_LABEL = {
+    wrap: '被线条包围的透明区域', diff: '色差范围内的区域', diffAll: '色差范围内的全部像素'
+  };
+  function loadWandOpts() {
+    var o = Object.assign({}, WAND_DEFAULTS);
+    try {
+      var raw = JSON.parse(lsGet('chahu.wand', '{}'));
+      if (raw && typeof raw === 'object') {
+        if (WAND_MODES.indexOf(raw.mode) >= 0) o.mode = raw.mode;
+        if (WAND_SOURCES.indexOf(raw.source) >= 0) o.source = raw.source;
+        if (typeof raw.transTol === 'number' && isFinite(raw.transTol)) o.transTol = clamp(Math.round(raw.transTol), 0, 255);
+        if (typeof raw.bleed === 'number' && isFinite(raw.bleed)) o.bleed = clamp(Math.round(raw.bleed), 0, 20);
+        if (typeof raw.aa === 'boolean') o.aa = raw.aa;
+        if (typeof raw.ignore === 'boolean') o.ignore = raw.ignore;
+      }
+    } catch (e) { /* 坏了就用出场值 */ }
+    return o;
+  }
+  function saveWandOpts() {
+    lsSet('chahu.wand', JSON.stringify(S.wand));
+  }
+  S.wand = loadWandOpts();
 
   try {
     var st = JSON.parse(lsGet('chahu.stickers', '[]'));
@@ -1224,7 +1265,7 @@
     stabilizeRange: ['brush', 'eraser', 'blur', 'smudge'],
     strengthRange: ['blur'],
     smudgeRange: ['smudge'],
-    toleranceRange: ['fill'],
+    toleranceRange: ['fill', 'wand'],
     expandRange: ['fill'],
     filledChk: ['rect', 'ellipse', 'gradient'],
     paperSelect: ['brush', 'eraser', 'line', 'rect', 'ellipse'],
@@ -1244,6 +1285,42 @@
       if (!row) return;
       row.classList.toggle('hidden', PARAM_TOOLS[id].indexOf(S.tool) < 0);
     });
+    // 魔棒那一整块选项面板（照 SAI2 的魔棒面板）跟着工具显隐
+    syncWandUI();
+  }
+
+  /**
+   * ★ 2.0.9 魔棒选项面板：状态 ↔ S.wand，并按当前工具 / 取样模式决定显隐。
+   * 「色差范围」那一行（就是画笔的 tolerance 滑块）只有两种色差模式才用得上 ——
+   * 选「被线条包围的透明区域」时它没有任何作用，留着反而让人以为调了会有效果。
+   */
+  function syncWandUI() {
+    var box = $('#wandOpts');
+    if (!box) return;
+    var w = S.wand;
+    var isWand = S.tool === 'wand';
+    box.classList.toggle('hidden', !isWand);
+    var modeEl = $({ wrap: '#wandModeWrap', diff: '#wandModeDiff', diffAll: '#wandModeAll' }[w.mode] || '#wandModeWrap');
+    if (modeEl) modeEl.checked = true;
+    var srcEl = $({ layer: '#wandSrcLayer', sample: '#wandSrcSample', merged: '#wandSrcMerge' }[w.source] || '#wandSrcLayer');
+    if (srcEl) srcEl.checked = true;
+    setSlider('wandTolRange', w.transTol, Math.round);
+    setSlider('wandBleedRange', w.bleed, function (v) { return Math.round(v) + ' px'; });
+    var aa = $('#wandAAChk');
+    if (aa) aa.checked = !!w.aa;
+    var ig = $('#wandIgnoreChk');
+    if (ig) ig.checked = !!w.ignore;
+    // 「指定为选区样本的图层」还没人认领时把这一项标灰一点，别让人白点
+    var srcSample = $('#wandSrcSample');
+    if (srcSample) {
+      var hasSample = engine.layers.some(function (l) { return l.selSample; });
+      srcSample.parentElement.classList.toggle('off', !hasSample);
+    }
+    var tol = $('#toleranceRange');
+    if (tol) {
+      var row = tol.closest('.row-line');
+      if (row) row.classList.toggle('hidden', !(S.tool === 'fill' || (isWand && w.mode !== 'wrap')));
+    }
   }
 
   var PAPERS = [
@@ -1380,11 +1457,44 @@
   var ringCache = null;
   var triCache = null;
 
-  /* 三角顶点离色环内沿留多少空隙。
+  /* 取色区形状：'square'（默认）| 'triangle'
+   *
+   * 默认改成方形的原因（用户反馈）：三角形的尖角附近，一大片区域画出来的颜色
+   * 都挤在一起 —— 想稳定地选到某个饱和度 / 明度得试好几次；方形的横轴是饱和度、
+   * 纵轴是明度，同一个方向拖多远就是多少，和 PS / SAI 的取色方块一致，好瞄准。
+   * 三角形不走（老习惯），做成可切换并记住选择。
+   */
+  var SV_SHAPE_KEY = 'chahu.svshape';
+
+  function loadSvShape() {
+    try { return lsGet(SV_SHAPE_KEY, '') === 'triangle' ? 'triangle' : 'square'; }
+    catch (e) { return 'square'; }
+  }
+  function saveSvShape(v) { try { lsSet(SV_SHAPE_KEY, v); } catch (e) { /* 记不住就这次会话照用 */ } }
+  /** 当前取色区形状（唯一的读口，绘制 / 命中 / 指示器都必须问它） */
+  function svShape() { return S.svShape === 'triangle' ? 'triangle' : 'square'; }
+
+  /** 切换取色区形状：存盘 + 刷新按钮外观 + 重画色轮 */
+  function setSvShape(v) {
+    S.svShape = (v === 'triangle') ? 'triangle' : 'square';
+    saveSvShape(S.svShape);
+    var btn = $('#btnWheelShape');
+    if (btn) {
+      btn.textContent = S.svShape === 'triangle' ? '△' : '▢';
+      btn.title = S.svShape === 'triangle'
+        ? '取色区：三角形（点一下换成方形）'
+        : '取色区：方形（点一下换成三角形）';
+      btn.setAttribute('aria-label', btn.title);
+    }
+    drawWheel();
+    return S.svShape;
+  }
+
+  /* 取色区离色环内沿留多少空隙。
      留少了看着像连在一起（用户反馈「还是让三角形和环形间隔一段距离」），
      所以这里给到 11px —— 视觉上明确是两块。
-     注意：命中判定不是按半径切的（见 hitIsRing），空隙的一半会算给三角，
-     所以间距加大**不会**让三角变难点，反而更容易。 */
+     注意：命中判定不是按半径切的（见 hitRegion），空隙的一半会算给取色区，
+     所以间距加大**不会**让它变难点，反而更容易。 */
   var TRI_GAP = 11;
 
   /**
@@ -1397,12 +1507,68 @@
     var R = SZ / 2 - 3, ring = 17, r0 = R - ring;
     var tr = r0 - TRI_GAP;
     var T3 = Math.sqrt(3) / 2;
+    // 方形取色区让**四个角正好落在三角顶点那个圆上**（half = tr/√2）。
+    // 用同一个外接半径是有意的：切换形状时取色区不会忽大忽小，
+    // 也不会出现「方形比三角更贴着色环」这种看着别扭的事。
+    var half = tr / Math.SQRT2;
     return {
       SZ: SZ, cx: cx, cy: cy, R: R, ring: ring, r0: r0, tr: tr,
       // A = 纯色相（上）· B = 白（右下）· C = 黑（左下）
       A: [cx, cy - tr],
       B: [cx + T3 * tr, cy + tr / 2],
-      C: [cx - T3 * tr, cy + tr / 2]
+      C: [cx - T3 * tr, cy + tr / 2],
+      SQ: { x: cx - half, y: cy - half, w: half * 2, h: half * 2 }
+    };
+  }
+
+  /** 点到方形取色区的距离：在里面就是 0 */
+  function distToSq(sq, px, py) {
+    var dx = Math.max(sq.x - px, 0, px - (sq.x + sq.w));
+    var dy = Math.max(sq.y - py, 0, py - (sq.y + sq.h));
+    return Math.hypot(dx, dy);
+  }
+
+  /** 点在不在取色区里（按给定形状） */
+  function inSv(g, shape, px, py) {
+    return shape === 'triangle' ? (distToTri(g, px, py) <= 0) : (distToSq(g.SQ, px, py) <= 0);
+  }
+
+  /** 点到取色区边界的距离（里面为 0）—— 用来切「离色环近还是离取色区近」 */
+  function distToSv(g, shape, px, py) {
+    return shape === 'triangle' ? distToTri(g, px, py) : distToSq(g.SQ, px, py);
+  }
+
+  /** SV → 取色区里的画布坐标（画指示器用） */
+  function svToPoint(g, shape, s, v) {
+    if (shape === 'triangle') {
+      // 三角形三个顶点 A=纯色相、B=白、C=黑，重心坐标是 [v*s, v*(1-s), 1-v]。
+      // 推法：颜色 = a*hue + b*255 + c*0，取 max/min 得 V = a+b、S = 1 - b/(a+b)，
+      // 于是 c = 1-V、b = V(1-S)、a = V*S。
+      // 以前写的是 [1-s, s*(1-v), s*v] —— 权重和也是 1，但对应关系是错的：
+      // s=1,v=1（纯色相）会算成 [0,0,1] 落到黑角上，s=0,v=1 时权重和还会变成 2。
+      var wts = [v * s, v * (1 - s), 1 - v];
+      return [
+        wts[0] * g.A[0] + wts[1] * g.B[0] + wts[2] * g.C[0],
+        wts[0] * g.A[1] + wts[1] * g.B[1] + wts[2] * g.C[1]
+      ];
+    }
+    // 方形：横轴 = 饱和度，纵轴 = 明度（上 1 → 下 0）
+    return [g.SQ.x + s * g.SQ.w, g.SQ.y + (1 - v) * g.SQ.h];
+  }
+
+  /** 取色区里的画布坐标 → SV（夹到 0~1）。给「拖动时被拖出边界」兜底 */
+  function pointToSv(g, shape, px, py) {
+    if (shape === 'triangle') {
+      var w = triBary(g, px, py);
+      var sum = (w[0] + w[1] + w[2]) || 1;
+      var a = clamp(w[0] / sum, 0, 1);
+      var c = clamp(w[2] / sum, 0, 1);
+      var v = clamp(1 - c, 0, 1);
+      return { s: v > 0.0001 ? clamp(a / v, 0, 1) : 0, v: v };
+    }
+    return {
+      s: clamp((px - g.SQ.x) / g.SQ.w, 0, 1),
+      v: clamp(1 - (py - g.SQ.y) / g.SQ.h, 0, 1)
     };
   }
 
@@ -1449,32 +1615,42 @@
   }
 
   /**
-   * 在色轮上取一个「三角里的」像素。
-   * 直接读点到的那个像素是不够的：三角和内圈之间有一圈空白，
+   * 在色轮上取一个「取色区里的」像素（方形 / 三角形都用这一份）。
+   * 直接读点到的那个像素是不够的：取色区和内圈之间有一圈空白，
    * 空白里读出来 alpha = 0，于是「点了没反应」。
-   * 这里先把它吸到三角边上，再朝重心挪进去一点（避开那 1px 描边），
+   * 这里先把它吸到取色区边上，再朝中心挪进去一点（避开那 1px 描边），
    * 取到的色值和画出来的一模一样 —— 因为它读的就是画布本身。
    */
-  function sampleTriPixel(ctx, g, x, y) {
+  function sampleSvPixel(ctx, g, shape, x, y) {
     var px = clamp(Math.round(x), 0, g.SZ - 1), py = clamp(Math.round(y), 0, g.SZ - 1);
     var d = ctx.getImageData(px, py, 1, 1).data;
     if (d[3] >= 200) return d;
-    // 先找三角边上离它最近的点（在三角里的话就是它自己）
+    // 先找图形边界上离它最近的点（在图形里的话就是它自己）
     var q = [x, y];
-    if (distToTri(g, x, y) > 0) {
-      var cands = [
-        closestOnSeg(x, y, g.A, g.B),
-        closestOnSeg(x, y, g.B, g.C),
-        closestOnSeg(x, y, g.C, g.A)
-      ];
-      var bd = Infinity;
-      cands.forEach(function (c) {
-        var dd = Math.hypot(c[0] - x, c[1] - y);
-        if (dd < bd) { bd = dd; q = c; }
-      });
+    if (shape === 'triangle') {
+      if (distToTri(g, x, y) > 0) {
+        var cands = [
+          closestOnSeg(x, y, g.A, g.B),
+          closestOnSeg(x, y, g.B, g.C),
+          closestOnSeg(x, y, g.C, g.A)
+        ];
+        var bd = Infinity;
+        cands.forEach(function (c) {
+          var dd = Math.hypot(c[0] - x, c[1] - y);
+          if (dd < bd) { bd = dd; q = c; }
+        });
+      }
+    } else {
+      q = [clamp(x, g.SQ.x, g.SQ.x + g.SQ.w), clamp(y, g.SQ.y, g.SQ.y + g.SQ.h)];
     }
-    var gx = (g.A[0] + g.B[0] + g.C[0]) / 3;
-    var gy = (g.A[1] + g.B[1] + g.C[1]) / 3;
+    var gx, gy;
+    if (shape === 'triangle') {
+      gx = (g.A[0] + g.B[0] + g.C[0]) / 3;
+      gy = (g.A[1] + g.B[1] + g.C[1]) / 3;
+    } else {
+      gx = g.SQ.x + g.SQ.w / 2;
+      gy = g.SQ.y + g.SQ.h / 2;
+    }
     for (var i = 1; i <= 20; i++) {
       var t = i * 0.05;
       var ix = clamp(Math.round(q[0] + (gx - q[0]) * t), 0, g.SZ - 1);
@@ -1514,19 +1690,20 @@
     ctx.clearRect(0, 0, SZ, SZ);
     ctx.drawImage(ringCache, 0, 0);
 
-    // SV 三角：顶点 = 纯色相，右下 = 白，左下 = 黑
-    var A = g.A, B = g.B, C = g.C;
+    // SV 取色区：方形（默认）或三角形，两种都画在**同一张离屏画布**上
+    var A = g.A, B = g.B, C = g.C, SQ = g.SQ;
+    var isTri = svShape() === 'triangle';
     var hue = hsvToRgb(S.hue, 1, 1);
 
-    var minx = Math.floor(Math.min(A[0], B[0], C[0])) - 1;
-    var maxx = Math.ceil(Math.max(A[0], B[0], C[0])) + 1;
-    var miny = Math.floor(Math.min(A[1], B[1], C[1])) - 1;
-    var maxy = Math.ceil(Math.max(A[1], B[1], C[1])) + 1;
+    var minx = Math.floor(isTri ? Math.min(A[0], B[0], C[0]) : SQ.x) - 1;
+    var maxx = Math.ceil(isTri ? Math.max(A[0], B[0], C[0]) : SQ.x + SQ.w) + 1;
+    var miny = Math.floor(isTri ? Math.min(A[1], B[1], C[1]) : SQ.y) - 1;
+    var maxy = Math.ceil(isTri ? Math.max(A[1], B[1], C[1]) : SQ.y + SQ.h) + 1;
     var w = maxx - minx, h = maxy - miny;
     if (w > 0 && h > 0) {
-      // 关键：三角必须画在**离屏画布**上再 drawImage 合成。
+      // 关键：取色区必须画在**离屏画布**上再 drawImage 合成。
       // 直接用 putImageData 到主画布会连同 alpha 一起覆写，
-      // 于是包围盒四角落到圆环上的像素被「打孔」变透明 —— 看起来就是三角把圆环切掉了一块。
+      // 于是包围盒四角落到圆环上的像素被「打孔」变透明 —— 看起来就是取色区把圆环切掉了一块。
       if (!triCache) { triCache = document.createElement('canvas'); }
       if (triCache.width !== SZ || triCache.height !== SZ) {
         triCache.width = SZ; triCache.height = SZ;
@@ -1536,41 +1713,55 @@
       tctx.clearRect(0, 0, SZ, SZ);
       var img = tctx.createImageData(w, h);
       var d = img.data;
+      // 三角形要用的两条边向量（方形那条路用不到，算了也无害）
       var v0x = B[0] - A[0], v0y = B[1] - A[1];
       var v1x = C[0] - A[0], v1y = C[1] - A[1];
       var den = v0x * v1y - v1x * v0y;
       for (var j = 0; j < h; j++) {
         for (var i = 0; i < w; i++) {
           var px = minx + i, py = miny + j;
-          var v2x = px - A[0], v2y = py - A[1];
-          // ⚠️ 变量名和顶点对不上，别按字面理解：
-          //   cross((p-A), v1) 得到的是 **B 的权重**，cross(v0, (p-A)) 得到的是 **C 的权重**，
-          //   1 减掉它们才是 **A 的权重**。
-          // 之前直接把 `u` 当成 A 的权重去乘纯色相，结果整块三角被转了一圈 ——
-          // 纯色相跑到右下角、顶部成了黑色，于是「在色轮上点哪儿，小圆圈都不在那儿」。
-          var wB = ((v2x * v1y - v2y * v1x) / den);
-          var wC = ((v0x * v2y - v2x * v0y) / den);
-          var wA = 1 - wB - wC;
           var o = (j * w + i) * 4;
-          if (wA < -0.004 || wB < -0.004 || wC < -0.004) { d[o + 3] = 0; continue; }
-          wA = clamp(wA, 0, 1); wB = clamp(wB, 0, 1); wC = clamp(wC, 0, 1);
-          var sum = wA + wB + wC || 1;
-          wA /= sum; wB /= sum; wC /= sum;
-          // A = 纯色相（上）· B = 白（右下）· C = 黑（左下）
-          d[o] = Math.round(wA * hue[0] + wB * 255 + wC * 0);
-          d[o + 1] = Math.round(wA * hue[1] + wB * 255 + wC * 0);
-          d[o + 2] = Math.round(wA * hue[2] + wB * 255 + wC * 0);
-          d[o + 3] = 255;
+          if (isTri) {
+            var v2x = px - A[0], v2y = py - A[1];
+            // ⚠️ 变量名和顶点对不上，别按字面理解：
+            //   cross((p-A), v1) 得到的是 **B 的权重**，cross(v0, (p-A)) 得到的是 **C 的权重**，
+            //   1 减掉它们才是 **A 的权重**。
+            // 之前直接把 `u` 当成 A 的权重去乘纯色相，结果整块三角被转了一圈 ——
+            // 纯色相跑到右下角、顶部成了黑色，于是「在色轮上点哪儿，小圆圈都不在那儿」。
+            var wB = ((v2x * v1y - v2y * v1x) / den);
+            var wC = ((v0x * v2y - v2x * v0y) / den);
+            var wA = 1 - wB - wC;
+            if (wA < -0.004 || wB < -0.004 || wC < -0.004) { d[o + 3] = 0; continue; }
+            wA = clamp(wA, 0, 1); wB = clamp(wB, 0, 1); wC = clamp(wC, 0, 1);
+            var sum = wA + wB + wC || 1;
+            wA /= sum; wB /= sum; wC /= sum;
+            // A = 纯色相（上）· B = 白（右下）· C = 黑（左下）
+            d[o] = Math.round(wA * hue[0] + wB * 255 + wC * 0);
+            d[o + 1] = Math.round(wA * hue[1] + wB * 255 + wC * 0);
+            d[o + 2] = Math.round(wA * hue[2] + wB * 255 + wC * 0);
+            d[o + 3] = 255;
+          } else {
+            // 方形：横轴 = 饱和度（左 0 → 右 1），纵轴 = 明度（上 1 → 下 0）。
+            // 于是左上角是白、右上角是纯色相、下边整条是黑 —— PS / SAI 取色方块同款。
+            var ss = (px - SQ.x) / SQ.w, vv = 1 - (py - SQ.y) / SQ.h;
+            if (ss < -0.004 || ss > 1.004 || vv < -0.004 || vv > 1.004) { d[o + 3] = 0; continue; }
+            var rgb = hsvToRgb(S.hue, clamp(ss, 0, 1), clamp(vv, 0, 1));
+            d[o] = rgb[0]; d[o + 1] = rgb[1]; d[o + 2] = rgb[2]; d[o + 3] = 255;
+          }
         }
       }
       tctx.putImageData(img, minx, miny);
       ctx.drawImage(triCache, 0, 0);
     }
 
-    // 三角描边
+    // 取色区描边
     ctx.beginPath();
-    ctx.moveTo(A[0], A[1]); ctx.lineTo(B[0], B[1]); ctx.lineTo(C[0], C[1]);
-    ctx.closePath();
+    if (isTri) {
+      ctx.moveTo(A[0], A[1]); ctx.lineTo(B[0], B[1]); ctx.lineTo(C[0], C[1]);
+      ctx.closePath();
+    } else {
+      ctx.rect(SQ.x, SQ.y, SQ.w, SQ.h);
+    }
     ctx.strokeStyle = 'rgba(0,0,0,.10)';
     ctx.lineWidth = 1;
     ctx.stroke();
@@ -1582,23 +1773,11 @@
     ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
     ctx.strokeStyle = 'rgba(0,0,0,.45)'; ctx.lineWidth = 1; ctx.stroke();
 
-    // SV 指示器
-    //
-    // 三角形的三个顶点分别是 A=纯色相、B=白、C=黑，所以点的重心坐标应该是
-    //     [A 的权重, B 的权重, C 的权重] = [v*s, v*(1-s), 1-v]
-    // 推法：颜色 = a*hue + b*255 + c*0，取 max/min 得 V = a+b、S = 1 - b/(a+b)，
-    // 于是 c = 1-V、b = V(1-S)、a = V*S。
-    //
-    // 这里以前写的是 [1-s, s*(1-v), s*v] —— 权重和确实也是 1，但对应关系是错的：
-    // 比如 s=1,v=1（纯色相）会算成 [0,0,1] 直接落到黑角上，
-    // 而且 s=0,v=1 时算出 [1,1,0] 权重和是 2，点会跑到三角形外面去。
-    // 用户看到的「在色轮上取色时位置识别不对」就是这个。
-    var s = S.sv.s, v = S.sv.v;
-    var sw = [v * s, v * (1 - s), 1 - v];
-    var sx = u_weight(A, B, C, sw)[0];
-    var sy = u_weight(A, B, C, sw)[1];
+    // SV 指示器：位置由 svToPoint 统一换算（方形的公式和三角完全不同，
+    // 以前这里写死了重心坐标 —— 换成方形之后若不改，小圆圈会跑到画布外面去）
+    var sip = svToPoint(g, svShape(), S.sv.s, S.sv.v);
     ctx.beginPath();
-    ctx.arc(sx, sy, 5, 0, Math.PI * 2);
+    ctx.arc(sip[0], sip[1], 5, 0, Math.PI * 2);
     ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
     ctx.strokeStyle = 'rgba(0,0,0,.5)'; ctx.lineWidth = 1; ctx.stroke();
   }
@@ -1614,73 +1793,121 @@
     var cv = $('#colorWheel');
     if (!cv) return;
     var drag = false;
+    var dragRegion = null;       // 'ring' | 'sv'，按下那一刻定死
+
+    function localXY(e) {
+      var r = cv.getBoundingClientRect();
+      return {
+        x: (e.clientX - r.left) * cv.width / r.width,
+        y: (e.clientY - r.top) * cv.height / r.height
+      };
+    }
 
     /**
-     * 判定鼠标落在「色相环」还是「SV 三角」上。
+     * 判定一点落在「色相环」「SV 取色区」还是「什么都不该响应」。
      *
-     * 以前只按半径切：dist >= r0 就算环，否则算三角。问题是三角是**内接**的，
-     * 边上和顶点附近跟内圈之间有一圈空白，那圈空白既不在三角里、也没到环的半径，
-     * 于是「点了没反应」；再往外一点就变成环 —— 用户看到的正是
-     * 「想点三角，结果色相被改、环上的小圈跳走了」。
-     *
-     * 现在按「离谁近就算谁」切：圈内空白一分为二，两边都不再有死区，
-     * 三角的实际可点范围也就顺势往外长了一圈（顶点方向长出大约半个空隙）。
+     * 三层判据：
+     *  1. **圆外一律不响应**（'miss'）。画布是方的、色轮是圆的，四个角那一块
+     *     永远没有颜色。以前这里是 `dist >= r0` 就当作环，于是点在画布角落
+     *     （离圆心比外半径 R 还远）也会把色相改掉 —— 用户报的「边缘取色误触」
+     *     就是它：想点取色区边缘，手偏了一点落到角上，色相莫名其妙跳了。
+     *  2. 环带（r0 ~ R）→ 色相环。
+     *  3. 剩下的按「离谁近就算谁」切，圈内那圈空白一分为二，不留「点了没反应」
+     *     的死区；取色区的实际可点范围也就顺势往外长了一圈。
      */
-    function hitIsRing(g, x, y) {
+    function hitRegion(g, x, y) {
       var dist = Math.hypot(x - g.cx, y - g.cy);
-      if (dist >= g.r0) return true;          // 已经在环带里
-      if (distToTri(g, x, y) <= 0) return false; // 在三角里
-      // 夹在中间：比一比「离三角」和「离环内沿」哪个近
-      return (g.r0 - dist) < distToTri(g, x, y);
+      if (dist > g.R) return 'miss';
+      if (dist >= g.r0) return 'ring';
+      var shape = svShape();
+      if (inSv(g, shape, x, y)) return 'sv';
+      return (g.r0 - dist) < distToSv(g, shape, x, y) ? 'ring' : 'sv';
     }
 
-    function pick(e) {
-      var r = cv.getBoundingClientRect();
-      var x = (e.clientX - r.left) * cv.width / r.width;
-      var y = (e.clientY - r.top) * cv.height / r.height;
-      var g = wheelGeom(cv);
-      // 标记这次落在哪一边，测试靠它判定「到底点中了什么」（比猜颜色可靠）
-      cv.dataset.pick = hitIsRing(g, x, y) ? 'ring' : 'tri';
-      if (hitIsRing(g, x, y)) {
-        var deg = (Math.atan2(y - g.cy, x - g.cx) * 180 / Math.PI + 360) % 360;
-        // 按住 Shift 每 15° 吸一档 —— 画对称图 / 想要标准色相时省事
-        if (e.shiftKey) deg = Math.round(deg / 15) * 15 % 360;
-        S.hue = deg;
-        applyHsv();
-        drawWheel();
-        return;
+    function applyRing(g, x, y, shift) {
+      var deg = (Math.atan2(y - g.cy, x - g.cx) * 180 / Math.PI + 360) % 360;
+      // 按住 Shift 每 15° 吸一档 —— 画对称图 / 想要标准色相时省事
+      if (shift) deg = Math.round(deg / 15) * 15 % 360;
+      S.hue = deg;
+      applyHsv();
+    }
+
+    function applySv(g, x, y) {
+      var shape = svShape();
+      // 拖动中被拖到取色区外面 → 先夹回边上再取样。不夹的话会读到透明像素、
+      // 于是「拖出去就粘住不动」，手感像坏了。
+      if (shape === 'square') {
+        x = clamp(x, g.SQ.x + 0.5, g.SQ.x + g.SQ.w - 0.5);
+        y = clamp(y, g.SQ.y + 0.5, g.SQ.y + g.SQ.h - 0.5);
       }
-      var ctx = cv.getContext('2d');
-      var d = sampleTriPixel(ctx, g, x, y);
-      if (d[3] < 8) { cv.dataset.pick = 'miss'; return; }
+      var d = sampleSvPixel(cv.getContext('2d'), g, shape, x, y);
+      if (d[3] < 8) return;
       var hh = reliableHue(d[0], d[1], d[2]);
+      // 取色区靠近白角 / 黑角的地方几乎没有彩度，色相是算不出来的（会回 0）。
+      // 直接写 S.hue 会让色环上的小圈毫无理由地跳到红色去 —— 只在真的有色相时才更新。
       if (hh !== null) S.hue = hh;
       var hsv = rgbToHsv(d[0], d[1], d[2]);
-      // 三角里靠近白角 / 黑角的像素几乎没有彩度，色相是算不出来的（会回 0）。
-      // 直接写 S.hue 会让色环上的小圈毫无理由地跳到红色去 —— 只在真的有色相时才更新。
       S.sv = { s: hsv.s, v: hsv.v };
       setColor(hexOf(d[0], d[1], d[2]), false);
+    }
+
+    function pick(e, region) {
+      var p = localXY(e);
+      var g = wheelGeom(cv);
+      // 标记这次落在哪一边，测试靠它判定「到底点中了什么」（比猜颜色可靠）
+      cv.dataset.pick = region;
+      cv.dataset.svShape = svShape();
+      if (region === 'ring') applyRing(g, p.x, p.y, e.shiftKey);
+      else if (region === 'sv') applySv(g, p.x, p.y);
+      else return;
       drawWheel();
     }
+
     cv.addEventListener('pointerdown', function (e) {
       // 数位笔 / 触摸拖色轮时，浏览器默认会把它当成「滚动手势」，
       // 结果整条左侧面板跟着一起滑 —— 必须两个一起做才压得住：
       //   · CSS 里给 canvas 设 touch-action: none
       //   · 事件里 preventDefault（并阻止后续的兼容鼠标事件）
       e.preventDefault();
+      var p = localXY(e);
+      var region = hitRegion(wheelGeom(cv), p.x, p.y);
+      // 落在色轮圆外面（画布四角那块透明区）→ 不开始拖动、一个像素都不改。
+      // 这是「边缘防误触」的关键：以前这里会当成环，手稍微偏一点色相就跳了。
+      if (region === 'miss') {
+        drag = false; dragRegion = null;
+        cv.dataset.pick = 'miss';
+        return;
+      }
       drag = true;
+      // ★ 按下时锁定区域：之后不管拖到哪里都只改这一个分量。
+      //   不锁的话从取色区拖到环上会突然改成色相（反之亦然）—— 正是误触的来源。
+      dragRegion = region;
       // 合成事件（脚本发出的）没有真实指针，setPointerCapture 会抛异常。
       // 以前没包 try，一抛就把整个 pointerdown 处理器打断，连 pick(e) 都执行不到。
       try { cv.setPointerCapture(e.pointerId); } catch (err) { /* 没有真实指针就算了 */ }
-      pick(e);
+      pick(e, region);
     });
     cv.addEventListener('pointermove', function (e) {
-      if (!drag) return;
+      if (!drag || !dragRegion) return;
       e.preventDefault();
-      pick(e);
+      pick(e, dragRegion);
     });
-    cv.addEventListener('pointerup', function () { drag = false; });
-    cv.addEventListener('pointercancel', function () { drag = false; });
+    cv.addEventListener('pointerup', function () { drag = false; dragRegion = null; });
+    cv.addEventListener('pointercancel', function () { drag = false; dragRegion = null; });
+
+    // 取色区形状切换（色轮右上角那颗小按钮）
+    var shapeBtn = $('#btnWheelShape');
+    if (shapeBtn) {
+      shapeBtn.addEventListener('click', function () {
+        var next = setSvShape(svShape() === 'triangle' ? 'square' : 'triangle');
+        toast(next === 'triangle' ? '取色区：三角形' : '取色区：方形（横轴饱和度 / 纵轴明度）');
+      });
+      var cur = svShape();
+      shapeBtn.textContent = cur === 'triangle' ? '△' : '▢';
+      shapeBtn.title = cur === 'triangle'
+        ? '取色区：三角形（点一下换成方形）'
+        : '取色区：方形（点一下换成三角形）';
+    }
   }
 
   /**
@@ -2027,6 +2254,17 @@
     return S.selGroup ? engine.getGroup(S.selGroup) : null;
   }
 
+  /** ★ v2.0.10：进 / 出蒙版编辑。提到模块级是因为**图层行里的那张蒙版缩略图**也要调它
+   *  （以前它定义在 bindUI 里面，缩略图点一下会 ReferenceError: setMaskEdit is not defined）。 */
+  function setMaskEdit(id) {
+    var l = id ? engine.getLayer(id) : null;
+    if (!l || !l.hasMask) id = null;
+    S.maskEdit = id;
+    if (id) toast('正在编辑「' + l.name + '」的蒙版 —— 黑笔遮住、白笔露出');
+    syncMaskHead(engine.activeLayer());
+    renderLayers();
+  }
+
   function renderLayers() {
     var box = $('#layerList');
     box.innerHTML = '';
@@ -2047,6 +2285,185 @@
     }
     syncLayerHead();
   }
+
+  /* ---------------- 图层面板：按住拖动排序 ---------------- */
+
+  /**
+   * 面板顺序（自上而下）的两份视图：
+   *   ids  —— 每个图层一行，顺序 = 眼睛看到的顺序（折叠的组也照样把成员列进去）
+   *   rows —— 真正画出来的行，一行一个；组行记它顶上那个成员的下标
+   * 两者一一对应，所以「行与行之间的插入位 k」可以直接换算成 ids 的下标。
+   */
+  function layerRowsInfo() {
+    var list = engine.layers, ids = [], rows = [], emitted = {};
+    for (var i = list.length - 1; i >= 0; i--) {
+      var l = list[i], g = engine.groupOf(l);
+      ids.push(l.id);
+      if (!g) { rows.push({ member: l.id, idsIdx: ids.length - 1, gid: null }); continue; }
+      if (!emitted[g.id]) {
+        emitted[g.id] = 1;
+        rows.push({ member: null, idsIdx: ids.length - 1, gid: g.id });
+      }
+      if (!g.collapsed) rows.push({ member: l.id, idsIdx: ids.length - 1, gid: g.id });
+    }
+    return { ids: ids, rows: rows };
+  }
+
+  function layerRowEls() {
+    var box = $('#layerList');
+    if (!box) return [];
+    return Array.prototype.filter.call(box.children, function (c) {
+      return !c.classList.contains('layer-drop');
+    });
+  }
+
+  /** 指针在纵坐标 y 上，应该插到「第几行的前面」（0 = 最上面，行数 = 最下面） */
+  function layerDropK(y) {
+    var els = layerRowEls();
+    for (var i = 0; i < els.length; i++) {
+      var r = els[i].getBoundingClientRect();
+      if (y < r.top + r.height / 2) return i;
+    }
+    return els.length;
+  }
+
+  var dropLineEl = null;
+  function showLayerDropLine(k) {
+    var box = $('#layerList');
+    if (!box) return;
+    if (!dropLineEl) {
+      dropLineEl = document.createElement('div');
+      dropLineEl.className = 'layer-drop';
+      box.appendChild(dropLineEl);
+    }
+    var els = layerRowEls();
+    var y = 0;
+    if (els.length) {
+      if (k <= 0) y = els[0].offsetTop - 1;
+      else if (k >= els.length) {
+        var last = els[els.length - 1];
+        y = last.offsetTop + last.offsetHeight - 1;
+      } else y = els[k].offsetTop - 1;
+    }
+    dropLineEl.style.top = Math.max(0, y) + 'px';
+  }
+
+  function hideLayerDropLine() {
+    if (dropLineEl && dropLineEl.parentNode) dropLineEl.parentNode.removeChild(dropLineEl);
+    dropLineEl = null;
+  }
+
+  /**
+   * 落定一次拖动。
+   * @param {{kind:'layer'|'group', id:string}} drag 被拖的是单层还是整组
+   * @param {number} k 「插到第几行的前面」，行数即最底部
+   *
+   * 一条 LAYER_ORDER 同时表达两件事：整套顺序、以及（拖单层时）它在落点处
+   * 该不该属于某个组 —— 服务的规则是「同组必须连续」（rooms.reorderLayers）。
+   */
+  function commitLayerDrag(drag, k) {
+    if (!S.joined || !drag) return;
+    var info = layerRowsInfo();
+    var ids = info.ids, rows = info.rows;
+    if (k < 0) k = 0;
+    if (k > rows.length) k = rows.length;
+    var at = (k >= rows.length) ? ids.length : rows[k].idsIdx;
+
+    var i;
+    var block;
+    if (drag.kind === 'group') {
+      // 整组拖动 = 把它名下所有成员当成一个连续的块挪过去。
+      // ⚠ 这里**绝不能**把组降级成单层拖动（曾经对「只有一个成员的组」这么干过）：
+      // 单层那条路会带上 layerId，服务端就按 groupId 重写归属 —— 而整组拖动时
+      // 落点下面那一行往往还是组内成员，算出来的 gid 却是 null，于是拖一次组
+      // 反而把成员从组里踢了出去（组凭空解散）。只在 order 里挪位置、layerId 留空，
+      // 服务端就只动顺序、完全不碰归属。
+      block = ids.filter(function (id) {
+        var l = engine.getLayer(id);
+        var g = l ? engine.groupOf(l) : null;
+        return g && g.id === drag.id;
+      });
+      if (!block.length) return;         // 空组没得拖
+    } else {
+      if (ids.indexOf(drag.id) < 0) return;
+      block = [drag.id];
+    }
+
+    // 从 ids 里整块摘出来，再插到落点
+    var first = Math.min.apply(null, block.map(function (id) { return ids.indexOf(id); }));
+    var rest = ids.filter(function (id) { return block.indexOf(id) < 0; });
+    var adj = at > first ? Math.max(first, at - block.length) : at;
+    var next = rest.slice(0, adj).concat(block, rest.slice(adj));
+
+    // 落点下面那一行如果是某个（展开的）组的成员，就归进那个组；否则脱离组
+    var gid = null;
+    if (drag.kind === 'layer') {
+      var below = rows[k] || null;
+      if (below && below.member) {
+        var bl = engine.getLayer(below.member);
+        var bg = bl ? engine.groupOf(bl) : null;
+        if (bg && !bg.collapsed) gid = bg.id;
+      }
+    }
+    // 面板顺序 → 合成顺序（引擎里是自下而上）
+    var order = next.slice().reverse();
+    net.send(P.C2S.LAYER_ORDER, {
+      order: order,
+      layerId: drag.kind === 'layer' ? drag.id : null,
+      groupId: gid
+    });
+  }
+
+  var dragCand = null, dragDocBound = false, dragSuppressClick = false;
+
+  function onLayerRowDown(e) {
+    if (e.button !== 0 || !S.joined) return;
+    var el = e.currentTarget;
+    // 眼睛 / 折叠 / 行内按钮 / 改名输入框上不启动拖动
+    var t = e.target;
+    if (t && t.closest && t.closest('button, input, select, textarea')) return;
+    if (el.dataset.id) dragCand = { kind: 'layer', id: el.dataset.id, el: el, y: e.clientY, started: false };
+    else if (el.dataset.groupId) dragCand = { kind: 'group', id: el.dataset.groupId, el: el, y: e.clientY, started: false };
+    else return;
+    if (!dragDocBound) {
+      document.addEventListener('pointermove', onLayerRowMove, true);
+      document.addEventListener('pointerup', onLayerRowUp, true);
+      document.addEventListener('pointercancel', onLayerRowUp, true);
+      dragDocBound = true;
+    }
+  }
+
+  function onLayerRowMove(e) {
+    if (!dragCand) return;
+    if (!dragCand.started) {
+      if (Math.abs(e.clientY - dragCand.y) < 4) return;
+      dragCand.started = true;
+      dragCand.el.classList.add('dragging');
+      var box = $('#layerList');
+      if (box) box.classList.add('dragging-list');
+    }
+    e.preventDefault();
+    dragCand.k = layerDropK(e.clientY);
+    showLayerDropLine(dragCand.k);
+  }
+
+  function onLayerRowUp(e) {
+    if (!dragCand) return;
+    var cand = dragCand;
+    dragCand = null;
+    var box = $('#layerList');
+    if (box) box.classList.remove('dragging-list');
+    cand.el.classList.remove('dragging');
+    hideLayerDropLine();
+    if (!cand.started) return;
+    // 拖完别把这一下当成「点一下选中」
+    dragSuppressClick = true;
+    setTimeout(function () { dragSuppressClick = false; }, 0);
+    var k = (typeof cand.k === 'number') ? cand.k : layerDropK(e.clientY);
+    commitLayerDrag({ kind: cand.kind, id: cand.id }, k);
+  }
+
+  function layerDragBound() { return dragSuppressClick; }
 
   /** 行内改名（图层与组共用同一套） */
   function renameInline(box, current, commit) {
@@ -2101,11 +2518,37 @@
     if (l.thumb) th.style.backgroundImage = 'url(' + l.thumb + ')';
     row.appendChild(th);
 
+    // ★ v2.0.10：**蒙版缩略图**（SAI2 把它挂在图层缩略图右边，往里缩进、样式也不同）——
+    //   点它就能进 / 出蒙版编辑（省得每次都去点下面那颗「编辑蒙版」按钮），
+    //   Alt+点 = 临时关掉 / 打开这张蒙版（对应 SAI2 里蒙版缩略图上的那一下开关）。
+    if (l.hasMask) {
+      var mth = document.createElement('div');
+      mth.className = 'thumb mask-thumb' +
+        (S.maskEdit === l.id ? ' on' : '') + (l.maskEnabled === false ? ' off' : '');
+      if (l.maskThumb) mth.style.backgroundImage = 'url(' + l.maskThumb + ')';
+      mth.title = (S.maskEdit === l.id ? '正在编辑这张蒙版（点一下退出）' : '点一下进入蒙版编辑')
+        + ' · Alt+点 = ' + (l.maskEnabled === false ? '启用' : '临时关掉') + '这张蒙版';
+      mth.onclick = function (e) {
+        e.stopPropagation();
+        if (layerDragBound()) return;
+        if (e.altKey) {
+          net.send(P.C2S.LAYER_UPD, { layerId: l.id, patch: { maskEnabled: l.maskEnabled === false } });
+          return;
+        }
+        setMaskEdit(S.maskEdit === l.id ? null : l.id);
+      };
+      row.appendChild(mth);
+    }
+
     var nm = document.createElement('div');
     nm.className = 'lname';
     nm.innerHTML = '<span>' + esc(l.name) + '</span>' +
       '<span class="lmeta">' + esc(P.BLEND_LABELS[l.blend] || l.blend) + ' · ' + Math.round(l.opacity * 100) + '%' +
-      (l.alphaLock ? ' · 锁' : '') + '</span>';
+      (l.locked ? ' · 全部锁' : '') +
+      (l.drawLock ? ' · 锁画笔' : '') +
+      (l.moveLock ? ' · 锁移动' : '') +
+      (l.alphaLock ? ' · 锁透明' : '') +
+      (l.selSample ? ' · 选区样本' : '') + '</span>';
     nm.title = '双击重命名';
     nm.ondblclick = function (e) {
       e.stopPropagation();
@@ -2115,7 +2558,10 @@
     };
     row.appendChild(nm);
 
+    // 按住整行可以拖动排序（眼睛 / 名字双击改名 / 行内按钮都不受影响）
+    row.addEventListener('pointerdown', onLayerRowDown);
     row.onclick = function () {
+      if (layerDragBound()) return;
       S.selGroup = null;
       engine.setActiveLayer(l.id);      // 会触发 renderLayers
       syncLayerHead();
@@ -2203,7 +2649,10 @@
     del.onclick = function (e) { e.stopPropagation(); groupDelWithLayers(g); };
     row.appendChild(del);
 
+    // 组行同样可以整块拖着走（组里那几层会跟着一起挪）
+    row.addEventListener('pointerdown', onLayerRowDown);
     row.onclick = function () {
+      if (layerDragBound()) return;
       S.selGroup = g.id;
       renderLayers();
       syncLayerHead();
@@ -2211,16 +2660,26 @@
     return row;
   }
 
-  /** 图层工具条上那几个蒙版控件的状态 */
+  /** 图层工具条上那几个控件的状态（★ v2.0.10：剪贴是勾选框了，蒙版有独立缩略图） */
   function syncMaskHead(l) {
     var has = !!(l && l.hasMask);
     var clipEl = $('#clipChk');
-    if (clipEl) { clipEl.checked = !!(l && l.clip); clipEl.disabled = !l; }
+    if (clipEl) {
+      clipEl.checked = !!(l && l.clip);
+      clipEl.disabled = !l;
+    }
     var add = $('#btnMaskAdd'), ed = $('#btnMaskEdit'), del = $('#btnMaskDel');
     if (add) { add.classList.toggle('hidden', has); add.disabled = !l; }
     if (ed) {
       ed.classList.toggle('hidden', !has);
-      ed.textContent = (l && S.maskEdit === l.id) ? '退出蒙版' : '编辑蒙版';
+      // ★ 2.0.9：蒙版那三颗现在是**图标按钮**（和图层操作挤在同一排，照 SAI2 的版面），
+      //   图标里没有放字的地方 —— 编辑中这个状态走 title + 「亮起来」，
+      //   原来那句 ed.textContent = '退出蒙版' 会直接顶破这一排的版面。
+      var editing = !!(l && S.maskEdit === l.id);
+      ed.title = editing
+        ? '退出蒙版编辑（回到图层像素）'
+        : '进入蒙版编辑：之后画下去的都改蒙版（黑遮白露）';
+      ed.classList.toggle('on', editing);
     }
     if (del) del.classList.toggle('hidden', !has);
   }
@@ -2237,24 +2696,34 @@
       $('#layerBlend').value = g.blend;
       $('#layerOpacity').value = Math.round(g.opacity * 100);
       $('#layerOpacityVal').textContent = Math.round(g.opacity * 100);
-      // 锁定 / 保护不透明度是**逐层**的东西，组没有这两样，直接禁用，
-      // 免得勾了没反应、看起来像坏了
-      $('#lockChk').checked = false;
-      $('#alphaLockChk').checked = false;
-      $('#lockChk').disabled = true;
-      $('#alphaLockChk').disabled = true;
+      // ★ v2.0.10：锁定那四颗都是**逐层**的东西，组一个都没有 —— 全禁用 + 清空勾选，
+      //   免得点了没反应、看起来像坏了
+      ['#lockChk', '#lockDrawChk', '#lockMoveChk', '#alphaLockChk', '#selSampleChk'].forEach(function (sel) {
+        var el = $(sel);
+        if (!el) return;
+        el.checked = false;
+        el.disabled = true;
+      });
       syncMaskHead(null);
       return;
     }
-    $('#lockChk').disabled = false;
-    $('#alphaLockChk').disabled = false;
+    ['#lockChk', '#lockDrawChk', '#lockMoveChk', '#alphaLockChk', '#selSampleChk'].forEach(function (sel) {
+      var el = $(sel);
+      if (el) el.disabled = false;
+    });
     var l = engine.activeLayer();
     if (!l) return;
     $('#layerBlend').value = l.blend;
     $('#layerOpacity').value = Math.round(l.opacity * 100);
     $('#layerOpacityVal').textContent = Math.round(l.opacity * 100);
     $('#alphaLockChk').checked = !!l.alphaLock;
+    $('#lockDrawChk').checked = !!l.drawLock;
+    $('#lockMoveChk').checked = !!l.moveLock;
     $('#lockChk').checked = !!l.locked;
+    // ★ 2.0.9「指定为选区样本」：整份文档只有一层是样本层，所以这里显示的是
+    //   「当前这一层是不是那一层」（单选圆点，照 SAI2）。
+    var ssChk = $('#selSampleChk');
+    if (ssChk) ssChk.checked = !!l.selSample;
     syncMaskHead(l);
   }
 
@@ -2355,6 +2824,31 @@
       png: merged.toDataURL('image/png'), upToSeq: engine.seq
     });
     toast('正在合并「' + src.name + '」到「' + dst.name + '」…');
+  }
+
+  /**
+   * 「将该图层的内容转移到下层」。
+   * 和「向下合并」只差一件事：**不施加本层的不透明度 / 混合模式**，
+   * 原始像素照原样倒进下层，本层留下但被清空（SAI 里就是这么分的两个命令）。
+   * 两条现成的消息就够：下层整体换像素 + 本层清空。
+   */
+  function layerMoveContentDown() {
+    if (needLayer('将该图层内容转移到下层')) return;
+    if (!S.joined) return;
+    var i = engine.layers.findIndex(function (l) { return l.id === engine.activeLayerId; });
+    if (i <= 0) { toast('最下面的图层没有下层可以接收', 'err'); return; }
+    var src = engine.layers[i], dst = engine.layers[i - 1];
+    if (!src || !dst) return;
+    var merged = document.createElement('canvas');
+    merged.width = engine.width; merged.height = engine.height;
+    var mc = merged.getContext('2d');
+    mc.drawImage(engine.renderLayerRaw(dst.id), 0, 0);
+    mc.drawImage(engine.renderLayerRaw(src.id), 0, 0);
+    net.send(P.C2S.LAYER_PIXELS, {
+      layerId: dst.id, png: merged.toDataURL('image/png'), upToSeq: engine.seq
+    });
+    net.send(P.C2S.LAYER_CLEAR, { layerId: src.id });
+    toast('「' + src.name + '」的内容已转移到「' + dst.name + '」', 'ok', 2400);
   }
 
   /* ---------------- 图层组的操作 ---------------- */
@@ -2531,37 +3025,53 @@
   function handleBrushFiles(files) {
     var list = Array.prototype.slice.call(files || []);
     if (!list.length) return;
+    var slots = new Array(list.length);
     var pending = list.length;
-    var collected = [];
     var failed = [];
 
-    list.forEach(function (f) {
+    // 先把**所有**文件读进来再解析：SAI2 的笔尖形状（blotmap BMP）是独立的兄弟文件，
+    // 解析 .saitdat 时要能顺手把它配起来（见 brush-import.js 的 parseSaitdat）。
+    list.forEach(function (f, idx) {
       var fr = new FileReader();
-      fr.onload = function () {
+      fr.onload = function () { slots[idx] = { name: f.name, bytes: new Uint8Array(fr.result) }; step(); };
+      fr.onerror = function () { failed.push(f.name + '：读取失败'); step(); };
+      fr.readAsArrayBuffer(f);
+    });
+
+    function step() { if (--pending > 0) return; finish(); }
+
+    function finish() {
+      var ok = slots.filter(Boolean);
+      var collected = [];
+      var skipped = 0;
+      ok.forEach(function (f) {
+        // 兄弟素材只是给 .saitdat 当参考，不单独当一支笔导入
+        if (/\.(bmp|ini|saitlnk|png|jpe?g)$/i.test(f.name)) { skipped++; return; }
         try {
-          var res = window.ChaBrushImport.parse(f.name, new Uint8Array(fr.result));
+          var res = window.ChaBrushImport.parse(f.name, f.bytes, { siblings: ok });
           if (!res.brushes.length) throw new Error('里面没有可导入的笔刷');
-          var KIND_LABEL = { abr: 'Photoshop', sut: 'CSP', procreate: 'Procreate' };
+          var KIND_LABEL = {
+            abr: 'Photoshop', sut: 'CSP', procreate: 'Procreate',
+            sai: 'SAI2', bru: '画世界Pro'
+          };
           res.brushes.slice(0, IMPORT_MAX).forEach(function (b) {
-            b.sourceLabel = f.name + '（' + (KIND_LABEL[res.kind] || res.kind) + '）';
+            var kind = KIND_LABEL[res.kind] || res.kind;
+            b.sourceLabel = f.name + '（' + kind + (b.note ? ' · ' + b.note : '') + '）';
             b.hash = simpleHash(f.name + '|' + (b.name || '') + '|' + String(b.tip || '').slice(0, 32));
             collected.push(b);
           });
         } catch (e) {
           failed.push(f.name + '：' + e.message);
         }
-        if (--pending === 0) finish();
-      };
-      fr.onerror = function () {
-        failed.push(f.name + '：读取失败');
-        if (--pending === 0) finish();
-      };
-      fr.readAsArrayBuffer(f);
-    });
-
-    function finish() {
+      });
       if (failed.length) toast('这些文件没能解析：' + failed.join('；'), 'err', 6000);
-      if (!collected.length) return;
+      if (!collected.length) {
+        // 只选了素材（BMP 之类）时不能一声不响 —— 用户会以为导入坏了
+        if (skipped && !failed.length) {
+          toast('这些是笔刷的素材文件，要和笔刷定义（.saitdat）一起选才会被读进去', 'err', 5500);
+        }
+        return;
+      }
       showImportDialog(collected, (S.imported || []).length);
     }
   }
@@ -2621,10 +3131,15 @@
         (thumb ? '<img class="imp-tip" src="' + thumb + '" alt="">' : '<span class="imp-tip"></span>') +
         '<span class="imp-name">' + esc(b.name) + '</span>' +
         '<span class="imp-meta">' + esc(bits.join(' · ')) + '</span>';
+      // 来源 + 备注（SAI2 的「笔尖形状取自 xx.bmp」这类）挂在 title 上 ——
+      // 一行里塞不下，但用户悬停一下就能确认这支笔是从哪个文件、按什么规则读出来的。
+      var tips = [];
       if (b.flat) {
-        row.title = '这支笔的文件里只有一张纯色图（多半是「实心方头」这类笔尖，'
-          + '也可能是素材库的空白预览图）。左边就是它的笔尖预览 —— 对不上就别勾。';
+        tips.push('这支笔的文件里只有一张纯色图（多半是「实心方头」这类笔尖，'
+          + '也可能是素材库的空白预览图）。左边就是它的笔尖预览 —— 对不上就别勾。');
       }
+      if (b.sourceLabel) tips.push('来源：' + b.sourceLabel);
+      if (tips.length) row.title = tips.join('\n');
       body.appendChild(row);
     });
     $('#importMask').classList.remove('hidden');
@@ -3465,14 +3980,45 @@
   // 光标样式：auto = 大笔刷圆环 / 小笔刷十字；ring = 始终圆环；cross = 始终十字
   var CURSOR_MIN = 5;       // 圆环最小直径，再小就只剩一个糊点
   var CROSS_BOX = 11;       // 十字准星的盒子边长（固定，保证整数像素对齐）
+  var DROP_BOX = 22;        // 吸管光标的盒子边长（固定，见 styles.css 的 .eyedrop）
+  // 吸管图标里「笔尖」落在 SVG 的哪个位置（24 视口里的 (4,20)）→ 换成 22px 盒子里的像素偏移。
+  // 不这样对齐的话，笔尖和真正取色的那个像素差着几个像素，用户会觉得「吸偏了」。
+  var DROP_TIP_X = DROP_BOX * 4 / 24;
+  var DROP_TIP_Y = DROP_BOX * 20 / 24;
+
+  /**
+   * 现在这一刻「点下去是取色还是落笔」。
+   * 判据必须和 pointerdown 里那条分支**完全一致**（app.js 的 Alt 临时吸管），
+   * 否则光标显示的是吸管、点下去却在画（或者反过来）—— 那比不换光标还糟。
+   * 选区工具下 Alt 是「减选」，不能被吸管抢走，所以这里也排除掉。
+   */
+  function altPicking() {
+    return S.tool === 'picker' || (!!S.altDown && !isSelectToolId(S.tool));
+  }
 
   function updateBrushCursor() {
     var el = bcNode();
     if (!el) return;
     // 变换模式下不显示画笔光标（那时指针在拖变换框）
-    var hide = !S.pointer.inside || S.tool === 'picker' || !!S.pan || !S.joined || !!engine.transform;
+    var hide = !S.pointer.inside || !!S.pan || !S.joined || !!engine.transform;
+    var drop = !hide && altPicking();
     el.classList.toggle('hidden', hide);
-    if (hide) return;
+    // 吸管状态下要把**系统光标**也藏掉，否则会跟吸管图标叠成两个指针。
+    // （.stage.drawing 只覆盖画笔类工具，吸管工具本身不在那一条里）
+    $('#stage').classList.toggle('eyedropping', drop);
+    if (hide) { el.classList.remove('eyedrop'); return; }
+    // Alt 临时吸管 / 吸管工具 → 换成吸管图标
+    if (drop) {
+      el.classList.add('eyedrop');
+      el.classList.remove('cross');
+      el.classList.remove('erase', 'smudge', 'select');
+      el.style.width = DROP_BOX + 'px';
+      el.style.height = DROP_BOX + 'px';
+      el.style.left = Math.round(S.pointer.sx - DROP_TIP_X) + 'px';
+      el.style.top = Math.round(S.pointer.sy - DROP_TIP_Y) + 'px';
+      return;
+    }
+    el.classList.remove('eyedrop');
     // 直径严格对应笔刷实际落笔尺寸（× 视图缩放）
     var raw = (Number(S.brush.size) || 1) * (engine.scale || 1);
     var style = S.cursorStyle || 'auto';
@@ -3672,6 +4218,8 @@
     var _bm = canvasBlockMsg();
     if (_bm) { toast(_bm, 'err', 1600); return; }
     if (layer.locked) { toast('图层「' + layer.name + '」已锁定'); return; }
+    // ★ v2.0.10：锁定画笔（SAI2 锁定行里那支铅笔）—— 这一层暂时画不上去，但还能移动 / 改属性
+    if (layer.drawLock) { toast('图层「' + layer.name + '」锁定了画笔'); return; }
 
     var usePressure = pressureUsable(pointerType);
     updatePenDetect(pointerType, { pointerType: pointerType });
@@ -3700,12 +4248,27 @@
 
     // 魔棒：点一下就要结果，走的是「一次性选区工具」这条路，不上传也不进历史
     if (S.tool === 'wand') {
+      var w = S.wand;
+      if (w.source === 'sample' && !engine.layers.some(function (x) { return x.selSample; })) {
+        toast('还没有「指定为选区样本」的图层 · 先在图层行上点那颗圆点', 'err', 3200);
+      }
       beginSelSnapshot();
-      var winfo = strokeInfo(id, layer, false, { add: S.modShift, subtract: S.modAlt });
+      // ★ 2.0.9：SAI2 那张魔棒面板上的六项**全都**跟着这一笔下去（选项字段见 engine.newStroke），
+      //   色差范围复用画笔的 tolerance 滑块
+      var winfo = strokeInfo(id, layer, false, {
+        add: S.modShift, subtract: S.modAlt,
+        selMode: w.mode, transTol: w.transTol, bleed: w.bleed,
+        selSource: w.source, antiAlias: w.aa, ignoreSel: w.ignore
+      });
+      var hadSel = engine.hasSelection();
       var wst = engine.beginStroke(Object.assign({ local: true }, winfo));
       if (!wst) return;
       engine.addPoints(id, [[Math.round(px), Math.round(py), 0.5]]);
       engine.endStroke(id, 0);
+      // 一点都没选中就明说一句：否则画面上什么都没发生，看着像魔棒坏了
+      if (!hadSel && !engine.hasSelection()) {
+        toast('这里没有可选的区域（取样模式：' + (WAND_MODE_LABEL[w.mode] || w.mode) + '）', 'err', 3000);
+      }
       afterRegionSelect();
       return;
     }
@@ -3924,6 +4487,9 @@
       // 选区的加选 / 减选修饰键（框选、套索、魔棒、选区笔都用）
       S.modShift = !!e.shiftKey;
       S.modAlt = !!e.altKey;
+      // 和 Alt 的 keydown 双保险：焦点在输入框里按的 Alt 会被 bindKeys 里
+      // `if (typing) return` 吃掉，这里按真实事件补一次，免得光标和实际行为对不上
+      if (S.altDown !== !!e.altKey) { S.altDown = !!e.altKey; updateBrushCursor(); }
       var dp = engine.screenToDoc(sp.x, sp.y);
 
       // Alt 临时吸管（SAI 习惯）。
@@ -3952,6 +4518,8 @@
       S.pointer.sy = sp.y;
       S.pointer.inside = true;
       notePointerSample(e);            // 攒样本：判断「报成 mouse 的是不是数位板」
+      // Alt 状态以指针事件为准（离屏 / 焦点丢失时 keyup 是收不到的）
+      S.altDown = !!e.altKey;
       // 落笔途中把浏览器合并掉的中间帧也补进来 —— 板子的采样率远高于事件频率，
       // 不取 coalesced 的话快速运笔会丢压力变化（笔迹忽粗忽细、转折处发直）
       if (S.session) {
@@ -4131,6 +4699,7 @@
     var layer = engine.activeLayer();
     if (!layer) return;
     if (layer.locked) { toast('图层「' + layer.name + '」已锁定', 'err'); return; }
+    if (layer.moveLock) { toast('图层「' + layer.name + '」锁定了移动', 'err'); return; }
     // 空图层拿来变换没有意义，早点说清楚
     if (!layer.baseImage && !layer.strokes.length) {
       toast('「' + layer.name + '」上还没有内容', 'err');
@@ -6264,6 +6833,28 @@
         if (!S.pan) $('#stage').classList.remove('panning');
       }
     });
+
+    /* ---- Alt = 临时吸管，光标要跟着变成吸管 ----
+     * 为什么单独盯 Alt（而不是在 pointermove 里顺手读 e.altKey）：按住 Alt 之后
+     * **不移动鼠标**也得立刻换光标 —— 用户是在「先把 Alt 按下去、再准备点」，
+     * 那一刻还没有任何指针事件，只靠 pointermove 会一直是圆环，看着像没生效。
+     */
+    document.addEventListener('keydown', function (e) {
+      if (e.key !== 'Alt' || S.altDown) return;
+      S.altDown = true;
+      updateBrushCursor();
+    });
+    document.addEventListener('keyup', function (e) {
+      if (e.key !== 'Alt') return;
+      S.altDown = false;
+      updateBrushCursor();
+    });
+    // Alt+Tab 切出去时收不到 keyup，切回来光标会永远卡在吸管上
+    window.addEventListener('blur', function () {
+      if (!S.altDown) return;
+      S.altDown = false;
+      updateBrushCursor();
+    });
   }
 
   function swapColors() {
@@ -6563,7 +7154,70 @@
       }
     });
 
+    // ★ v2.0.10：锁定行四颗（透明像素 / 画笔 / 移动 / 全部）—— 都是逐层开关，改一下同步出去
     $('#lockChk').addEventListener('change', function () { patchActiveLayer({ locked: this.checked }); });
+    $('#lockDrawChk').addEventListener('change', function () { patchActiveLayer({ drawLock: this.checked }); });
+    $('#lockMoveChk').addEventListener('change', function () { patchActiveLayer({ moveLock: this.checked }); });
+
+    // ★ 2.0.9「指定为选区样本」（SAI2 那颗圆点）：整份文档只认一层 ——
+    //   客户端只管说「这一层要当样本」，互斥由服务端拍板（selSample 是文档级的状态，
+    //   各端各清一遍会打架）。取消勾选是不可能的：要换就换到别的图层上点。
+    //   注意挂的是 **click** 而不是 change：这颗圆点在「当前图层已经是样本层」时本来就是
+    //   勾上的，这时候再点它 change 不会触发 —— 换层之后想重新指定就会「点了没反应」。
+    (function () {
+      var el = $('#selSampleChk');
+      if (!el) return;
+      el.addEventListener('click', function () {
+        if (!this.checked) return;
+        if (selKind() === 'group') { this.checked = false; toast('选区样本只能指定单个图层', 'err', 2400); return; }
+        var l = engine.activeLayer();
+        if (!l) { this.checked = false; return; }
+        if (l.selSample) return;                  // 已经是这一层了，不用再发一遍
+        patchActiveLayer({ selSample: true });
+        toast('已把「' + l.name + '」指定为选区样本');
+      });
+    })();
+
+    /* ---- ★ 2.0.9 魔棒选项（照 SAI2 的魔棒面板） ---- */
+    function wandSet(key, value) {
+      S.wand[key] = value;
+      saveWandOpts();
+      syncWandUI();
+    }
+    [['#wandModeWrap', 'wrap'], ['#wandModeDiff', 'diff'], ['#wandModeAll', 'diffAll']].forEach(function (r) {
+      var el = $(r[0]);
+      if (el) el.addEventListener('change', function () { if (this.checked) wandSet('mode', r[1]); });
+    });
+    [['#wandSrcLayer', 'layer'], ['#wandSrcSample', 'sample'], ['#wandSrcMerge', 'merged']].forEach(function (r) {
+      var el = $(r[0]);
+      if (el) el.addEventListener('change', function () { if (this.checked) wandSet('source', r[1]); });
+    });
+    (function () {
+      var el = $('#wandTolRange');
+      if (!el) return;
+      el.addEventListener('input', function () {
+        S.wand.transTol = clamp(Math.round(Number(this.value) || 0), 0, 255);
+        $('#wandTolVal').textContent = S.wand.transTol;
+        saveWandOpts();
+      });
+    })();
+    (function () {
+      var el = $('#wandBleedRange');
+      if (!el) return;
+      el.addEventListener('input', function () {
+        S.wand.bleed = clamp(Math.round(Number(this.value) || 0), 0, 20);
+        $('#wandBleedVal').textContent = S.wand.bleed + ' px';
+        saveWandOpts();
+      });
+    })();
+    (function () {
+      var el = $('#wandAAChk');
+      if (el) el.addEventListener('change', function () { wandSet('aa', !!this.checked); });
+    })();
+    (function () {
+      var el = $('#wandIgnoreChk');
+      if (el) el.addEventListener('change', function () { wandSet('ignore', !!this.checked); });
+    })();
 
     /* ---- 图层蒙版 ----
      * 蒙版用 alpha 表示「该处显示多少」，画的时候**黑遮白露**（跟 Photoshop 一样）。
@@ -6572,15 +7226,18 @@
      */
     S.maskEdit = null;
 
-    function setMaskEdit(id) {
-      var l = id ? engine.getLayer(id) : null;
-      if (!l || !l.hasMask) id = null;
-      S.maskEdit = id;
-      if (id) toast('正在编辑「' + l.name + '」的蒙版 —— 黑笔遮住、白笔露出');
-      syncMaskHead(engine.activeLayer());
-    }
-
-    $('#clipChk').addEventListener('change', function () { patchActiveLayer({ clip: this.checked }); });
+    // ★ v2.0.10：「创建剪贴蒙版」回到锁定行下面那一行**勾选**（照 SAI2 的版面）——
+    //   以前它混在下面那排图标按钮里，和「新建图层」并排，容易误点
+    $('#clipChk').addEventListener('change', function () {
+      if (selKind() === 'group') {
+        toast('剪贴只对单个图层有效，先在组里选一层', 'err', 2400);
+        this.checked = false;
+        return;
+      }
+      var l = engine.activeLayer();
+      if (!l) { this.checked = false; return; }
+      patchActiveLayer({ clip: !!this.checked });
+    });
 
     $('#btnMaskAdd').addEventListener('click', function () {
       var l = engine.activeLayer();
@@ -7068,9 +7725,8 @@
     });
     $('#alphaLockChk').addEventListener('change', function () { patchActiveLayer({ alphaLock: this.checked }); });
     $('#btnLayerDup').addEventListener('click', layerDup);
-    $('#btnLayerUp').addEventListener('click', function () { layerMove(1); });
-    $('#btnLayerDown').addEventListener('click', function () { layerMove(-1); });
     $('#btnLayerMerge').addEventListener('click', layerMerge);
+    $('#btnLayerDrop').addEventListener('click', layerMoveContentDown);
     $('#btnLayerClear').addEventListener('click', layerClear);
     $('#btnLayerDel').addEventListener('click', layerDel);
     $('#btnLayerFlatten').addEventListener('click', layerFlatten);
@@ -7873,22 +8529,42 @@
   /** 每种玩法在面板上要显示哪几行（顺序在 styles.css 的 #gameMask.mode-* 里） */
   var MODE_ROWS = {
     classic: ['rowTheme', 'rowDrawTime', 'rowClassicRounds', 'rowClassicRepick', 'rowClassicRoundEnd'],
-    chain: ['rowTheme', 'rowDrawTime', 'rowChainLength', 'rowChainWrite', 'rowChainGuess',
-      'rowChainReveal', 'rowChainReplaySpeed', 'rowVote'],
+    chain: ['rowTheme', 'rowDrawTime', 'rowChainPlay', 'rowChainLength', 'rowChainRelayRounds',
+      'rowChainWrite', 'rowChainGuess', 'rowChainReveal', 'rowChainReplaySpeed', 'rowVote'],
     skin: ['rowTheme', 'rowDrawTime', 'rowSkinRounds', 'rowSkinNight', 'rowSkinDawn',
       'rowSkinTalk', 'rowVote']
   };
   var ALL_ROWS = ['rowTheme', 'rowDrawTime', 'rowClassicRounds', 'rowClassicRepick',
-    'rowClassicRoundEnd', 'rowChainLength', 'rowChainWrite', 'rowChainGuess', 'rowChainReveal',
+    'rowClassicRoundEnd', 'rowChainPlay', 'rowChainLength', 'rowChainRelayRounds',
+    'rowChainWrite', 'rowChainGuess', 'rowChainReveal',
     'rowChainReplaySpeed',
     'rowSkinRounds', 'rowSkinNight', 'rowSkinDawn', 'rowSkinTalk', 'rowVote'];
 
   var MODE_LABEL = { classic: '你画我猜', chain: '接龙', skin: '画皮' };
   var MODE_START_TEXT = { classic: '开始游戏', chain: '开始接龙', skin: '开始画皮' };
 
+  /* ★ v17：接龙的两种**玩法**（mode 仍是 'chain'，这是它下面的子选项）。
+     classic = 接龙模式：猜完自己画自己猜出来的词，再传给下家猜；
+     relay   = 传词接龙：猜完**不画**，把猜出来的词直接交给下家画。
+     标签写死在前端（服务端只给 id 列表，避免 UI 文案跟协议耦合）。 */
+  var CHAIN_PLAY_LABEL = {
+    classic: '接龙（猜完自己画）',
+    relay: '传词接龙（猜完交给下家画）'
+  };
+  var CHAIN_PLAY_RULE = {
+    classic: '每个人先给自己的链写一个词，<b>自己照着它画</b>，沿打乱的顺序传给'
+      + '下一个人<b>看着画猜词</b>；猜完<b>自己再画一遍</b>自己猜出来的词，再往下传 —— '
+      + '一路传下去，互看不到别人的内容。传完一起看回放，再投票「首尾对得上吗」+「最喜欢的一张画」。',
+    relay: '每个人先给自己的链写一个词并<b>自己画出来</b>，传给下家<b>看画猜词</b>；'
+      + '猜出来的词<b>他自己不画</b>，直接交给<b>再下一个人画</b>，画完继续往下猜 —— '
+      + '起词 → A画 → B猜 → C画 → D猜 → A画 → … 传遍全场若干轮。'
+      + '传完一起看回放，再投票「起词 vs 最后猜出来的词对得上吗」。'
+  };
+
   /** 面板里所有会写进 GAME_START / GAME_PREFS 的控件（改一个就广播一次，300ms 防抖） */
   var SETUP_CONTROL_IDS = ['gameTheme', 'gameDrawTime', 'gameRounds', 'gameRepickLimit',
-    'gameRoundEndTime', 'chainLength', 'chainWriteTime', 'chainGuessTime', 'chainRevealTime',
+    'gameRoundEndTime', 'chainLength', 'chainPlay', 'chainRelayRounds',
+    'chainWriteTime', 'chainGuessTime', 'chainRevealTime',
     'chainReplaySpeed',
     'gameSkinRounds', 'gameNightTime', 'gameDawnTime', 'gameTalkTime', 'gameVoteTime'];
 
@@ -8133,6 +8809,98 @@
     sel.value = String(list.indexOf(cur) >= 0 ? cur : replaySpeedDefault());
   }
 
+  /* ---- ★ v17：接龙玩法（chainPlay）与传词接龙的轮数 ----
+   *
+   * 档位与默认值都从服务端来（/api/share 的 setup.chainPlay / setup.relayRounds，
+   * 由 game-prefs.js 的 setupOptions() 从协议常量推出来）；标签写死在前端。
+   * 玩法是**每局设置**：接龙模式走 chainLength 那一行，传词接龙走 relayRounds 那一行。
+   */
+  function chainPlayList() {
+    var v = shareSetup().chainPlay;
+    var arr = (v && Array.isArray(v.list) && v.list.length) ? v.list : P.GAME.CHAIN_PLAYS;
+    var known = Object.keys(CHAIN_PLAY_LABEL);
+    var out = arr.filter(function (id) { return known.indexOf(id) >= 0; });
+    return out.length ? out : known;
+  }
+  function chainPlayDefault() {
+    var v = shareSetup().chainPlay;
+    var d = v && v.default;
+    return chainPlayList().indexOf(d) >= 0 ? d : P.GAME.CHAIN_PLAY_DEFAULT;
+  }
+  /** 下拉当前值 → 玩法 id；空 / 非法 = 默认（服务端还会再夹一次） */
+  function chainPlayValue() {
+    var el = $('#chainPlay');
+    var v = el && el.value;
+    return chainPlayList().indexOf(v) >= 0 ? v : chainPlayDefault();
+  }
+  function buildChainPlaySelect() {
+    var sel = $('#chainPlay');
+    if (!sel) return;
+    var list = chainPlayList();
+    var sig = list.join(',') + '@' + chainPlayDefault();
+    if (sel.dataset.sig === sig) return;
+    var cur = sel.value;
+    if (list.indexOf(cur) < 0) cur = chainPlayDefault();
+    var html = '';
+    list.forEach(function (id) {
+      html += '<option value="' + id + '">' + esc(CHAIN_PLAY_LABEL[id] || id)
+        + (id === chainPlayDefault() ? '（默认）' : '') + '</option>';
+    });
+    sel.innerHTML = html;
+    sel.dataset.sig = sig;
+    sel.value = cur;
+  }
+
+  function relayRoundsRange() {
+    var v = shareSetup().relayRounds || {};
+    var lo = Number(v.min), hi = Number(v.max);
+    if (!isFinite(lo) || lo < 1) lo = P.GAME.CHAIN_RELAY_ROUNDS_MIN;
+    if (!isFinite(hi) || hi < lo) hi = P.GAME.CHAIN_RELAY_ROUNDS_MAX;
+    var dflt = Number(v.default);
+    if (!isFinite(dflt) || dflt < lo || dflt > hi) dflt = P.GAME.CHAIN_RELAY_ROUNDS_DEFAULT;
+    return { min: lo, max: hi, dflt: dflt };
+  }
+  function relayRoundsValue() {
+    var r = relayRoundsRange();
+    var el = $('#chainRelayRounds');
+    var n = Math.floor(Number(el && el.value));
+    if (!isFinite(n) || n <= 0) return r.dflt;
+    return n < r.min ? r.min : n > r.max ? r.max : n;
+  }
+  function buildRelayRoundsSelect() {
+    var sel = $('#chainRelayRounds');
+    if (!sel) return;
+    var r = relayRoundsRange();
+    var sig = r.min + '-' + r.max + '@' + r.dflt;
+    if (sel.dataset.sig === sig) return;
+    var cur = Math.floor(Number(sel.value));
+    if (!isFinite(cur) || cur < r.min || cur > r.max) cur = r.dflt;
+    var html = '';
+    for (var i = r.min; i <= r.max; i++) {
+      html += '<option value="' + i + '">' + i + ' 轮' + (i === r.dflt ? '（默认）' : '') + '</option>';
+    }
+    sel.innerHTML = html;
+    sel.dataset.sig = sig;
+    sel.value = String(cur);
+  }
+
+  /** 按当前玩法切换「链长 / 传几轮」两行，并把提示文案换掉 */
+  function syncChainPlayRows() {
+    var play = chainPlayValue();
+    var lenRow = document.getElementById('rowChainLength');
+    var rrRow = document.getElementById('rowChainRelayRounds');
+    var relay = (play === 'relay');
+    if (lenRow) lenRow.classList.toggle('hidden', relay);
+    if (rrRow) rrRow.classList.toggle('hidden', !relay);
+    var hint = $('#chainPlayHint');
+    if (hint) {
+      hint.textContent = relay
+        ? '传词接龙：猜完的词他自己不画，交给下家画（链长 = 1 + 轮数 × 人数）'
+        : '接龙：猜完自己画自己猜的词（链长 = 2 × 人数）';
+    }
+    return play;
+  }
+
   /* ---- 开局 payload（「开始」与结算页「再来一局」共用同一份） ---- */
 
   /**
@@ -8155,6 +8923,10 @@
       p.repickLimit = selNumTime('#gameRepickLimit');
       p.roundEndSeconds = selNumTime('#gameRoundEndTime');
     } else if (m === 'chain') {
+      // ★ v17：接龙玩法（classic / relay）。传词接龙下链长由轮数算（服务端决定），
+      //   所以那边**只发 relayRounds**；两个字段都带上也不会出错（服务端按玩法取用）。
+      p.chainPlay = chainPlayValue();
+      p.relayRounds = relayRoundsValue();
       p.chainLength = chainLengthValue();
       p.writeSeconds = selNumTime('#chainWriteTime');
       p.guessSeconds = selNumTime('#chainGuessTime');
@@ -8206,6 +8978,14 @@
   /** 面板上任何一个设置控件变了都走这里 */
   function onSetupControlChange() {
     if (this && this.id === 'gameTheme') setThemeChoice(this.value);
+    // ★ v17：换玩法（接龙 / 传词接龙）时把「链长 / 传几轮」两行换过来 + 更新说明
+    if (this && (this.id === 'chainPlay' || this.id === 'chainRelayRounds')) {
+      if (gameDialogMode === 'chain') {
+        syncChainPlayRows();
+        var rule = $('#gameRule');
+        if (rule) rule.innerHTML = CHAIN_PLAY_RULE[chainPlayValue()] || CHAIN_PLAY_RULE.classic;
+      }
+    }
     queueSendGamePrefs();
   }
 
@@ -8226,6 +9006,8 @@
       setSelValue('#gameRepickLimit', prefs.repickLimit);
       setSelValue('#gameRoundEndTime', prefs.roundEndSeconds);
       setSelValue('#chainLength', prefs.chainLength);
+      setSelValue('#chainPlay', prefs.chainPlay);
+      setSelValue('#chainRelayRounds', prefs.relayRounds);
       setSelValue('#chainWriteTime', prefs.writeSeconds);
       setSelValue('#chainGuessTime', prefs.guessSeconds);
       setSelValue('#chainRevealTime', prefs.revealSeconds);
@@ -8259,8 +9041,11 @@
       setSelValue('#gameRoundEndTime', '');
     } else if (mode === 'chain') {
       var online = onlinePlayers();
+      // ★ v17：切回接龙先把玩法复位成默认（接龙模式），轮数也回默认档
+      setSelValue('#chainPlay', String(chainPlayDefault()));
+      setSelValue('#chainRelayRounds', String(relayRoundsRange().dflt));
       setSelValue('#chainLength', String(Math.max(P.GAME.CHAIN_LENGTH_MIN,
-        Math.min(online, P.GAME.CHAIN_LENGTH_MAX) + 1)));
+        Math.min(online, P.GAME.CHAIN_LENGTH_MAX) * 2)));
       setSelValue('#chainWriteTime', '');
       setSelValue('#chainGuessTime', '');
       setSelValue('#chainRevealTime', '');
@@ -8303,9 +9088,7 @@
     var rule = $('#gameRule');
     if (rule) {
       if (mode === 'chain') {
-        rule.innerHTML = '每个人先给自己的链写一个词，<b>自己照着它画</b>，沿打乱的顺序传给'
-          + '下一个人<b>看着画猜词</b> —— 一路传下去，互看不到别人的内容。传完一起看回放，'
-          + '再投票「首尾对得上吗」+「最喜欢的一张画」。';
+        rule.innerHTML = CHAIN_PLAY_RULE[chainPlayValue()] || CHAIN_PLAY_RULE.classic;
       } else if (mode === 'skin') {
         rule.innerHTML = '把「发言」换成<b>限时作画</b>的狼人杀：所有人都有身份，每轮天亮后'
           + '<b>画同一个主题</b>，画完<b>匿名摊开</b>，大家看画猜作者想表达什么，'
@@ -8324,7 +9107,6 @@
       var el = document.getElementById(id);
       if (el) el.classList.toggle('hidden', !want[id]);
     });
-
     // 控件：选项列表可以随便重建，但**值要保留**（用户没改过就别动它）
     var d = defaultSeconds();
     buildThemeSelect($('#gameTheme'));
@@ -8343,6 +9125,10 @@
     buildNumberSelect($('#gameRepickLimit'), setupList('repick'), P.GAME.REPICK_LIMIT, '次', '不能换');
     buildChainLengthSelect();
     buildReplaySpeedSelect();
+    // ★ v17：接龙玩法 + 传词轮数（两行二选一显示，见 syncChainPlayRows）
+    buildChainPlaySelect();
+    buildRelayRoundsSelect();
+    if (mode === 'chain') syncChainPlayRows();
 
     // 非房主：房主的预设（只读）
     applyGamePrefs();
@@ -9179,6 +9965,8 @@
     }
     var stepName = g.phase === 'chain_write' ? '写初始词'
       : g.phase === 'chain_draw' ? '照词作画' : g.phase === 'chain_guess' ? '看画猜词' : '马上开始';
+    // ★ v17：传词接龙时把玩法也写出来（免得玩家以为是接龙模式、等自己画）
+    if (g.chainPlay === 'relay') stepName = '传词接龙 · ' + stepName;
     list.innerHTML =
       '<div class="cp-row mine">' +
       '<span class="cp-name">' + stepName + ' · 第 ' + Math.min(k + 1, len) + ' / ' + len + ' 手</span>' +
@@ -9204,6 +9992,11 @@
     //   于是大厅上冒出几个房间里根本不存在的人（用户报的）。计分板照旧显示灰名。
     var players = (g.players || []).filter(function (p) { return p.online !== false; });
     var playing = players.filter(function (p) { return !p.spectating; });
+    // ★ v17：大厅标题写明玩法（接龙 / 传词接龙），免得大家开局前不知道要不要自己画
+    var head = box.querySelector('.cl-head');
+    if (head && head.firstChild && head.firstChild.nodeType === 3) {
+      head.firstChild.nodeValue = (g.chainPlay === 'relay' ? '传词接龙大厅 · ' : '接龙大厅 · ');
+    }
     var cnt = $('#clCount');
     if (cnt) cnt.textContent = playing.length + ' 人（需 ≥ ' + (g.minPlayers || 4) + '）';
     // 分组说明：服务端分了组就报真的（「你在第 X / Y 组」）；
@@ -9275,6 +10068,10 @@
   var CR_ANIM = {
     minTotal: 600, maxTotal: 20000, minAnim: 700, maxAnim: 9000, hold: 250,
     targetFrames: 18,
+    // ★ 2.0.9：到点了还没画完时用的「加速尾巴」——剩下的笔按每笔 ≤60ms 补完，
+    //   最多补 320ms。宁可稍微超一点时间，也不能「啪的一下」把剩下的笔一次贴上去。
+    catchUpMs: 320,
+    catchUpPerStroke: 60,
     // ★ v15：作画格后面紧跟猜词格时，尾巴上留给「下一棒猜的是什么」的悬念倒计时。
     //   与服务端 CFG.REVEAL_TEASE_MS 同一个数（服务端把这段加进那一格的时长里）。
     teaseMs: 3000,
@@ -9789,8 +10586,9 @@
     crResetAnimCanvas();                               // 白底先顶上，免得露出上一格
     if (el >= animMs) { crFinishAnim(); return; }      // 页面被切走又切回来：直接给定格画面
     crStartLoop();
-    // 兜底：定时器万一被节流（后台标签页），也不能卡在「画了一半」
-    a.safety = setTimeout(crFinishAnim, Math.max(60, animMs - el + 200));
+    // 兜底：定时器万一被节流（后台标签页），也不能卡在「画了一半」。
+    // ★ 2.0.9：留出加速尾巴那点时间（catchUpMs），别在补笔补到一半时抢先把剩下的笔一次贴完。
+    a.safety = setTimeout(crFinishAnim, Math.max(60, animMs - el + CR_ANIM.catchUpMs + 200));
   }
 
   /** 每帧只把「这一帧该出现的新笔」叠上去（增量，不重画前面的）。
@@ -9823,7 +10621,14 @@
     if (!a || !a.strokes) return;
     var el = Date.now() - a.startAt;
     crDrawTo(el);
-    if (el >= a.animMs) crFinishAnim();
+    // ★ 2.0.9：收尾的时机
+    //   · 正常情况：到点（animMs）且笔都画完了 → 定格。**不能提前收** ——
+    //     「播完了」这件事还管着下一棒的悬念倒计时什么时候开始（见 crStartTease），
+    //     早收 300ms 就等于倒计时早开始 300ms，和服务端那一格的节奏对不上。
+    //   · 落后（窗口紧 / 掉过帧）：crDrawTo 会用加速尾巴一笔一笔补完，
+    //     最多补 CR_ANIM.catchUpMs —— 补完就收，实在补不完也在尾巴末尾收，
+    //     绝不把剩下的笔一次贴上去（用户：「不能啪的一下就跳到成图了」）。
+    if (el >= a.animMs && (a.done >= a.strokes.length || el >= a.animMs + CR_ANIM.catchUpMs)) crFinishAnim();
   }
 
   /** 按「已经过了多少毫秒」决定现在该出现几笔 */
@@ -9831,9 +10636,24 @@
     var a = S.cr.anim;
     if (!a || !a.strokes || !a.strokes.length) return;
     var n = a.strokes.length;
-    var frames = Math.min(n, 18);
-    var per = a.animMs / frames;                       // 每「帧」代表的画面上限
+    // ★ 2.0.9：帧预算**跟着笔数走**，不再写死 18 帧。
+    //
+    //   以前 frames = min(笔数, 18)：一张 40 笔的图只切 18 个时间片，
+    //   到点（animMs）时前 18 笔还在慢慢长，剩下 22 笔被 crFinishAnim **一次全补上** ——
+    //   用户原话：「笔迹回放时间不够的时候，要自适应进行倍速播放，不能啪的一下就跳到成图了」。
+    //   现在每一笔都有自己的时间片：窗口长就一笔一笔慢慢长（≈每笔 240ms），
+    //   窗口紧就每拍多画几笔（就是倍速），**任何情况下都不会「前面慢慢来、最后一次性贴上去」**。
+    //   ⚠ 只有退回 <img> 那条老路才保留 18 帧上限 —— 那条路每帧一次同步 toDataURL，很贵。
+    var frames = crCanvasOwned() ? n : Math.min(n, CR_ANIM.targetFrames);
+    var per = a.animMs / Math.max(1, frames);          // 每个时间片代表多久
     var want = Math.max(1, Math.ceil(el / per));       // 至少给 1 笔，第一帧别是纯白
+    // ★ 2.0.9：到点了却还没画完（窗口紧 / 中间掉过帧）——这里是第二个「啪的一下」的来源：
+    //   旧代码不管落后多少，都由 crFinishAnim 把剩下的笔一次性补上。
+    //   现在改成**加速补完**：每 60ms 至少补一笔，最多补 320ms。
+    if (el >= a.animMs && a.done < n) {
+      var extra = Math.ceil((el - a.animMs) / CR_ANIM.catchUpPerStroke) + 1;
+      want = Math.max(want, Math.min(n, a.done + extra));
+    }
     want = Math.min(n, want);
     if (want > a.done) crDrawUpTo(want);
   }
@@ -9850,8 +10670,11 @@
     a.startAt = Date.now();       // 重新计时 = 定格时间从「画完」这一刻算起
     a.landedAt = Date.now();      // 本地兜底节奏：这一格「最短定格」从这一刻起算
     a.framesAll = (a.framesAll | 0) + (a.frame | 0);   // 累计「逐笔画出过多少帧」（自测看这个）
-    // ★ v14：这一格**播完了** —— ♥ 立刻置灰（不用等下一次状态同步，那可能有 1 秒延迟，
-    //   用户在「刚放完」那一瞬间还点得动，等于没做到「过时不候」）。
+    // ★ v19：这一格**播完了** —— 重画一次投票区。
+    //   以前这里顺带把 ♥ 置灰（「过时不候」，还特意不等状态同步、要立刻灰掉，
+    //   免得「刚放完」那一瞬间还点得动）；现在改成「每一棒展示期间都能投」，
+    //   播完不再关这一格的门，♥ 的可用性只看 crLegFavOpen()：
+    //   S.cr.item 还停在这一格，就照样点得动。
     if (S.game && S.game.phase === 'chain_reveal') {
       var chain = S.chainReveal && S.chainReveal[S.cr.chain];
       if (chain) renderChainVoteArea(chain);
@@ -9861,8 +10684,38 @@
     }
   }
 
-  /** 把「总共 upTo 笔」画进**引擎尺寸的帧画布**（a.raw）。
+  /* ★ 2.0.9：逐笔回放节奏的**调试入口**（给 tools/test-chain-anim.js 用）。
    *
+   * 真流程里这一格是由「GAME_REVEAL 快照 + revealStep」驱动的，测试想验
+   * 「回放时间不够的时候会不会啪的一下跳到成图」就得能直接喂一串笔迹 + 一段时长。
+   * 这里只负责把 S.cr.anim 摆成「某一格刚开始」的样子，之后跑的完全是
+   * crStartLoop / crAnimTick / crDrawTo 那套真代码 —— 没有第二份实现。
+   */
+  function chainAnimDebugStart(strokes, animMs) {
+    var a = S.cr.anim;
+    crStopAnim();
+    crCanvasTake();
+    a.gen++;
+    a.chain = S.cr.chain | 0;
+    a.item = S.cr.item | 0;
+    a.strokes = strokes || [];
+    a.done = 0; a.frame = 0; a.pics = []; a.steps = 0;
+    a.startAt = Date.now();
+    a.finished = false;
+    a.dur = Math.max(1, Number(animMs) || 1000);
+    a.animMs = Math.max(1, Number(animMs) || 1000);
+    a.tease = false;
+    crResetAnimCanvas();
+    crStartLoop();
+    a.safety = setTimeout(crFinishAnim, a.animMs + CR_ANIM.catchUpMs + 200);
+    return true;
+  }
+  function chainAnimDebugStop() {
+    crStopAnim();
+    crCanvasRelease();
+  }
+
+  /** 把「总共 upTo 笔」画进**引擎尺寸的帧画布**（a.raw）。
    *  ★ v16：这块画布现在是**引擎自己的回放画布**（engine.replayCanvas）——
    *  用户的原话：「笔迹回放就在现成的画布区域展示得了呗，为啥非要弄个独立窗口出来呢」，
    *  所以不再走「缩成一张 PNG 喂给 <img>」，而是每画出一批笔就 engine.invalidate()，
@@ -10028,14 +10881,14 @@
   }
 
   /**
-   * ★ v14：某一格画**是不是正在回放播放 / 定格**（♥ 只在这时候可点，过时不候）。
+   * 某一格画**正在展示**（回放播放 / 定格），♥ 就可以投。
    *
-   * 「那一格播完就置灰」的判据就是动画自己的 finished 标志（见 crFinishAnim）：
-   *   - 阶段必须是 chain_reveal（投票阶段是回放完了才进去的，那儿不再给 ♥）；
-   *   - 当前格必须是真的一幅画（有笔迹）；
-   *   - 动画还没 finished（正在一笔一笔画 / 刚画完正在定格）。
-   * 状态同步把它渲染成 `disabled` + 一句「这一格已经放完」，不是直接消失 ——
-   * 用户能看出「刚才能点，现在不能了」，而不是「按钮莫名其妙没了」。
+   * ★ v19：不再要求「动画还没播完」。
+   * 以前是「那一格播完立刻置灰（过时不候）」，实际用起来是：手速跟不上回放，
+   * 只有链首那几棒来得及点，后面的棒次根本投不上（用户反馈）。
+   * 现在改成「**每一棒展示期间都能投**」——只要这一格还停在屏幕上就一直能 ♥，
+   * 换到下一格（S.cr.item 走了）才关门。判据仍绑在动画对象上，
+   * 所以「票投给的是不是屏幕上这一幅画」这件事没变。
    */
   function crLegFavOpen() {
     var g = S.game;
@@ -10045,7 +10898,7 @@
     if (!item || item.type !== 'DRAWING' || !Array.isArray(item.content) || !item.content.length) return false;
     var a = S.cr.anim;
     if (!a || a.chain !== S.cr.chain || a.item !== S.cr.item) return false;
-    return !a.finished;
+    return true;
   }
 
   /** ★ v17：把投票纸片 + 那排投票圈整块收掉。
@@ -10338,7 +11191,7 @@
     // 它投的是「这条链里我最喜欢的一幅画」，跟「首尾对得上吗」是两码事，
     // 服务端也分开统计（结算里各自给分），前端绝不混在一起。
     // ★ v12：♥ 是**按链**记的 —— 每条链各能投一次。
-    // ★ v14：**只在某一格画正在回放播放 / 定格时可点**，那一格播完就置灰（过时不候）。
+    // ★ v19：某一棒**还停在屏幕上**就能投（不再「播完立刻置灰」）—— 每一棒都有机会。
     var favBtn = $('#rpFavBtn');
     var item = chain.steps && chain.steps[S.cr.item];
     var isArt = !!(item && item.type === 'DRAWING' && Array.isArray(item.content) && item.content.length);
@@ -10350,15 +11203,15 @@
       favBtn.classList.toggle('hidden', !canFav);
       var mine = canFav && isMyFav(S.cr.chain, S.cr.item);
       var chainVoted = chainFavMine(chain);
-      favBtn.textContent = mine ? '♥ 已投 · 这张' : (open ? '♡ 最喜欢这张' : '♡ 这一格已经放完');
+      favBtn.textContent = mine ? '♥ 已投 · 这张' : '♡ 最喜欢这张';
       favBtn.classList.toggle('primary', !!mine);
       favBtn.classList.toggle('voted', !!mine);
       favBtn.disabled = !canFav || !open;
       favBtn.title = !open
-        ? '这一格已经放完了 —— ♥ 只在画正在回放的时候投'
+        ? '这一格已经翻页了 —— ♥ 只在某一棒还停在屏幕上时能投'
         : chainVoted
           ? '这条链你已经投过 ♥ 了（每条链一次，可以再挑别的链）'
-          : '把这张选为本条链里你最喜欢的画（每条链各一次）';
+          : '把这张选为本条链里你最喜欢的画（每条链各一次，每一棒展示时都能投）';
     }
 
     // 我一共投过几条链（不是全场进度）—— 让人知道「还能投」。
@@ -10369,7 +11222,7 @@
       if (!isFinite(totalChains) || totalChains <= 0) totalChains = (S.chainReveal || []).length;
       var txt = '你已给 ' + n + ' 条链投过 ♥' +
         (totalChains > 0 ? '（共 ' + totalChains + ' 条 · 每条链一次）' : '（每条链一次）');
-      if (!open) txt += ' · ♥ 只在某幅画回放时能投（过时不候）';
+      if (!open) txt += ' · ♥ 在某一棒回放 / 定格时能投（每一棒都有机会）';
       favState.textContent = txt;
     }
   }
@@ -10414,7 +11267,7 @@
 
   /** fav 票：本条链里我最喜欢的一张画（v12：**每条链各一票**，同一张再点 = 不变；
    *  同一链里换一张 = 改票，服务端按 (chainId → step) 覆盖）。
-   *  ★ v14：只在**这一格画正在回放播放 / 定格**时可投（crLegFavOpen），过时不候 ——
+   *  ★ v19：只要这一棒**还停在屏幕上**就能投（crLegFavOpen），不再「播完就置灰」——
    *  服务端 favVote 也认 REVEAL 阶段，所以回放途中点下去就是生效的。 */
   function sendFavVote(ci, si) {
     var g = S.game;
@@ -14217,6 +15070,10 @@
     applyImported: applyImported,
     removeImported: removeImported,
     tipThumb: tipThumb,
+    // 色轮取色区形状（'square' / 'triangle'）：测试要靠它把形状切到被测的那一种，
+    // 不然「三角形那套几何」的用例在新默认（方形）下会点到形状外面去。
+    setWheelShape: setSvShape,
+    wheelShape: svShape,
     // 工程文件（.chahu）。openProject 走「选文件」那条路，测试里可以直接
     // 调 loadProjectText 灌一段 JSON 进来，不用真的去开文件对话框。
     saveProject: saveProject,
@@ -14279,8 +15136,18 @@
     setReadonly: setReadonly,
     myReadonly: readonlyMe,
     dupLayer: dupLayer, delLayer: delLayer, mergeDown: mergeDown, mergeVisible: mergeVisible,
+    // 图层面板：内容转移到下层 + 拖动排序（给测试留的手柄，省得非要去合成鼠标事件）
+    dropContentDown: layerMoveContentDown,
+    dragLayerTo: function (drag, k) { commitLayerDrag(drag, k); },
+    layerPanelOrder: function () { return layerRowsInfo().ids; },
     setBackground: setBackground,
     toggleMarchingAnts: toggleMarchingAnts,
+    // ★ 2.0.9：接龙「逐笔回放」的节奏（测试直接喂笔迹 + 时长，验「不会啪的一下跳到成图」）
+    chainAnimDebug: {
+      start: chainAnimDebugStart,
+      stop: chainAnimDebugStop,
+      state: function () { return S.cr.anim; }
+    },
     growSelection: growSelection, shrinkSelection: shrinkSelection,
     setUiScale: setUiScale, setCursorMode: setCursorMode,
     toggleLeftPanel: toggleLeftPanel, toggleFullscreen: toggleFullscreen,

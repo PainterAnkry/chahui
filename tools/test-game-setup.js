@@ -466,7 +466,8 @@ console.log('\n[6] GAME_START 的白名单（cfg 透传）与协议注释一致'
   // (a) pickStartOpts 把 15 个字段原样透传（含 undefined —— 缺省必须留给 start() 自己决定）
   const full = {
     mode: 'chain', theme: 'arknights', drawSeconds: 45, rounds: 3, repickLimit: 2,
-    roundEndSeconds: 20, chainLength: 4, writeSeconds: 7, guessSeconds: 8,
+    roundEndSeconds: 20, chainLength: 4, chainPlay: 'relay', relayRounds: 3,
+    writeSeconds: 7, guessSeconds: 8,
     revealSeconds: 9, voteSeconds: 10, replaySpeed: 1.5, nightSeconds: 12, dawnSeconds: 13, talkSeconds: 14
   };
   const picked = PREFS.pickStartOpts(full);
@@ -484,7 +485,7 @@ console.log('\n[6] GAME_START 的白名单（cfg 透传）与协议注释一致'
   // (c) 协议注释里的字段表 = 上面那张表（三处 start() 的字段名也对得上）
   const want = {
     classic: ['mode', 'theme', 'drawSeconds', 'rounds', 'repickLimit', 'roundEndSeconds'],
-    chain: ['mode', 'theme', 'drawSeconds', 'chainLength', 'writeSeconds', 'guessSeconds', 'revealSeconds', 'voteSeconds', 'replaySpeed'],
+    chain: ['mode', 'theme', 'drawSeconds', 'chainLength', 'chainPlay', 'relayRounds', 'writeSeconds', 'guessSeconds', 'revealSeconds', 'voteSeconds', 'replaySpeed'],
     skin: ['mode', 'theme', 'drawSeconds', 'rounds', 'nightSeconds', 'dawnSeconds', 'talkSeconds', 'voteSeconds']
   };
   const seen = {};
@@ -554,6 +555,18 @@ console.log('\n[7] pendingGame：清洗 / 夹取 / 权限 / 清空 / 换房主')
     PREFS.normalizeGamePrefs({}).rounds, G.DEFAULT_ROUNDS);
   eq('repickLimit 0 → 0（实义值）', PREFS.normalizeGamePrefs({ repickLimit: 0 }).repickLimit, 0);
   eq('repickLimit 缺省 → 默认 1', PREFS.normalizeGamePrefs({}).repickLimit, G.REPICK_LIMIT);
+  // ★ v17：接龙玩法（chainPlay）与传词轮数（relayRounds）
+  eq('★ chainPlay 缺省 → classic（老客户端不发这个字段时行为不变）',
+    PREFS.normalizeGamePrefs({}).chainPlay, G.CHAIN_PLAY_DEFAULT);
+  eq('★ chainPlay 乱值 → classic', PREFS.normalizeGamePrefs({ chainPlay: 'nope' }).chainPlay, 'classic');
+  eq('★ chainPlay 收下 relay', PREFS.normalizeGamePrefs({ chainPlay: 'relay' }).chainPlay, 'relay');
+  eq('★ relayRounds 缺省 → 默认 2', PREFS.normalizeGamePrefs({}).relayRounds, G.CHAIN_RELAY_ROUNDS_DEFAULT);
+  eq('★ relayRounds 99 → 上限 4（防止一直传下去）',
+    PREFS.normalizeGamePrefs({ relayRounds: 99 }).relayRounds, G.CHAIN_RELAY_ROUNDS_MAX);
+  eq('★ relayRounds 0 → 默认 2（0 不是合法轮数）',
+    PREFS.normalizeGamePrefs({ relayRounds: 0 }).relayRounds, G.CHAIN_RELAY_ROUNDS_DEFAULT);
+  eq('★ relayRounds "x" → 默认 2',
+    PREFS.normalizeGamePrefs({ relayRounds: 'x' }).relayRounds, G.CHAIN_RELAY_ROUNDS_DEFAULT);
   eq('chainLength 缺省 → 0（= 开局按人数算）', PREFS.normalizeGamePrefs({}).chainLength, 0);
 
   // (c) 权限：非房主被拒，且房间状态一个字节都没动
@@ -635,8 +648,8 @@ console.log('\n[8] /api/share 的新增内容 + setup 档位');
   // 协议里确实有这两条消息（前端据此对接）
   eq('C2S.GAME_PREFS = game:prefs', P.C2S.GAME_PREFS, 'game:prefs');
   eq('S2C.GAME_PREFS = game:prefs', P.S2C.GAME_PREFS, 'game:prefs');
-  eq('★ 协议版本已推进到 v16（逐格时长 + 按笔数播动画 + 猜词定格 2 秒）',
-    P.PROTOCOL_VERSION, 16);
+  eq('★ 协议版本已推进到 v17（接龙第二种玩法：传词接龙 / 猜完交给下家画）',
+    P.PROTOCOL_VERSION, 17);
   ok('★ v16：每一格的时长不再一样 —— 起词 / 猜词格一拍，作画格按笔数 + 悬念尾',
     P.GAME.CHAIN_REVEAL_WORD_MS > 0 && P.GAME.CHAIN_REVEAL_GUESS_MS >= 2000
       && P.GAME.CHAIN_REVEAL_TEASE_MS >= 2000

@@ -93,6 +93,13 @@ function newLayer(meta) {
     opacity: typeof meta.opacity === 'number' ? clamp(meta.opacity, 0, 1) : 1,
     locked: !!meta.locked,
     alphaLock: !!meta.alphaLock,
+    // ★ v2.0.10：SAI2 那张「锁定」行里的另外两颗（锁定画笔 / 锁定移动）。
+    //   locked = 全部锁定（谁都不能动这一层）；drawLock = 画不上去；moveLock = 不能移动 / 变换。
+    drawLock: !!meta.drawLock,
+    moveLock: !!meta.moveLock,
+    // ★ 2.0.9：指定为选区样本（SAI2 图层面板里「创建剪贴蒙版」下面那颗圆点）。
+    //   魔棒的「取样来源 → 指定为选区样本的图层」就是从这里取色的，整份文档同时只有一层。
+    selSample: !!meta.selSample,
     blend: P.BLEND_MODES.indexOf(meta.blend) >= 0 ? meta.blend : 'normal',
     // 所属图层组（null = 不在任何组里）
     groupId: meta.groupId || null,
@@ -222,6 +229,10 @@ class Room {
       opacity: l.opacity,
       locked: l.locked,
       alphaLock: l.alphaLock,
+      drawLock: l.drawLock,
+      moveLock: l.moveLock,
+      selSample: !!l.selSample,
+      selSample: l.selSample,
       blend: l.blend,
       groupId: l.groupId,
       baseImage: isPng(l.png) ? l.png : null,
@@ -277,6 +288,8 @@ class Room {
     return this.layers.map(l => ({
       id: l.id, name: l.name, visible: l.visible,
       opacity: l.opacity, locked: l.locked, alphaLock: l.alphaLock,
+      drawLock: l.drawLock, moveLock: l.moveLock,
+      selSample: !!l.selSample,
       blend: l.blend, groupId: l.groupId, baseSeq: l.baseSeq,
       // 蒙版状态。**必须逐个列出** —— 这份白名单是 LAYERS 广播的唯一出口，
       // 漏一个字段就是「服务端存下了、客户端永远收不到」。
@@ -425,6 +438,42 @@ class Room {
     return true;
   }
 
+  /**
+   * 按客户端给出的**完整顺序**重排图层（图层面板拖动排序用）。
+   *
+   * 面板上松手的位置可能同时改变两件事：上下顺序、以及「这一层属不属于某个组」。
+   * 一条增量的「挪到第几位」表达不了这种情况，所以这里收的是整份目标顺序：
+   *   order   —— 自下而上的完整图层 id 表（客户端算好的最终结果）
+   *   layerId + groupId —— 可选，拖动的那一层在落点处要改成的组归属
+   *
+   * 服务端只做三件事：校验 order 确实是当前这批图层的一个排列（长度 / 去重 /
+   * 全部认识），照单收下，最后跑一次 normalizeGroups 兜底保证「同组连续」。
+   * 校验不过就整条丢弃、房间保持原样 —— 宁可这次拖动不生效，也不要留下半个错位的图层表。
+   */
+  reorderLayers(order, opts) {
+    if (!Array.isArray(order) || order.length !== this.layers.length) return false;
+    const known = new Set(this.layers.map(l => l.id));
+    const seen = new Set();
+    for (const id of order) {
+      if (typeof id !== 'string' || !known.has(id) || seen.has(id)) return false;
+      seen.add(id);
+    }
+    const o = opts || {};
+    if (o.layerId) {
+      const l = this.getLayer(o.layerId);
+      if (!l) return false;
+      l.groupId = (typeof o.groupId === 'string' && o.groupId && this.getGroup(o.groupId))
+        ? o.groupId : null;
+    }
+    const byId = new Map(this.layers.map(l => [l.id, l]));
+    this.layers = order.map(id => byId.get(id));
+    // 顺序是客户端算好的最终结果；这里只兜底「同组必须连续」那条不变式，
+    // 对合法的输入它是恒等变换
+    this.normalizeGroups();
+    this.dirty = true;
+    return true;
+  }
+
   updateLayer(id, patch) {
     const l = this.getLayer(id);
     if (!l) return null;
@@ -432,6 +481,16 @@ class Room {
     if (typeof patch.visible === 'boolean') l.visible = patch.visible;
     if (typeof patch.locked === 'boolean') l.locked = patch.locked;
     if (typeof patch.alphaLock === 'boolean') l.alphaLock = patch.alphaLock;
+    // ★ v2.0.10：画笔锁定 / 移动锁定（SAI2 锁定行里的两颗）
+    if (typeof patch.drawLock === 'boolean') l.drawLock = patch.drawLock;
+    if (typeof patch.moveLock === 'boolean') l.moveLock = patch.moveLock;
+    // ★ 2.0.9：指定为选区样本是**文档级互斥**的 —— 指定一层就把别的层全清掉
+    //   （SAI2 那颗是单选圆点，客户端只管发「我这一层要当样本」，互斥由服务端拍板，
+    //    两端的 selSample 才不会各说各话）。
+    if (typeof patch.selSample === 'boolean') {
+      if (patch.selSample) this.layers.forEach(x => { x.selSample = false; });
+      l.selSample = patch.selSample;
+    }
     if (typeof patch.opacity === 'number') l.opacity = clamp(patch.opacity, 0, 1);
     if (P.BLEND_MODES.indexOf(patch.blend) >= 0) l.blend = patch.blend;
     if (typeof patch.hasMask === 'boolean') l.hasMask = patch.hasMask;
@@ -602,6 +661,14 @@ class Room {
       // 但**蒙版本身**是独立的一层数据：不给副本的话，用户拿蒙版一改，
       // 原图会变、副本不会变 —— 看着像「复制出来的图层不听话」。
       // visible / locked 不复制：副本默认可见、不锁，这是复制图层的惯例。
+      // ★ v2.0.10：alphaLock / drawLock / moveLock 跟着副本走 —— 它们描述的是「这一层的用途」
+      //   （锁透明像素的水彩层、只给看不给改的参考层…），随手复制一份又解除保护更危险。
+      alphaLock: !!src.alphaLock,
+      drawLock: !!src.drawLock,
+      moveLock: !!src.moveLock,
+      // ★ 2.0.9：selSample **不复制** —— 「指定为选区样本」是整份文档只认一层的标记，
+      //   复制一层出来顺手又多一个样本层，取样来源就说不清了。
+      selSample: false,
       hasMask: !!src.hasMask,
       maskImage: src.maskImage || null,
       maskSeq: upToSeq || this.seq,

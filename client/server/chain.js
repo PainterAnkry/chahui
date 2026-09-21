@@ -71,6 +71,19 @@ const CHAIN_PHASE_LABEL = {
 const STEP = { WORD: 'WORD', DRAWING: 'DRAWING', GUESS: 'GUESS' };
 
 /**
+ * ★ v17：接龙的两种玩法（每局设置 chainPlay，见协议 GAME.CHAIN_PLAYS）。
+ *
+ *   CLASSIC（接龙模式）：猜完**自己画**自己猜出来的词，再传给下家猜 ——
+ *     4 人：起词A → 画A → 猜A → 画A → 猜A…（每人连着两格，链长 = 2 × 组人数）
+ *   RELAY（传词接龙）：猜完**不画**，把猜出来的词直接交给**下家画**，画完再交给再下家猜 ——
+ *     4 人 2 轮：起词A → 画A → 猜B → 画C → 猜D → 画A → 猜B → 画C → 猜D（链长 = 1 + 轮数×人数）
+ *
+ * 两种玩法**共用同一套数据结构与阶段机**（steps 都是「词 / 画 / 猜」的序列），
+ * 差别只在「第 k 格是谁的活」（legOffsetIn）与链长（groupChainLen）。
+ */
+const CHAIN_PLAY = { CLASSIC: 'classic', RELAY: 'relay' };
+
+/**
  * ★ v12 大房间分组的**人数 → 组数**表（用户明确要求）：
  *
  *   4~6 人   → 1 组（每人一条链，链传遍全场）—— 就是 v11 的行为，完全不变
@@ -257,6 +270,10 @@ class ChainGame {
     // ★ v14：回放倍速（每局设置，只允许 P.GAME.CHAIN_REPLAY_SPEEDS）。倍速越大 → 每格越短。
     this.replaySpeed = P.GAME.CHAIN_REPLAY_SPEED_DEFAULT;
     this.chainLength = 0;      // 每条链传几手（含初始词格）；开局时定死
+    // ★ v17：接龙玩法（'classic' 猜完自己画 / 'relay' 传词接龙：猜完交给下家画）
+    //   与传词玩法的「传几轮」（链长 = 1 + 轮数 × 组人数）。开局时定死，一局内不变。
+    this.chainPlay = CHAIN_PLAY.CLASSIC;
+    this.relayRounds = P.GAME.CHAIN_RELAY_ROUNDS_DEFAULT;
 
     this.ring = [];            // 传递顺序（开局时打乱一次，一局内固定）
     // ★ v12：分组。每组一个**独立的环**，链只在组内传（见 planGroups）。
@@ -356,13 +373,50 @@ class ChainGame {
    *  ⚠ 认领（cellOf）和收格（finalizeStep）**必须**共用这一份映射。
    *    以前两边各写一遍 `(ownerIdx + k) % n`，只要改一处漏一处，就会出现
    *    「我照 A 的链写词、服务端把词记到 B 的链上」这种鬼故事。
+   *
+   *  ★ v17：**传词接龙**（chainPlay = 'relay'）用另一套偏移（见 legOffsetIn）：
+   *    每格换一个人 —— 起词 A → 画 A → 猜 B → 画 C → 猜 D → 画 A → …
+   *    这里保留的是 classic（接龙模式）的偏移，测试与老调用方仍然认它。
    */
   authorOffset(k) { return Math.floor(k / 2); }
 
+  /**
+   * ★ v17：第 k 格在**某个组**里的环上偏移；返回 null = 这一格对这个组来说是「没有活」的空格。
+   *
+   * classic（接龙模式）：每人连续两格 —— 偏移 = floor(k/2)，超过组人数就没人有活了。
+   * relay（传词接龙）：**每格换一个人** ——
+   *   k = 0             → 0        （链主写起词，第 1 格也是他画自己的词）
+   *   k ≥ 1             → (k-1) % size，且 k ≥ 1 + 轮数 × size 之后就没有活了。
+   *   4 人 2 轮 → 偏移 = [0,0,1,2,3,0,1,2,3]，类型 = WORD,DRAW,G,DRAW,G,DRAW,G,DRAW,G
+   *   （作者序列 A,A,B,C,D,A,B,C,D —— 与用户给的验收例子逐字一致）。
+   *
+   * ⚠ 认领（cellOf）与收格（finalizeStep）**必须**共用这一份映射：
+   *   传词模式的偏移是取模的，不能再拿 `off >= size` 当「传完了」的判据 ——
+   *   判据是**这一格的绝对编号**有没有超过这个组自己的链长（1 + 轮数 × 组人数）。
+   */
+  legOffsetIn(group, k) {
+    const size = (group && group.members && group.members.length) || 0;
+    if (!size) return null;
+    if (this.chainPlay === CHAIN_PLAY.RELAY) {
+      if (k === 0) return 0;
+      if (k >= 1 + this.relayRounds * size) return null;   // 这个组传够了 → 空格
+      return (k - 1) % size;
+    }
+    const off = Math.floor(k / 2);
+    return off >= size ? null : off;
+  }
+
+  /** 这一组自己的链长（组内传遍）：classic = 2×人数；relay = 1 + 轮数 × 人数 */
+  groupChainLen(size) {
+    return this.chainPlay === CHAIN_PLAY.RELAY
+      ? 1 + this.relayRounds * size
+      : 2 * size;
+  }
+
   /** 第 k 格的作者 userId（chain 是链主那条链）—— **在链主自己那一组里**数。
    *
-   *  v12：链只在组内传。链主的组里，第 k 格的作者 = 组环上 (链主位置 + floor(k/2))；
-   *  一旦偏移超出**本组人数**（人少的组在统一链长的尾巴上会出现），返回 '' ——
+   *  v12：链只在组内传。链主的组里，第 k 格的作者 = 组环上 (链主位置 + 这一格的偏移)；
+   *  一旦这一格对本组来说是空的（legOffsetIn 返回 null），返回 '' ——
    *  那一格对这个组来说是「空」，由 finalizeStep 落一个 skipped 空壳，
    *  这样「每条链的 steps 长度统一 = chainLength」这条不变式不会被破坏。
    */
@@ -371,8 +425,8 @@ class ChainGame {
     if (!g || !g.ring.length) return '';
     const ownerIdx = g.ring.indexOf(chain.ownerPlayerId);
     if (ownerIdx < 0) return '';
-    const off = this.authorOffset(k);
-    if (off >= g.ring.length) return '';          // 组内已经走完一圈 → 空格
+    const off = this.legOffsetIn(g, k);
+    if (off === null) return '';                   // 组内已经传完 → 空格
     return g.ring[(ownerIdx + off) % g.ring.length];
   }
 
@@ -401,21 +455,20 @@ class ChainGame {
     return m;
   }
 
-  /** 各组链长表（组内传遍 = 2 × 该组人数）—— 快照下发，前端要知道每个组跑几格 */
+  /** 各组链长表（组内传遍）—— 快照下发，前端要知道每个组跑几格 */
   groupLengths() {
     const out = {};
-    for (const g of this.groups) out[g.id] = 2 * g.members.length;
+    for (const g of this.groups) out[g.id] = this.groupChainLen(g.members.length);
     return out;
   }
 
   /** 第 k 格里**有活干的人**（组内偏移还没走完的人）。
-   *  组里已经走完一圈的成员在剩下的格子里就是空的 —— 不派活、不提交、也不摊空格。 */
+   *  组里已经传完的成员在剩下的格子里就是空的 —— 不派活、不提交、也不摊空格。 */
   activeUsers(k) {
     const out = new Set();
     if (!this.groups.length) { for (const uid of this.ring) out.add(uid); return out; }
-    const off = this.authorOffset(k);
     for (const g of this.groups) {
-      if (off >= g.members.length) continue;
+      if (this.legOffsetIn(g, k) === null) continue;
       for (const uid of g.members) out.add(uid);
     }
     return out;
@@ -427,8 +480,8 @@ class ChainGame {
     if (!g || !g.ring.length) return null;
     const myIdx = g.ring.indexOf(userId);
     if (myIdx < 0) return null;
-    const off = this.authorOffset(k);
-    if (off >= g.ring.length) return null;        // 组内走完一圈 → 这一格没我的事
+    const off = this.legOffsetIn(g, k);
+    if (off === null) return null;                 // 组内传完了 → 这一格没我的事
     const ownerIdx = ((myIdx - off) % g.ring.length + g.ring.length) % g.ring.length;
     return g.chainIds[ownerIdx] || null;
   }
@@ -664,6 +717,9 @@ class ChainGame {
       // 进度骨架：第几格、这一格全场**同时**有几件事、交了几件 —— 不含任何内容。
       // v12：多组并行时同时进行的是「每个组各一条链」，所以 stepTotal = 最大的组多大
       // （4 人 1 组 = 4，8 人 2 组 × 4 = 4，不是 8 —— 同一步里不会出现 8 条链）。
+      // ★ v17：接龙玩法随快照下发（前端要显示「接龙 / 传词接龙」与传几轮）。
+      chainPlay: this.chainPlay,
+      relayRounds: this.relayRounds,
       stepIndex: this.isPlaying() || this.phase === CHAIN_PHASE.INIT ? this.stepIndex : 0,
       stepTotal: this.maxGroupSize() || this.chains.length,
       stepDone: stepDone,
@@ -841,11 +897,27 @@ class ChainGame {
     //   16 人 → 4×4 组，链长 8；13 人 → 4/3/3/3，链长 8（3 人组第 7、8 格空）；
     //   10 人 → 5/5，链长 10；7 人 → 4/3，链长 8。4~6 人 1 组时与 v11 完全一致。
     // 夹在 [3, 2 × min(最大的组, CHAIN_LENGTH_MAX)] 里（CHAIN_LENGTH_MAX=16 → 组内最多 32 格）。
+    // ★ v17：接龙玩法（classic / relay）+ 传词玩法的「传几轮」。
+    //   ⚠ relay 下**不用面板上的 chainLength**：链长由轮数决定（1 + 轮数 × 组人数），
+    //     这样「传遍全场 N 轮」这条规则不会被一个越界的链长数值破坏。
+    this.chainPlay = (P.GAME.CHAIN_PLAYS.indexOf(opts && opts.chainPlay) >= 0)
+      ? opts.chainPlay : P.GAME.CHAIN_PLAY_DEFAULT;
+    // 轮数与其它数值字段同一个口径：**0 / 缺省 / 非法 = 用默认**（不能把 0 夹成下限 1），
+    // 正数才夹到 [1, 4]。
+    const rr = Math.floor(Number(opts && opts.relayRounds));
+    this.relayRounds = (isFinite(rr) && rr > 0)
+      ? clampInt(rr, P.GAME.CHAIN_RELAY_ROUNDS_DEFAULT,
+        P.GAME.CHAIN_RELAY_ROUNDS_MIN, P.GAME.CHAIN_RELAY_ROUNDS_MAX)
+      : P.GAME.CHAIN_RELAY_ROUNDS_DEFAULT;
     const maxGroup = Math.max(1, ...groupSizesFor(players.length));
-    const maxLen = 2 * Math.min(maxGroup, P.GAME.CHAIN_LENGTH_MAX);
-    const wantLen = Math.floor(Number(opts && opts.chainLength)) || (2 * maxGroup);
-    this.chainLength = clampInt(wantLen, 2 * maxGroup,
-      P.GAME.CHAIN_LENGTH_MIN, Math.max(P.GAME.CHAIN_LENGTH_MIN, maxLen));
+    // 链长：classic = **2 × 该组人数**（组内传遍，每人连续两格）；relay = 1 + 轮数 × 组人数。
+    // 统一取**最大的组**那份（人少的组在自己的圈尾之后由 finalizeStep 落 skipped 空壳）。
+    const maxLen = this.groupChainLen(Math.min(maxGroup, P.GAME.CHAIN_LENGTH_MAX));
+    const wantLen = Math.floor(Number(opts && opts.chainLength)) || this.groupChainLen(maxGroup);
+    this.chainLength = this.chainPlay === CHAIN_PLAY.RELAY
+      ? this.groupChainLen(maxGroup)                 // relay：链长 = 1 + 轮数 × 最大的组
+      : clampInt(wantLen, 2 * maxGroup,
+        P.GAME.CHAIN_LENGTH_MIN, Math.max(P.GAME.CHAIN_LENGTH_MIN, maxLen));
 
     this.chains = [];
     this.ring = [];
@@ -899,11 +971,13 @@ class ChainGame {
       return false;
     }
     // 链长跟着这一局的实际人数再夹一次（有人刚离开时设置值可能越界）。
-    // 上限是「2 × 最大的组」—— 每人连续两格，见 authorOffset() 的映射表。
+    // ★ v17：relay 下链长恒等于「1 + 轮数 × 最大的组」（不看房主设的 chainLength）。
     const maxGroup = Math.max(1, ...groupSizesFor(players.length));
-    this.chainLength = clampInt(this.chainLength || (2 * maxGroup), 2 * maxGroup,
-      P.GAME.CHAIN_LENGTH_MIN,
-      Math.max(P.GAME.CHAIN_LENGTH_MIN, 2 * Math.min(maxGroup, P.GAME.CHAIN_LENGTH_MAX)));
+    this.chainLength = this.chainPlay === CHAIN_PLAY.RELAY
+      ? this.groupChainLen(maxGroup)
+      : clampInt(this.chainLength || (2 * maxGroup), 2 * maxGroup,
+        P.GAME.CHAIN_LENGTH_MIN,
+        Math.max(P.GAME.CHAIN_LENGTH_MIN, 2 * Math.min(maxGroup, P.GAME.CHAIN_LENGTH_MAX)));
 
     this.spectators.clear();          // 开新局：房间里的人都算玩家
     this.roundNo += 1;
@@ -934,7 +1008,10 @@ class ChainGame {
     this.api.resetCanvas();           // 游戏画布：从干净的一张开始
     this.api.sync();
     this.api.systemChat('第 ' + this.roundNo + ' 局开始！共 ' + this.chains.length + ' 条链，'
-      + '每条传 ' + this.chainLength + ' 手 · 主题：'
+      + '每条传 ' + this.chainLength + ' 手 · '
+      + (this.chainPlay === CHAIN_PLAY.RELAY
+        ? '玩法：传词接龙（传 ' + this.relayRounds + ' 轮）· ' : '玩法：接龙 · ')
+      + '主题：'
       + ((THEMES.THEMES[this.theme] && THEMES.THEMES[this.theme].name) || '通用'));
     return true;
   }
@@ -968,7 +1045,7 @@ class ChainGame {
         members: members,
         ring: shuffle(members),         // 组内环：只在组内传（洗一次就够）
         chainIds: [],
-        chainLength: 2 * members.length // 这个组的实际格数（组内传遍）
+        chainLength: this.groupChainLen(members.length)  // 这个组的实际格数（组内传遍）
       });
     }
     // 每人一条链；链编号全局连续，组内 chainIds 跟着组环顺序走
@@ -1033,10 +1110,9 @@ class ChainGame {
       if (lack.length) problems.push('环上 ' + lack.length + ' 人没有链：' + lack.join(','));
       return { ok: problems.length === 0, k, problems };
     }
-    const off = this.authorOffset(k);
     for (const g of this.groups) {
       const size = g.members.length;
-      const active = off < size;            // 这个组在这一格还有活吗
+      const active = this.legOffsetIn(g, k) !== null;   // 这个组在这一格还有活吗
       // ③ 链主必须在**本组**环上
       for (const cid of g.chainIds) {
         const c = this.chains.find(x => x.chainId === cid);

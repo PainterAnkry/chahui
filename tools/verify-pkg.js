@@ -33,6 +33,8 @@ const CHECKS = [
     // v2.0.4 追加：「有概率看不到别人的某一图层」—— 孤儿笔迹挂起等图层，
     // 缺了它包里的多人协作还是会把先到的笔迹兜底到错误的图层上
     /orphanStrokes/, /flushOrphanStrokes/,
+    // v2.0.10：变换确定后**选区跟着内容走**（followSelection）+ 蒙版缩略图 + 画笔/移动锁
+    /followSelection/, /drawLock/, /moveLock/, /maskThumb/,
     // 同批：合成缓存键必须含蒙版/剪贴状态（否则远端改蒙版那一层看着不更新）
     /\(l\.hasMask \? 1 : 0\)/]],
   ['renderer/app.js', [/groupAdd/, /pickUpdateAsset/, /groups/, /tunnelRowHtml/, /setMyAvatar/,
@@ -48,7 +50,14 @@ const CHECKS = [
     // 作画格按笔数播动画、投票阶段留最后一棒的成图
     /crCanvasTake/, /crCanvasShowArt/, /crHideImg/, /engine\.replayCanvas = a\.raw/,
     // v2.0.7（第七轮）：离场收干净（投票纸片别留到下一局）+ 大厅名单过滤掉离场的人
-    /crHideVotePaper/, /p\.online !== false/]],
+    /crHideVotePaper/, /p\.online !== false/,
+    // v2.0.9：接龙第二种玩法「传词接龙」—— 开局面板的玩法 / 传几轮两行 + 大厅与进度写明玩法
+    /chainPlayValue/, /relayRoundsValue/, /CHAIN_PLAY_LABEL/, /syncChainPlayRows/,
+    // v2.0.10：图层面板照 SAI2 重排（三把新锁 + 蒙版缩略图 + 创建剪贴蒙版回到勾选行）
+    /lockDrawChk/, /lockMoveChk/, /crHideVotePaper/, /mask-thumb/, /setMaskEdit/]],
+  // ★ v2.0.10：SAI2 笔刷包转换出来的参数表（tools/sai2-brush-convert.js 生成）——
+  //   少了它，包里的笔刷参数就退回内置默认值（看着「换了但没换」）
+  ['renderer/sai2-brushes.js', [/CHAHU_SAI2/, /"watercolor"/, /"mix"/, /sai2Wet/, /sai2Oil/]],
   // v2.0.4 追加：.sut（CSP 笔刷）导入 —— 列名感知的 SQLite 读取 + 真参数连表 + 空白缩略图拒绝
   ['renderer/brush-import.js', [/sqliteTableRows/, /sutBrushMeta/, /isFlatImage/, /cspColumnNames/]],
   ['renderer/project.js', [/groups/, /maskPng/]],
@@ -60,12 +69,17 @@ const CHECKS = [
   // v2.0.7（第五轮）：悬念倒计时 / 揭晓惊喜音 / 投票落章音
   ['renderer/sfx.js', [/roundEnd/, /setVolume/, /tease\(\)/, /countTick/, /voteStamp/, /voteLand/]],
   // v2.0.7：回放画面铺满画布区（去掉卡片外观）+ 悬念倒计时读数 + 空圈占位
-  ['renderer/styles.css', [/ccl-cd/, /ccl-img/, /rm\.pending/]],
+  ['renderer/styles.css', [/ccl-cd/, /ccl-img/, /rm\.pending/,
+    // v2.0.10：SAI2 那张锁定行的四颗图标 + 缩进虚线边的蒙版缩略图
+    /lock-row\.locks/, /lock-ic/, /mask-thumb/, /clip-chk/]],
   // v2.0.7：每一格的时长不再一样（legMs 表）+ 16 版协议（按笔数播动画 / 猜词定格 2 秒）
+  // v2.0.9：协议 v17 —— 接龙玩法 chainPlay（classic / relay）与传词接龙的轮数
   ['server/protocol.js', [/CHAIN_REVEAL_TEASE_MS/, /CHAIN_REVEAL_DRAW_PER_STROKE_MS/,
-    /chainRevealAnimMs/, /PROTOCOL_VERSION = 16/]],
+    /chainRevealAnimMs/, /CHAIN_PLAYS/, /CHAIN_RELAY_ROUNDS_DEFAULT/, /PROTOCOL_VERSION = 17/]],
   // 头像（v1.10.0）：成员表那个白名单必须带上 avatar，否则别人永远收不到
-  ['server/rooms.js', [/normalizeGroups/, /moveGroup/, /setLayerGroup/, /avatar/, /hasMask/, /dupLayer/]],
+  ['server/rooms.js', [/normalizeGroups/, /moveGroup/, /setLayerGroup/, /avatar/, /hasMask/, /dupLayer/,
+    // v2.0.10：逐层的画笔锁 / 移动锁（SAI2 锁定行里的两颗）—— 存、下发、复制都要带上
+    /drawLock/, /moveLock/]],
   ['server/index.js', [/GROUP_ADD/, /GROUP_UPD/, /MEMBER_AVATAR/, /GAME_GUESS/,
     // v2.0.1：关服务器再开要重建 wss、离线模式要能从外部挂客户端
     /stopListening/, /createWss/, /function onClient/,
@@ -83,8 +97,9 @@ const CHECKS = [
   //     · votersFor ：投票人 = **这条链那一组**的人（跨组不算票）
   // v2.0.7（第五轮）：每格时长分开算（legMsAt / legMsOf）+ 起词猜词格的悬念尾
   // v2.0.7（第六轮）：作画格按**笔数**算动画（chainRevealAnimMs + DRAW_* 常量）
+  // v2.0.9：接龙第二种玩法 —— 第 k 格的作者映射改由 legOffsetIn 按玩法算（relay 每格换人）
   ['server/chain.js', [/spectators/, /votersFor/, /legMsAt/, /legMsOf/, /REVEAL_TEASE_MS/,
-    /REVEAL_DRAW_PER_STROKE_MS/, /REVEAL_HOLD_MS/]],
+    /REVEAL_DRAW_PER_STROKE_MS/, /REVEAL_HOLD_MS/, /legOffsetIn/, /groupChainLen/, /CHAIN_PLAY/]],
   // 应用内一键隧道（v1.10.0）：模块本身也要真的进包
   ['tunnel.js', [/createTunnel/, /trycloudflare/]],
   // 离线模式（v2.0.1）：不占端口的那个客户端，必须在包里

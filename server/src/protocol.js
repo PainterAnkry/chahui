@@ -96,6 +96,15 @@
  *     夹在 [MIN, MAX] 之间，再除以回放倍速 —— 播完就是成图，紧接着开始悬念倒计时。
  *     快照里的 legMs 仍然权威，前端照它排；chainRevealAnimMs() 是两端共用的那条公式。
  *   - 猜词格 CHAIN_REVEAL_GUESS_MS 提到 2000：揭晓的那个词要**停两秒**再翻下一棒。
+ *
+ * v17 变更（接龙的第二种玩法：**传词接龙**）：
+ *   - C2S.GAME_START 的 opts 新增 chainPlay（'classic' | 'relay'，默认 classic）与
+ *     relayRounds（传几轮，1~4，默认 2）。mode 仍然是 'chain'，玩法是它的一个子选项。
+ *   - classic = 接龙模式：猜完**自己画**自己猜出来的词，再传给下家猜（链长 = 2 × 人数）；
+ *     relay   = 传词接龙：猜完**不画**，把猜出来的词直接交给**下家画**，下家画完再交给再下家猜
+ *               （起词 → A画 → B猜 → C画 → D猜 → A画 → …，链长 = 1 + 传几轮 × 人数）。
+ *   - 两种玩法的**数据结构完全一样**（steps 仍是「起词 / 画 / 猜」的序列，content 是词或笔迹），
+ *     回放 / 投票 / 结算一行都不用改 —— 区别只在「第 k 格的作者是谁」（见 chain.js 的 legOffsetIn）。
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) module.exports = factory();
@@ -103,7 +112,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var PROTOCOL_VERSION = 16;
+  var PROTOCOL_VERSION = 17;
 
   // 客户端 -> 服务端
   var C2S = {
@@ -152,6 +161,11 @@
     GROUP_DEL: 'group:del',         // { groupId, withLayers? } 默认是**解散组**（图层留在原位）
     GROUP_MOVE: 'group:move',       // { groupId, dir: 1|-1 } 整组（连同组内所有图层）上移 / 下移一格
     LAYER_GROUP: 'layer:group',     // { layerId, groupId } 把图层挪进某组；groupId 为 null 表示移出组
+    // { order:[layerId...], layerId?, groupId? } 面板拖动排序：客户端把**目标顺序整体**发过来。
+    // 为什么不用增量的「挪到第几位」：面板上松手的位置可能同时改变顺序和所属组，
+    // 一条增量消息表达不了；而客户端手上本来就有完整的图层数组，整份发过来最不容易分家。
+    // order 必须是当前这批图层的一个排列（服务端校验：长度、去重、全部认识），否则整条丢弃。
+    LAYER_ORDER: 'layer:order',
 
     // ---- 工程文件（.chahu）装载：分片传，避开单条 12MB 的 ws 上限 ----
     // 三条一起构成一次原子替换：收齐之前房间内容不变，收不齐就整批丢弃。
@@ -168,7 +182,7 @@
     // ---- 你画我猜（mode='classic'）----
     // 三个玩法共用这一条开局消息，**字段按 mode 取用，全部可选，0 / 缺省 = 用默认**：
     //   classic { mode?, theme?, drawSeconds?, rounds?, repickLimit?, roundEndSeconds? }
-    //   chain   { mode?, theme?, drawSeconds?, chainLength?, writeSeconds?, guessSeconds?, revealSeconds?, voteSeconds?, replaySpeed? }
+    //   chain   { mode?, theme?, drawSeconds?, chainLength?, chainPlay?, relayRounds?, writeSeconds?, guessSeconds?, revealSeconds?, voteSeconds?, replaySpeed? }
     //   skin    { mode?, theme?, drawSeconds?, rounds?, nightSeconds?, dawnSeconds?, talkSeconds?, voteSeconds? }
     // 夹取：秒数字段一律夹到 [SETUP_SECONDS_MIN, SETUP_SECONDS_MAX] = [3, 600]，0 / 非法 / 负数 = 用默认；
     //       **drawSeconds 是唯一的例外**（从 v4 起最短就是 DRAW_SECONDS_MIN = 30 秒），仍是 [30, 300]；
@@ -348,6 +362,20 @@
     // 「min(人数, 这个常量)」是因为链比 2×人数 再长就会绕第二圈，同一格里会出现
     // 两条链归同一个人。所以这个常量是**人数**的封顶（16 人 → 最多 32 格）。
     CHAIN_LENGTH_MAX: 16,
+    // ★ v17：接龙的**玩法**（每局设置 C2S.GAME_START.opts.chainPlay）。mode 仍是 'chain'，
+    //   这一项只是它下面的子玩法 —— 两种玩法的数据结构、回放、投票完全一样，
+    //   区别只在「第 k 格的作者是谁」：
+    //     classic = 接龙模式：猜完**自己画**自己猜出来的词，再传给下家猜。
+    //               4 人：起词A → 画A → 猜A → 画A → 猜A → …（每人连着两格，链长 = 2 × 人数）
+    //     relay   = 传词接龙：猜完**不画**，把猜出来的词直接交给**下家画**，画完再交给再下家猜。
+    //               4 人 2 轮：起词A → 画A → 猜B → 画C → 猜D → 画A → 猜B → 画C → 猜D（共 9 格）
+    CHAIN_PLAY_DEFAULT: 'classic',
+    CHAIN_PLAYS: ['classic', 'relay'],
+    // 传词接龙「传几轮」：链长 = 1（起词） + 轮数 × 人数 ——
+    // 上限 4 轮是为了不让链条无限长（防止「一直传下去」把一局拖到天亮）。
+    CHAIN_RELAY_ROUNDS_DEFAULT: 2,
+    CHAIN_RELAY_ROUNDS_MIN: 1,
+    CHAIN_RELAY_ROUNDS_MAX: 4,
     CHAIN_PICK_CHOICES: 3,   // 写初始词时给几个候选
     CHAIN_INIT_MS: 4000,     // 开场鼓点时长
     CHAIN_WRITE_MS: 60000,   // 写初始词的时限

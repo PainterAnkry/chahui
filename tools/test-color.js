@@ -115,6 +115,96 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   console.log('  ' + JSON.stringify(geo));
   ok('三角比色环内沿小一圈（看得出是分开的）', geo.tr <= geo.r0 - 4, 'tr=' + geo.tr + ' r0=' + geo.r0);
 
+  // ★ v20：取色区默认从三角形换成了**方形**（用户反馈：三角尖角附近一片颜色挤在
+  //   一起，想选准得试好几次；方形横轴饱和度、纵轴明度，和 PS / SAI 一致）。
+  //   三角形留作可切换的选项。所以这一段先按默认（方形）验，再切到三角验老行为。
+  console.log('\n=== 默认取色区是方形（v20 起）===');
+  ok('默认形状就是方形（不再是三角形）',
+    (await page.evaluate(() => window.ChaApp.wheelShape())) === 'square',
+    await page.evaluate(() => window.ChaApp.wheelShape()));
+  ok('切换按钮显示的是 ▢',
+    (await page.evaluate(() => document.querySelector('#btnWheelShape').textContent)).trim() === '▢',
+    await page.evaluate(() => document.querySelector('#btnWheelShape').textContent));
+
+  console.log('\n=== 方形取色区：横轴 = 饱和度、纵轴 = 明度 ===');
+  // ⚠ 取点避开 v→0 的极暗角：颜色是 8 位存的，暗处一个 RGB 台阶就能把饱和度
+  //   挪掉 0.05 以上（浅色时只有 0.004）—— 那点量化误差会顶穿 s/v 的容差。
+  const sqCases = [['左上 中亮低饱和', 0.25, 0.75], ['右上 高饱和中亮', 0.75, 0.75],
+    ['左下 暗', 0.25, 0.25], ['右下 高饱和暗', 0.75, 0.25], ['正中', 0.5, 0.5]];
+  const sqResults = [];
+  for (const [label, s, v] of sqCases) {
+    await page.evaluate(() => window.__colorProbe.setColorViaHex('#00b0ff'));   // 先钉住色相
+    await page.waitForTimeout(90);
+    const r = await page.evaluate(([ss, vv]) => {
+      const p = window.__colorProbe;
+      const g = p.geom();
+      const half = g.tr / Math.SQRT2;
+      const o = p.probe(g.cx - half + ss * half * 2, g.cy - half + (1 - vv) * half * 2);
+      const sn = p.snap();
+      o.s = sn.s; o.v = sn.v; o.shape = g.cv.dataset.svShape;
+      return o;
+    }, [s, v]);
+    sqResults.push({ label, wantS: s, wantV: v, ...r });
+  }
+  sqResults.forEach(r => console.log('  ' + r.label.padEnd(16) + ' → ' + r.kind.padEnd(5) +
+    ' s=' + r.s.toFixed(2) + ' v=' + r.v.toFixed(2) + ' 色相改变 ' + r.dHue.toFixed(1) + '°  ' + r.hex));
+  ok('方形里的点都判成取色区（不是环）',
+    sqResults.every(r => r.kind === 'sv'),
+    sqResults.filter(r => r.kind !== 'sv').map(r => r.label + '=' + r.kind));
+  ok('命中判定确实按方形走的（dataset 也记着 square）',
+    sqResults.every(r => r.shape === 'square'),
+    sqResults.map(r => r.shape).join(','));
+  ok('方形：横轴是饱和度、纵轴是明度（取到的 s / v 和点的地方对得上）',
+    sqResults.every(r => Math.abs(r.s - r.wantS) < 0.03 && Math.abs(r.v - r.wantV) < 0.03),
+    sqResults.filter(r => Math.abs(r.s - r.wantS) >= 0.03 || Math.abs(r.v - r.wantV) >= 0.03)
+      .map(r => r.label + ':' + r.s.toFixed(2) + '/' + r.v.toFixed(2) + ' 期望 ' + r.wantS + '/' + r.wantV));
+  // 容差 3°：颜色是 8 位存的，暗一点的取点回读色相天然会抖 1~2°
+  // （同一条色相、只差一个 RGB 台阶）。而「误点到色环」的跳变是几十度，
+  // 3° 这个门照样拦得住，不会放过真错。
+  ok('点方形不会改色相', sqResults.every(r => r.dHue < 3),
+    sqResults.filter(r => r.dHue >= 3).map(r => r.label + ' Δ' + r.dHue.toFixed(1)));
+
+  console.log('\n=== 方形边缘往外 1~2px：仍算取色区、色相一点不能动（边缘取色防误触）===');
+  // 环与取色区之间那圈空隙，一半算给取色区 —— 所以「贴着方形边界往外偏一两个像素」
+  // 不该跳到色环上去（手抖那一点不该让色相乱跳）。四条边中点 + 四个角各试 1px / 2px。
+  const sqEdge = [];
+  for (const [label, lx, ly] of [['上边中点', 0, -1], ['下边中点', 0, 1], ['左边中点', -1, 0], ['右边中点', 1, 0],
+    ['左上角', -1, -1], ['右上角', 1, -1], ['左下角', -1, 1], ['右下角', 1, 1]]) {
+    const kinds = [], dHues = [];
+    for (const extra of [1, 2]) {
+      await page.evaluate(() => window.__colorProbe.setColorViaHex('#00b0ff'));
+      await page.waitForTimeout(90);
+      const r = await page.evaluate(([dx, dy, ex]) => {
+        const p = window.__colorProbe;
+        const g = p.geom();
+        const half = g.tr / Math.SQRT2;
+        const bx = dx === 0 ? g.cx : (dx < 0 ? g.cx - half : g.cx + half);
+        const by = dy === 0 ? g.cy : (dy < 0 ? g.cy - half : g.cy + half);
+        const n = Math.hypot(dx, dy);          // 角上按 45° 往外走，「外 N px」才是真的 N px
+        return p.probe(bx + dx / n * ex, by + dy / n * ex);
+      }, [lx, ly, extra]);
+      kinds.push(r.kind); dHues.push(Math.round(r.dHue * 10) / 10);
+    }
+    sqEdge.push({ label, kinds, dHues });
+  }
+  sqEdge.forEach(x => console.log('  ' + x.label.padEnd(10) + ' 外 1/2px → ' + x.kinds.join(', ') +
+    '   色相Δ ' + x.dHues.join(' / ')));
+  ok('方形边缘外 1~2px 仍算取色区（不会误跳到色环）',
+    sqEdge.every(x => x.kinds.every(k => k === 'sv')),
+    sqEdge.map(x => x.label + ':' + x.kinds.join('/')));
+  ok('方形边缘外 1~2px 色相一点都不动（防误触）',
+    sqEdge.every(x => x.dHues.every(d => d < 1)),
+    sqEdge.map(x => x.label + ':' + x.dHues.join('/')));
+
+  console.log('\n=== 切到三角形（保留下来的选项）===');
+  await page.evaluate(() => window.ChaApp.setWheelShape('triangle'));
+  await page.waitForTimeout(120);
+  ok('切过去之后按钮变成 △',
+    (await page.evaluate(() => document.querySelector('#btnWheelShape').textContent)).trim() === '△',
+    await page.evaluate(() => document.querySelector('#btnWheelShape').textContent));
+  ok('选择记进了本地（关掉再开还是三角）',
+    (await page.evaluate(() => { try { return localStorage.getItem('chahu.svshape'); } catch (e) { return null; } })) === 'triangle');
+
   console.log('\n=== 点三角形：SV 要变，色相不能动 ===');
   await page.evaluate(() => window.__colorProbe.setColorViaHex('#00b0ff'));
   await sleep(200);
@@ -141,9 +231,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     triResults.push({ label, ...r });
   }
   triResults.forEach(r => console.log('  ' + r.label.padEnd(12) + ' → ' + r.kind.padEnd(5) + ' 色相改变 ' + r.dHue.toFixed(1) + '°  ' + r.hex));
-  ok('三角上的点都判成三角（不是环）',
-    triResults.every(r => r.kind === 'tri'),
-    triResults.filter(r => r.kind !== 'tri').map(r => r.label + '=' + r.kind));
+  ok('三角上的点都判成取色区（不是环）',
+    triResults.every(r => r.kind === 'sv'),
+    triResults.filter(r => r.kind !== 'sv').map(r => r.label + '=' + r.kind));
   ok('点三角不会改色相（环上的小圈不会乱跳）',
     triResults.every(r => r.dHue < 1),
     triResults.filter(r => r.dHue >= 1).map(r => r.label + ' Δ' + r.dHue.toFixed(1)));
@@ -166,8 +256,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     outResults.push({ label, r });
     console.log('  ' + label.padEnd(12) + ' +1/+2px → ' + r.join(', '));
   }
-  ok('顶点外 1~2px 仍判成三角（不再是死区、也不会误判成环）',
-    outResults.every(x => x.r.every(k => k === 'tri')),
+  ok('三角顶点外 1~2px 仍算取色区（不再是死区、也不会误判成环）',
+    outResults.every(x => x.r.every(k => k === 'sv')),
     outResults.map(x => x.label + ':' + x.r.join('/')));
 
   console.log('\n=== 点色环：色相要跟着角度走 ===');

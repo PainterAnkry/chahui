@@ -848,6 +848,133 @@ function check(name, ok, extra) {
   await page.click('#btnImportCancel');
   await page.waitForFunction(() => document.querySelector('#importMask').classList.contains('hidden'), null, { timeout: 5000 });
 
+  /* ---------- 10) SAI2 的 .saitdat（真实文件 + 真实笔尖形状 BMP） ---------- */
+  console.log('\n=== SAI2 .saitdat ===');
+  const nfs = require('fs'), npath = require('path'), nos = require('os');
+  const saiDir = npath.join(__dirname, 'sai-corpus');
+  const saiAt = f => npath.join(saiDir, f);
+  const readDlg = () => page.evaluate(() => ({
+    title: document.querySelector('#importTitle').textContent,
+    rows: Array.prototype.map.call(document.querySelectorAll('#importBody .imp-row'), r => ({
+      name: r.querySelector('.imp-name').textContent,
+      meta: r.querySelector('.imp-meta').textContent,
+      title: r.title || '',
+      thumb: !!r.querySelector('img.imp-tip')
+    }))
+  }));
+  const closeDlg = async () => {
+    await page.click('#btnImportCancel');
+    await page.waitForFunction(() => document.querySelector('#importMask').classList.contains('hidden'), null, { timeout: 5000 });
+  };
+  const saiFiles = nfs.readdirSync(saiDir);
+  console.log('  语料:', saiFiles.join(', '));
+  check('SAI2 语料在（真实 .saitdat + 真实笔尖形状 BMP）',
+    saiFiles.some(f => /\.saitdat$/i.test(f)) && saiFiles.some(f => /\.bmp$/i.test(f)));
+
+  // 10a) .saitdat 和它的笔尖形状 BMP 一起选
+  await page.setInputFiles('#brushFileInput', [saiAt('1-圆笔.saitdat'), saiAt('圆笔.bmp')]);
+  await page.waitForSelector('#importMask:not(.hidden)', { timeout: 10000 });
+  const saiDlg = await readDlg();
+  console.log('  弹窗:', JSON.stringify(saiDlg));
+  check('SAI2 .saitdat 导进来了（素材 BMP 没被当成第二支笔）',
+    saiDlg.rows.length === 1, JSON.stringify(saiDlg.rows.map(r => r.name)));
+  // 笔刷自己的名字在 .saitdat 第一个分节的 name=U:草图铅笔 里；文件名叫「1-圆笔」，
+  // 而「圆笔」其实是同一分节的 fomnam（笔尖形状素材的名字），用来配 圆笔.bmp。
+  // 所以这里期望的是**文件里写的**笔名，不是文件名。
+  check('笔名读的是文件里的 name（不是文件名）', saiDlg.rows[0].name === '草图铅笔', saiDlg.rows[0].name);
+  check('文件名只在文件里没写名字时兜底', /圆笔/.test('1-圆笔.saitdat'));
+  check('配对上的笔尖形状 BMP 用上了（缩略图 + 来源写在悬停提示里）',
+    saiDlg.rows[0].thumb === true && /圆笔\.bmp/.test(saiDlg.rows[0].title), saiDlg.rows[0].title);
+  check('大小 / 硬度这些参数是 SAI2 的',
+    /px/.test(saiDlg.rows[0].meta) && /硬度/.test(saiDlg.rows[0].meta), saiDlg.rows[0].meta);
+  await closeDlg();
+
+  // 10b) 只有 .saitdat、没有笔尖形状图 → 按硬度合成圆笔尖
+  await page.setInputFiles('#brushFileInput', [saiAt('2-钢筆（无笔尖形状）.saitdat')]);
+  await page.waitForSelector('#importMask:not(.hidden)', { timeout: 10000 });
+  const saiDlg2 = await readDlg();
+  console.log('  弹窗:', JSON.stringify(saiDlg2));
+  check('没有笔尖形状图时也能导入（按硬度合成圆笔尖）',
+    saiDlg2.rows.length === 1 && saiDlg2.rows[0].thumb === true, saiDlg2.rows[0].name);
+  check('没配素材时不会乱写来源', !/\.bmp/.test(saiDlg2.rows[0].title), saiDlg2.rows[0].title);
+  await closeDlg();
+
+  // 10c) 后缀不可信时的内容识别：把 .saitdat 改名成 .txt 也认得
+  const tmpDir = nfs.mkdtempSync(npath.join(nos.tmpdir(), 'chahui-bru-'));
+  const dumpFile = (name, data) => {
+    const p = npath.join(tmpDir, name);
+    nfs.writeFileSync(p, Buffer.from(data));
+    return p;
+  };
+  const saiTxt = dumpFile('钢筆.txt', nfs.readFileSync(saiAt('2-钢筆（无笔尖形状）.saitdat')));
+  await page.setInputFiles('#brushFileInput', saiTxt);
+  await page.waitForSelector('#importMask:not(.hidden)', { timeout: 10000 });
+  const saiDlg3 = await readDlg();
+  check('改了后缀也认（按内容里的 tidstr 认出来）',
+    saiDlg3.rows.length === 1 && /钢/.test(saiDlg3.rows[0].name), saiDlg3.rows[0].name);
+  await closeDlg();
+
+  // 10d) 选区类工具（selpen / selers）不能被当成笔刷导进来
+  const saiSel = await page.evaluate(async () => {
+    const txt = 'tidstr=S:selpen\nname=U:选区笔\ncursize=I:20\n--EOF--\n';
+    const bytes = new TextEncoder().encode(txt);
+    try { window.ChaBrushImport.parse('x.saitdat', bytes); return 'no-error'; }
+    catch (e) { return e.message; }
+  });
+  check('「选区笔」这种定义会被明确拒绝', /不是笔刷/.test(saiSel), saiSel);
+
+  /* ---------- 11) 画世界Pro 的 .bru ---------- */
+  console.log('\n=== 画世界Pro .bru ===');
+  const u32be = v => { const b = Buffer.alloc(4); b.writeUInt32BE(v >>> 0, 0); return b; };
+
+  // 11a) 其实是从 PS 的 .abr 改的后缀（社区教程里最常见的一招）
+  const abrLike = (() => {
+    const w = 16, h = 16, gray = Buffer.alloc(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) gray[y * w + x] = x < w / 2 ? 255 : 0;
+    const body = Buffer.concat([
+      Buffer.alloc(4),              // misc
+      Buffer.from([0, 25]),         // spacing 25%
+      Buffer.from([1]),             // 抗锯齿
+      Buffer.alloc(8),              // 短边界
+      u32be(0), u32be(0), u32be(h), u32be(w),
+      Buffer.from([0, 8]),          // 位深 8
+      Buffer.from([0]),             // 不压缩
+      gray
+    ]);
+    const pad = (4 - (body.length % 4)) % 4;
+    return Buffer.concat([
+      Buffer.from([0, 1]), Buffer.from([0, 1]), Buffer.from([0, 2]),
+      u32be(body.length + pad), body, Buffer.alloc(pad)
+    ]);
+  })();
+  await page.setInputFiles('#brushFileInput', dumpFile('真·abr改名.bru', abrLike));
+  await page.waitForSelector('#importMask:not(.hidden)', { timeout: 10000 });
+  const bruAbrDlg = await readDlg();
+  console.log('  弹窗:', JSON.stringify(bruAbrDlg));
+  check('.bru 其实是 .abr 改名时也能读（版本字那一支）',
+    bruAbrDlg.rows.length === 1 && /间距 25%/.test(bruAbrDlg.rows[0].meta),
+    JSON.stringify(bruAbrDlg.rows.map(r => r.meta)));
+  await closeDlg();
+
+  // 11b) ZIP 包，里面只有一张笔尖图（画世界的包没有公开格式，这条是兜底路）
+  const shapePng = inner.find(e => e.name === 'Shape.png');
+  check('从真实 .brush 里拆出的 Shape.png 可以当 .bru 的素材', !!shapePng);
+  await page.setInputFiles('#brushFileInput',
+    dumpFile('画世界-包.bru', buildZip([{ name: 'brush/tip.png', data: shapePng.data }])));
+  await page.waitForSelector('#importMask:not(.hidden)', { timeout: 10000 });
+  const bruZipDlg = await readDlg();
+  console.log('  弹窗:', JSON.stringify(bruZipDlg));
+  check('.bru 是 ZIP 包时能从里面取笔尖图',
+    bruZipDlg.rows.length === 1 && bruZipDlg.rows[0].thumb === true, bruZipDlg.rows[0].name);
+  await closeDlg();
+
+  // 11c) 认不出来要明确报错，不许默默给一支错的笔
+  const badBru = await page.evaluate((arr) => {
+    try { window.ChaBrushImport.parse('x.bru', new Uint8Array(arr)); return 'no-error'; }
+    catch (e) { return e.message; }
+  }, Array.from(Buffer.from('这不是笔刷，只是一段普通文字，什么都没有。')));
+  check('.bru 认不出来时明确报错', /认不出这份 \.bru/.test(badBru), badBru);
+
   check('全程没有 JS 报错', errs.length === 0, errs.join(' | '));
   console.log('\n===== 结果: ' + pass + ' 通过 / ' + fail + ' 失败 =====');
   await browser.close();

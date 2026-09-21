@@ -273,6 +273,44 @@
   ITEMS.forEach(function (p) { BY_ID[p.id] = p; });
 
   /**
+   * ★ v2.0.10：用 **SAI2 笔刷包**（SAI2-CATXQ-Ver1.22）里的对应笔刷替换内置参数。
+   *
+   * 用户的诉求：「用笔刷包所带的笔刷替换掉铅笔 / 喷枪 / 画笔 / 水彩笔 / 马克笔 / 橡皮擦 /
+   * 选区笔 / 选区擦 / 油漆桶 / 渐变 / 模糊 / 特效笔 / 散布 / 涂抹，有相同的就替换掉、
+   * 没有就留着，同时加上你认为必要的笔刷（不要加太多）」。
+   *
+   * 那份参数表是 tools/sai2-brush-convert.js **离线生成**的（sai2-brushes.js），
+   * 这里只负责套上去：
+   *   · overrides：同 id 的内置笔刷 → 换成包里的手感参数（图标 / id / 工具都不动，
+   *     所以用户的自定义顺序、localStorage 里的记忆参数、测试里的 id 全都照旧）
+   *   · extra：额外补进来的几只（草稿铅笔 / 水彩渗化 / 油画厚涂）
+   * 没加载 sai2-brushes.js 时（比如老包里没这个文件）**行为与以前完全一样**。
+   */
+  (function applySai2Pack() {
+    var S = global.CHAHU_SAI2;
+    if (!S || !S.overrides) return;
+    ITEMS.forEach(function (it) {
+      var ov = S.overrides[it.id];
+      if (!ov || !ov.params) return;
+      it.params = params(Object.assign({}, it.params, ov.params));
+      it.sai2 = ov.from;                      // 记下「这只参数来自包里的哪一支」
+      it.tip = it.tip + ' · 参数取自 SAI2 笔刷包「' + ov.from + '」';
+    });
+    (S.extra || []).forEach(function (x) {
+      if (!x || !x.id || BY_ID[x.id]) return;
+      var it = {
+        id: x.id, name: x.name, tool: x.tool || 'brush', icon: x.icon || 'brush',
+        type: x.type || 'brush',
+        tip: (x.tip || '') + ' · 来自 SAI2 笔刷包「' + (x.from || '') + '」',
+        sai2: x.from || '',
+        params: params(Object.assign({ brush: x.id }, x.params || {}))
+      };
+      ITEMS.push(it);
+      BY_ID[it.id] = it;
+    });
+  })();
+
+  /**
    * 注册导入的笔刷（PS 的 .abr / CSP 的 .sut）。
    * 同一个 id 以**新的为准**：用户重新导入同一支笔时应该覆盖，而不是留下两份。
    */
@@ -335,7 +373,6 @@
   };
 
   function get(id) { return BY_ID[id] || null; }
-
   function itemForTool(tool) {
     for (var i = 0; i < ITEMS.length; i++) if (ITEMS[i].tool === tool) return ITEMS[i];
     return ITEMS[0];
