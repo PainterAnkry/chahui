@@ -37,6 +37,17 @@ contextBridge.exposeInMainWorld('chahuDesktop', {
   setEmbeddedServer: (on) => ipcRenderer.invoke('chahu:set-embedded', on),
   getServerInfo: () => ipcRenderer.invoke('chahu:server-info'),
 
+  /* ★ 2.0.10：房间链接（chahui://）——
+     装茶绘时注册了这个协议，别人点分享出来的应用链接就直接拉起客户端。
+     主进程把链接存在 pendingLink 里：**启动那一次**用 takeOpenLink 取，
+     之后（应用已经开着）由 onOpenLink 推过来。 */
+  takeOpenLink: () => ipcRenderer.invoke('chahu:take-link'),
+  onOpenLink: (cb) => {
+    const fn = (_e, url) => { try { cb(url); } catch (err) { /* ignore */ } };
+    ipcRenderer.on('chahu:open-link', fn);
+    return () => ipcRenderer.removeListener('chahu:open-link', fn);
+  },
+
   /* 离线模式：本地画布不走 socket，消息直通主进程里那份服务端。
      房间状态机是同一份，所以切到离线之后照旧能建房间、画、撤销。
      **注意这里没有 serverStop** —— 离线只是换通道，不停服务器（见 main.js 那段注释）。 */

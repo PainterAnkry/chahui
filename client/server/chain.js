@@ -1443,6 +1443,9 @@ class ChainGame {
         hardness: s.hardness, minSize: s.minSize, pressSize: s.pressSize,
         pressOpacity: s.pressOpacity, edge: s.edge, scatter: s.scatter,
         grain: s.grain, grainScale: s.grainScale, paper: s.paper, fx: s.fx,
+        // 笔尖形状（★ 2.0.10）：回放里也要还原成同一支笔
+        tipShape: s.tipShape, tipAngle: s.tipAngle, brush: s.brush,
+        spacing: s.spacing, tip: s.tip, mix: s.mix, blend: s.blend, sym: s.sym,
         points: (s.points || []).slice(),
         ts: s.ts || 0, te: s.te || 0
       };

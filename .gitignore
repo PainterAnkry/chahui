@@ -11,6 +11,14 @@ client/dist/
 # 运行期数据（房间存档不进版本库）
 server/data/
 
+# 安卓端内嵌状态机（tools/sync-android-core.js 的生成物，来源是 server/src）
+client/renderer/local-core/
+# 安卓工程（Capacitor 平台目录 + 构建产物）
+client-android/android/app/build/
+client-android/android/.gradle/
+client-android/android/build/
+client-android/*.keystore
+
 # 测试/探针产物
 screenshots/
 tools/_*

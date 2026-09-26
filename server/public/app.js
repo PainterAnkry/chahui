@@ -1165,7 +1165,7 @@
     var keep = {};
     ['size', 'opacity', 'hardness', 'minSize', 'pressSize', 'pressOpacity',
       'edge', 'scatter', 'grain', 'grainScale', 'strength', 'tolerance', 'expand',
-      'blend', 'filled', 'paper', 'fx'].forEach(function (k) {
+      'blend', 'filled', 'paper', 'fx', 'tipShape', 'tipAngle'].forEach(function (k) {
       if (S.brush[k] !== undefined) keep[k] = S.brush[k];
     });
     S.overrides[key] = keep;
@@ -1206,6 +1206,17 @@
     setSlider('strengthRange', b.strength * 100, Math.round);
     setSlider('toleranceRange', b.tolerance, Math.round);
     setSlider('expandRange', b.expand, Math.round);
+    // ★ 2.0.10：笔尖形状（照 SAI2 的笔刷形状面板）：一排图标 + 一个角度滑块
+    var tipNow = b.tipShape || 'round';
+    $$('#tipShapes .tip-btn').forEach(function (btn) {
+      btn.classList.toggle('on', btn.dataset.tip === tipNow);
+    });
+    setSlider('tipAngleRange', b.tipAngle || 0, function (v) { return Math.round(v) + '°'; });
+    var tipRow = $('#tipShapes') && $('#tipShapes').closest('.row-line');
+    var strokeish = STROKE_TOOLS.indexOf(S.tool) >= 0;
+    if (tipRow) tipRow.classList.toggle('hidden', !strokeish);
+    var angleRow = $('#tipAngleRow');
+    if (angleRow) angleRow.classList.toggle('hidden', !strokeish || tipNow === 'round');
     $('#brushBlend').value = b.blend;
     $('#filledChk').checked = !!b.filled;
     $('#pressureChk').checked = S.pressure;
@@ -3394,6 +3405,16 @@
     return (D && D.isDesktop && D.serverStart) ? D : null;
   }
 
+  /**
+   * 离线能力桥：桌面端（主进程里跑服务端）和安卓 shim（WebView 内嵌状态机）都有
+   * localOpen。安卓没有「本机服务器」可开（desktopBridge 为 null），
+   * 但离线画画这条路是通的 —— 服务器开关那一排 UI 靠它决定显不显。
+   */
+  function localBridge() {
+    var D = global.chahuDesktop;
+    return (D && D.localOpen) ? D : null;
+  }
+
   /** 服务器现状：开着吗 / 端口 / 局域网地址。known = 还没问到过 */
   var srvState = { on: false, port: 0, lan: [], known: false };
 
@@ -3415,12 +3436,33 @@
   function renderServerToggle() {
     var row = $('#srvRow');
     if (!row) return;
-    if (!desktopBridge()) { row.classList.add('hidden'); return; }
+    var desk = desktopBridge();
+    var local = localBridge();
+    if (!desk && !local) { row.classList.add('hidden'); return; }
     row.classList.remove('hidden');
 
     var btn = $('#btnServerToggle');
     var st = $('#srvState');
     var hint = $('#srvHint');
+
+    // 安卓：没有「本机服务器」这回事（desktopBridge 为 null），
+    // 按钮只有两态 —— 在线 →「切到离线」，离线 →「连回服务器」。
+    if (!desk) {
+      btn.disabled = false;
+      if (net.isLocal()) {
+        btn.textContent = '连回服务器';
+        st.className = 'srv-state off';
+        st.textContent = '离线模式（当前）';
+        hint.textContent = '本机没跑服务器；点这里连回公网 / 局域网服务器。';
+      } else {
+        btn.textContent = '切到离线';
+        st.className = 'srv-state on';
+        st.textContent = '已连接 ' + (net.url || '—');
+        hint.textContent = '断开网络自己单机画（本机内嵌房间状态机，不占端口不出网）。';
+      }
+      return;
+    }
+
     if (!srvState.known) {
       btn.textContent = '检测中…';
       btn.disabled = true;
@@ -3510,7 +3552,7 @@
    * 真停见 tools/test-server-toggle.js 覆盖的 stopListening）。
    */
   function goOffline() {
-    var D = desktopBridge();
+    var D = localBridge();
     if (!D) { toast('网页版没有离线模式，填服务器地址连过去就行', 'err'); return; }
     if (net.isLocal()) { toast('现在就已经是离线模式了'); return; }
     if (!confirmSrvSwitch()) return;
@@ -3524,17 +3566,39 @@
     net.close();                          // 旧 socket 必须真的关掉（见下），离线通道不替你关
     net.connect(global.Net.LOCAL_URL);
 
-    toast('已切到离线模式 —— 自己单机画；服务器还在后台跑，同一 WiFi 的人照样能进', 'ok', 4200);
+    toast(desktopBridge()
+      ? '已切到离线模式 —— 自己单机画；服务器还在后台跑，同一 WiFi 的人照样能进'
+      : '已切到离线模式 —— 本机画布，不占端口不出网', 'ok', 4200);
     renderServerToggle();
     refreshMenuChecks();
   }
 
   /** 回到在线：服务器没在跑就顺手起一个，然后连上去 */
   function goOnline() {
-    var D = desktopBridge();
+    var D = localBridge();
     if (!D) { toast('网页版没有本机服务器，填服务器地址连过去就行', 'err'); return; }
     if (!confirmSrvSwitch()) return;
     var btn = $('#btnServerToggle');
+
+    // 安卓：本机没有服务器可开，直接连「记住的 / 默认的」那台
+    if (!desktopBridge()) {
+      if (btn) { btn.disabled = true; btn.textContent = '正在连接…'; }
+      var aUrl = (global.ChaConfig && global.ChaConfig.resolve) ? global.ChaConfig.resolve() : '';
+      if (!aUrl) {
+        if (btn) btn.disabled = false;
+        renderServerToggle();
+        toast('没有可用的服务器地址，先在设置里填一个', 'err');
+        return;
+      }
+      if (S.joined) resetRoomUi('');
+      net.close();
+      net.connect(aUrl);
+      toast('正在连接 ' + aUrl, 'ok');
+      renderServerToggle();
+      refreshMenuChecks();
+      return;
+    }
+
     var needStart = !srvState.on;
     if (btn) { btn.disabled = true; btn.textContent = needStart ? '正在开启…' : '正在连接…'; }
 
@@ -3575,6 +3639,11 @@
    * 跟按钮上那句话正好相反（这个坑是 test-server-button 第 5 组抓出来的）。
    */
   function serverButtonAction() {
+    // 安卓两态：离线就连服务器，在线就切离线（没有「开启服务器」那一档）
+    if (!desktopBridge() && localBridge()) {
+      setServerOn(net.isLocal());
+      return;
+    }
     // 「开启服务器」和「连回服务器」都是往在线走，只有「切到离线」是往离线走
     var toOnline = !srvState.on || net.isLocal();
     setServerOn(toOnline);
@@ -3657,6 +3726,99 @@
       return;
     }
     joinRoom(roomId, name, getRoomPass(roomId));
+  }
+
+  /* ---------------- ★ 2.0.10：识别别人发来的房间链接 ----------------
+   *
+   * 用户的原话：「分享的房间链接要能在应用端能自动识别并加入」。
+   * 分享出来的是 `http://<host>/?room=<房间号>`（网页端点开就能进），
+   * 桌面端还额外认一条 `chahui://join?room=<房间号>&server=<ws://…>`（装的时候注册过协议，
+   * 点一下直接拉起茶绘进房）。再加上「光粘一个房间号」——三种都从这一个函数过。
+   *
+   * 返回 { roomId, server }（认不出来时 roomId 为空串）。
+   */
+  function parseRoomLink(text) {
+    var s = String(text == null ? '' : text).trim();
+    if (!s) return { roomId: '', server: '' };
+    var server = '';
+    var room = '';
+    var m = /^chahui:\/\//i.test(s);
+    if (m || /^https?:\/\//i.test(s)) {
+      var u = null;
+      try { u = new URL(m ? s.replace(/^chahui:/i, 'http:') : s); } catch (e) { u = null; }
+      if (u) {
+        try {
+          room = u.searchParams.get('room') || '';
+          server = u.searchParams.get('server') || '';
+        } catch (e2) { /* ignore */ }
+        // 路径形式：chahui://room/<id>、/r/<id>、/join/<id>
+        if (!room) {
+          var seg = (u.pathname || '').split('/').filter(Boolean);
+          if (seg.length >= 2 && /^(room|r|join|j)$/i.test(seg[0])) room = seg[1];
+          else if (m && seg.length === 1 && /^(room|r|join|j)$/i.test(u.hostname)) room = seg[0];
+        }
+        if (m && !room && u.hostname && !/^(room|r|join|j)$/i.test(u.hostname)) room = u.hostname;
+        // 网页链接没写 server 就按它的 host 推一个（https → wss）
+        if (!server && !m && u.host) {
+          server = (u.protocol === 'https:' ? 'wss://' : 'ws://') + u.host + '/ws';
+        }
+      }
+    } else {
+      room = s;
+    }
+    room = String(room).trim();
+    // 房间号只允许「像 id 的字符」；带空格的（有人把房间名当链接发过来）就当没认出来
+    if (room && !/^[A-Za-z0-9_-]{2,64}$/.test(room)) room = '';
+    return { roomId: room, server: server };
+  }
+
+  /**
+   * 按链接进房：链接里带服务器地址就**先切服务器**，连上之后再发 ROOM_JOIN。
+   * （这就是「应用端自动识别并加入」——不用用户自己去改服务器地址。）
+   */
+  function joinByLink(text, opts) {
+    var p = parseRoomLink(text);
+    if (!p.roomId) {
+      if (!(opts && opts.silent)) toast('这串东西里没认出房间号：' + String(text || '').slice(0, 40), 'err', 3200);
+      return false;
+    }
+    var name = ($('#nameInput').value || '').trim() || Cfg.getName() || ('茶友' + Math.floor(Math.random() * 900 + 100));
+    S.me.name = name;
+    Cfg.setName(name);
+    var server = Cfg.normalize ? Cfg.normalize(p.server) : p.server;
+    var needSwitch = server && server !== net.url;
+    if (needSwitch) {
+      Cfg.remember(server);
+      var si = $('#serverInput');
+      if (si) si.value = server;
+      setStatus('正在连接 ' + server + ' …');
+      net.connect(server);
+    }
+    toast('正在进入房间 ' + p.roomId + ' …');
+    var t = setInterval(function () {
+      if (net.isOpen()) {
+        clearInterval(t);
+        joinRoom(p.roomId, name, getRoomPass(p.roomId));
+      }
+    }, 200);
+    setTimeout(function () { clearInterval(t); }, 12000);
+    return true;
+  }
+
+  /** 入口页那一行：按钮 / 回车 / 粘贴都走这里 */
+  function wireJoinLink() {
+    var input = $('#joinLinkInput');
+    if (!input) return;
+    var btn = $('#btnJoinLink');
+    if (btn) btn.addEventListener('click', function () { joinByLink(input.value); });
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); joinByLink(input.value); }
+    });
+    // 粘贴就自动进（粘进来的十有八九就是一条链接）
+    input.addEventListener('paste', function () {
+      var self = this;
+      setTimeout(function () { joinByLink(self.value, { silent: true }); }, 0);
+    });
   }
 
   /* ---- 房间密码：所有 ROOM_JOIN 都走这里，保证 pendingJoin / 记住密码一致 ---- */
@@ -4087,6 +4249,9 @@
       spacing: b.spacing,
       tip: b.tip,
       mix: b.mix,
+      // ★ 2.0.10：笔尖形状 / 方向（照 SAI2 的笔刷形状面板）
+      tipShape: b.tipShape,
+      tipAngle: b.tipAngle,
       // 文字笔迹（这几项由 S.text 提供，见 placeText）
       text: P.normalizeText((extra && extra.text) || ''),
       fontFamily: P.normalizeFontFamily((extra && extra.fontFamily) || S.text.fontFamily),
@@ -4128,6 +4293,20 @@
     penProbe.types[e.pointerType] = true;
     penProbe.vals.push({ p: e.pressure, w: e.width || 0, h: e.height || 0 });
     if (penProbe.vals.length > 24) penProbe.vals.shift();
+    // 手写笔活跃时间戳：防手掌误触用（安卓 / 触屏设备，笔在用时 touch 十有八九是手掌）
+    if (e.pointerType === 'pen') lastPenAt = Date.now();
+  }
+
+  /** 最近一次「笔」事件的时间。0 = 从来没用过笔 */
+  var lastPenAt = 0;
+
+  /**
+   * 手掌误触判定：笔刚活跃过（1.5s 内）又来了一根 touch —— 那不是手指，
+   * 是握笔时搁在屏上的手掌。整只吞掉（不落笔、不进手势）。
+   * 系统 palm rejection 挡掉的事件根本到不了这里，这条只兜漏网的。
+   */
+  function isPalmTouch(e) {
+    return e.pointerType === 'touch' && lastPenAt && (Date.now() - lastPenAt) < 1500;
   }
 
   /**
@@ -4434,6 +4613,8 @@
     var view = $('#view');
 
     view.addEventListener('pointerdown', function (e) {
+      // 手掌误触（笔刚活跃过就来的 touch）：整只吞掉，不落笔也不进任何分支
+      if (isPalmTouch(e)) { e.preventDefault(); return; }
       /* ---- 文字工具：点一下选位置 ---- */
       if (S.tool === 'text') {
         if (e.button !== 0) return;
@@ -4654,6 +4835,8 @@
 
     stage.addEventListener('pointerdown', function (e) {
       if (e.pointerType !== 'touch') return;
+      // 手掌误触：不进手势集合。捕获阶段吞掉，落笔那条路也走不到（双保险见 view 的 pointerdown）
+      if (isPalmTouch(e)) { e.preventDefault(); e.stopPropagation(); return; }
       pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (pts.size < 2) return;          // 第一根手指照常画画（不拦）
       e.preventDefault();
@@ -6116,7 +6299,13 @@
   function doShare() {
     if (!S.room) { toast('还没有进入房间'); return; }
     var base = shareBase();
+    // ★ 2.0.10：给两条链接 ——
+    //   ① http(s) 分享链接：网页端点开就能进，谁都能用；
+    //   ② chahui:// 应用链接：装了茶绘的机器点一下直接拉起客户端进房
+    //      （安装时注册了这个协议，见 client/package.json 的 build.protocols）。
+    //   两条一起复制，粘给谁都能用；本应用自己的「房间链接」输入框两种都认。
     var text = base ? base + '/?room=' + S.room.id : S.room.id;
+    if (base) text += '\n茶绘应用链接：' + appRoomLink();
     var note = text + (S.room.hasPassword ? '（房间有密码，请向房主索取）' : '');
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(note).then(function () {
@@ -6125,6 +6314,13 @@
     } else {
       showInfo(text);
     }
+  }
+
+  /** 应用内链接：chahui://join?room=<房间号>&server=<当前服务器> */
+  function appRoomLink() {
+    if (!S.room) return '';
+    return 'chahui://join?room=' + encodeURIComponent(S.room.id) +
+      '&server=' + encodeURIComponent(net.url || '');
   }
 
   function showInfo(text) {
@@ -7074,6 +7270,15 @@
 
     $('#sizeRange').addEventListener('input', markSizePresets);
     $('#brushBlend').addEventListener('change', function () { bset('blend', this.value); });
+
+    /* ★ 2.0.10：笔尖形状 / 角度（照 SAI2 的笔刷形状面板） */
+    $$('#tipShapes .tip-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        bset('tipShape', btn.dataset.tip || 'round');
+        syncBrushUI();
+      });
+    });
+    bindRow('tipAngleRange', 'tipAngle', function (v) { return clamp(Math.round(v), 0, 180); }, function (v) { return v; });
     $('#filledChk').addEventListener('change', function () { bset('filled', this.checked); });
     $('#pressureChk').addEventListener('change', function () {
       S.pressure = this.checked;
@@ -7455,6 +7660,7 @@
     $('#btnRooms').addEventListener('click', function () { openEntry(true); });
     $('#btnOpenEntry').addEventListener('click', function () { openEntry(true); });
     $('#btnEntryClose').addEventListener('click', function () { $('#entryMask').classList.add('hidden'); });
+    wireJoinLink();
     $('#btnInfoClose').addEventListener('click', function () { $('#infoMask').classList.add('hidden'); });
     $('#btnRefreshRooms').addEventListener('click', function () {
       applyServer($('#serverInput').value);
@@ -12709,6 +12915,16 @@
         }
       }, 300);
       setTimeout(function () { clearInterval(t); }, 15000);
+    } else if (global.chahuDesktop && global.chahuDesktop.takeOpenLink) {
+      // ★ 2.0.10：桌面端**从链接拉起**（chahui://，或启动参数里的分享链接）
+      //   主进程把链接存着，这里取一次；之后再来链接走 onOpenLink 的推送。
+      global.chahuDesktop.takeOpenLink().then(function (url) {
+        if (url) joinByLink(url, { silent: true });
+        else setTimeout(function () { openEntry(true); }, 420);
+      }, function () { setTimeout(function () { openEntry(true); }, 420); });
+      if (global.chahuDesktop.onOpenLink) {
+        global.chahuDesktop.onOpenLink(function (url) { joinByLink(url, { silent: true }); });
+      }
     } else {
       setTimeout(function () { openEntry(true); }, 420);
     }
@@ -13038,6 +13254,11 @@
    * ================================================================ */
 
   function quitApp() {
+    // 安卓壳：让原生层收掉 Activity（WebView 里 window.close() 是 no-op）
+    if (global.Capacitor && global.Capacitor.Plugins && global.Capacitor.Plugins.App) {
+      global.Capacitor.Plugins.App.exitApp();
+      return;
+    }
     if (global.chahuDesktop && global.chahuDesktop.isDesktop) {
       // 桌面端：让主进程关窗口
       window.close();
@@ -14053,6 +14274,8 @@
     });
     if (!list.length) return null;
     var plat = String(platform || '').toLowerCase();
+    // 安卓：release 里没有 APK 资产，挑什么都是错的 —— 返回 null 走「去 Releases 页」
+    if (plat === 'android') return null;
     var want;
     if (plat === 'darwin' || plat === 'mac' || plat === 'macos') {
       want = [/\.dmg$/i, /\.zip$/i];
@@ -15142,6 +15365,10 @@
     layerPanelOrder: function () { return layerRowsInfo().ids; },
     setBackground: setBackground,
     toggleMarchingAnts: toggleMarchingAnts,
+    // ★ 2.0.10：房间链接的识别与进房（测试直接喂各种链接字符串）
+    parseRoomLink: parseRoomLink,
+    joinByLink: joinByLink,
+    appRoomLink: appRoomLink,
     // ★ 2.0.9：接龙「逐笔回放」的节奏（测试直接喂笔迹 + 时长，验「不会啪的一下跳到成图」）
     chainAnimDebug: {
       start: chainAnimDebugStart,

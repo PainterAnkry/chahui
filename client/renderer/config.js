@@ -11,7 +11,7 @@ window.CHAHU_CONFIG = {
   defaultName: '',
   appName: '茶绘',
   // 版本号：关于页显示 + 和 GitHub 的最新 release 比对
-  appVersion: '2.0.9',
+  appVersion: '2.0.10',
   // 开源仓库（更新检测用）
   repo: 'PainterAnkry/chahui'
 };
@@ -54,6 +54,12 @@ window.CHAHU = window.CHAHU || {};
     if (q) return q;
     var s = normalize(stored());
     if (s) return s;
+    // 安卓壳（Capacitor）：页面是本地资产，origin 是 http://localhost ——
+    // 「同源推断」会推出一个没人监听的 ws://localhost/ws。
+    // 这里的正确默认和桌面端 file:// 一样：公网服务器。
+    if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
+      return normalize(CFG.publicServer) || normalize(CFG.localServer);
+    }
     if (location.protocol === 'http:' || location.protocol === 'https:') {
       return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
     }

@@ -143,6 +143,33 @@
           <input type="range" id="hardnessRange" min="0" max="100" value="90" />
           <b id="hardnessVal">90</b>
         </div>
+        <!-- ★ 2.0.10：笔尖形状（照 SAI2「笔刷形状」面板那一排图标）——
+             圆头以外的形状不好用「沿路径等宽」表示，走的是沿弧长盖章那条路 -->
+        <div class="row-line tip-line">
+          <span class="lb">笔尖</span>
+          <span class="tip-shapes" id="tipShapes">
+            <button class="tip-btn" data-tip="round" title="圆形笔尖（默认）">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7" /></svg>
+            </button>
+            <button class="tip-btn" data-tip="square" title="方形笔尖">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5.5" y="5.5" width="13" height="13" /></svg>
+            </button>
+            <button class="tip-btn" data-tip="flat" title="平头（斜切）笔尖 —— 配笔尖角度可以写出粗细变化">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="10" width="18" height="4.4" /></svg>
+            </button>
+            <button class="tip-btn" data-tip="triangle" title="三角笔尖">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4.6 20 19H4z" /></svg>
+            </button>
+            <button class="tip-btn" data-tip="diamond" title="菱形笔尖">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.6 19.4 12 12 20.4 4.6 12z" /></svg>
+            </button>
+          </span>
+        </div>
+        <div class="row-line hidden" id="tipAngleRow">
+          <span class="lb">笔尖角度</span>
+          <input type="range" id="tipAngleRange" min="0" max="180" value="0" />
+          <b id="tipAngleVal">0°</b>
+        </div>
         <div class="row-line">
           <span class="lb">最小大小</span>
           <input type="range" id="minSizeRange" min="2" max="100" value="20" />
@@ -933,6 +960,15 @@
         <label>服务器</label>
         <input type="text" id="serverInput" spellcheck="false" placeholder="ws://localhost:8437/ws" />
       </div>
+      <!-- ★ 2.0.10：别人发来的房间链接粘这里就能进 ——
+           http(s) 分享链接 / chahui:// 应用链接 / 光一个房间号，三种都认。
+           链接里带服务器地址时会先切过去再进房。 -->
+      <div class="form-row">
+        <label>房间链接</label>
+        <input type="text" id="joinLinkInput" spellcheck="false" placeholder="粘一个分享链接，或直接填房间号" />
+        <button class="btn tiny" id="btnJoinLink" title="解析链接并加入（回车也行）">加入</button>
+      </div>
+      <p class="hint" id="joinLinkHint">粘贴后自动识别：http(s) 分享链接、chahui:// 应用链接，或一个房间号</p>
       <!-- 离线模式开关（只有桌面端有）。它**不会停掉本机服务器**：
            「切到离线」只是你自己断开、走本机通道（不占端口、不出网），
            服务器继续在后台跑，同一 WiFi 的人照样能加入；
@@ -1775,6 +1811,9 @@
 <script src="menu.js"></script>
 <script src="engine.js"></script>
 <script src="transform.js"></script>
+<!-- ★ 安卓 shim：只在 Capacitor 原生环境激活（提供 chahuDesktop 桥 + WebView 内嵌
+     离线状态机），网页版 / 桌面端加载了也不做任何事。必须在 net.js 之前。 -->
+<script src="android-shim.js"></script>
 <script src="net.js"></script>
 <script src="sfx.js"></script>
 <script src="app.js"></script>

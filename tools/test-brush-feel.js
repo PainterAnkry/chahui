@@ -126,7 +126,8 @@ function ok(name, cond, extra) {
   });
   console.log('  笔迹正中颜色: 不混色=' + JSON.stringify(mix.noMix) + '  混色=' + JSON.stringify(mix.withMix));
   // 不混色时应该几乎纯蓝（红底被盖住）；混色时应该吃进红 → R 明显上升
-  ok('不混色时笔迹基本以笔色为主（红很少）', mix.noMix.r < 100, 'R=' + mix.noMix.r);
+  ok('不混色时笔迹基本以笔色为主（红很少，蓝压过红）', mix.noMix.r < 115 && mix.noMix.b > mix.noMix.r + 40,
+    'R=' + mix.noMix.r + ' B=' + mix.noMix.b);
   ok('混色后确实吃进了底色（R 明显上升）', mix.withMix.r > mix.noMix.r + 40,
     'R ' + mix.noMix.r + ' → ' + mix.withMix.r);
   // 融合的结果应该是「两种颜色的中间」，而不是被底色整个吃掉

@@ -408,6 +408,54 @@ ipcMain.handle('chahu:download-update', async (e, url, name) => {
   return { ok: false, error: (lastErr && lastErr.message) || '下载失败' };
 });
 
+/* ---------------- ★ 2.0.10：房间链接（chahui://） ----------------
+ *
+ * 用户的要求：「分享的房间链接要能在应用端能自动识别并加入」。
+ * 两半都在这儿：
+ *   ① 安装时把 chahui:// 注册成茶绘的协议（client/package.json 的 build.protocols，
+ *      electron-builder 会写注册表），别人点分享出来的**应用链接**就直接拉起本程序；
+ *   ② 拉起之后把链接交给渲染进程 —— 启动那一次走 pendingLink + chahu:take-link，
+ *      程序已经开着时走 second-instance / open-url，用 chahu:open-link 推进去。
+ */
+let pendingLink = '';
+
+/** 从一串参数里挑出房间链接（协议链接或带 ?room= 的分享链接都认） */
+function pickRoomLink(args) {
+  const list = Array.isArray(args) ? args : [];
+  for (const a of list) {
+    const s = String(a || '');
+    if (/^chahui:\/\//i.test(s)) return s;
+    if (/^https?:\/\/\S+[?&]room=/i.test(s)) return s;
+  }
+  return '';
+}
+
+function deliverRoomLink(url) {
+  if (!url) return;
+  if (win && !win.isDestroyed()) {
+    try { win.webContents.send('chahu:open-link', url); return; } catch (e) { /* 落回 pending */ }
+  }
+  pendingLink = url;
+}
+
+ipcMain.handle('chahu:take-link', () => {
+  const url = pendingLink;
+  pendingLink = '';
+  return url;
+});
+
+// Windows / Linux：协议链接是作为**启动参数**传进来的
+if (process.platform !== 'darwin') {
+  const early = pickRoomLink(process.argv.slice(1));
+  if (early) pendingLink = early;
+}
+// macOS：走 open-url 事件
+app.on('open-url', (e, url) => {
+  e.preventDefault();
+  if (app.isReady()) deliverRoomLink(url);
+  else pendingLink = url;
+});
+
 /* ---------------- 生命周期 ---------------- */
 
 Menu.setApplicationMenu(null);
@@ -433,6 +481,11 @@ app.whenReady().then(async () => {
     }
   }
   createWindow();
+  // ★ 2.0.10：把 chahui:// 注册成茶绘的协议（装过一次之后，点应用链接就能拉起本程序）。
+  //   开发态（未打包）注册会指向 electron.exe，所以只在打包后注册。
+  if (app.isPackaged && process.defaultApp !== true) {
+    try { app.setAsDefaultProtocolClient('chahui'); } catch (e) { /* 注册失败不影响用 */ }
+  }
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -454,7 +507,9 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
+  app.on('second-instance', (_e, argv) => {
     if (win) { if (win.isMinimized()) win.restore(); win.focus(); }
+    // ★ 2.0.10：第二次启动带的房间链接（点应用链接时就是这条路）
+    deliverRoomLink(pickRoomLink(argv));
   });
 }

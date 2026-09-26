@@ -279,6 +279,8 @@ const SUITE = [
   // ★ 2.0.9：魔棒面板（三种取样模式 / 容差 / 防止溢出 / 取样来源 / 抗锯齿 / 忽略已选）
   //   + 套索「先画线、松手才成圈」
   'test-wand.js',
+  'test-brush-tip.js',
+  'test-room-link.js',
   // ★ 2.0.9：接龙逐笔回放的节奏（喂假笔迹 + 时长，验「窗口紧时倍速播完、不会啪的一下跳到成图」）
   'test-chain-anim.js',
   // 「每局可配的游戏设置」：三个玩法的 start(opts) 覆盖值 / 夹取边界 / GAME_FAST /

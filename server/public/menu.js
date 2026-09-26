@@ -787,7 +787,8 @@
 
   function showAbout() {
     var app = A();
-    var v = (global.chahuDesktop && global.chahuDesktop.isDesktop) ? '桌面版' : '网页版';
+    var v = (global.chahuDesktop && global.chahuDesktop.isAndroid) ? '安卓版'
+      : (global.chahuDesktop && global.chahuDesktop.isDesktop) ? '桌面版' : '网页版';
     if (app.showInfo) {
       app.showInfo('茶绘 · 多人实时协作绘画板\n' + v + '（菜单结构与 PaintTool SAI Ver.2 对齐）' +
         '\n服务器：' + ((app.net && app.net.url) || '—') + '\n\n本项目以 MIT 许可开源。');

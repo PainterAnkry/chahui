@@ -390,14 +390,39 @@
     var start = Math.max(0, (fromIndex || 0) - 1);
     if (start > pts.length - 2) return;
 
-    // 把用到的那一段点先映射到目标空间，并算好每点的半径
+    // 把用到的那一段点先映射到目标空间，并算好每点的半径。
+    //
+    // ★ 2.0.10：顺手**合并挨得太近的点**（重合 / 亚像素）。
+    //   手绘在拐弯处常常连着报两个几乎重合的点（抬笔顿一下），那时切线退化，
+    //   变宽多边形的两侧偏移点会被一条 45° 的斜边直接连起来 —— 拐角就成了
+    //   「方形的斜切角」，用户报的就是这个（68px 的笔上，切口有 20px 那么明显）。
+    //   ⚠ 所有调用点传的都是 fromIndex = 0（整笔重画）；非 0 的增量路径不做这一步。
+    var compact = !fromIndex;
+    var drop = clamp(stroke.size * 0.06, 0.5, 6);
     var n = pts.length;
-    var xs = new Array(n), ys = new Array(n), rs = new Array(n), as = new Array(n);
+    var xs = [], ys = [], rs = [], as = [];
     for (var i = 0; i < n; i++) {
       var q = mp(m, pts[i][0], pts[i][1]);
-      xs[i] = q[0]; ys[i] = q[1];
-      rs[i] = Math.max(0.18, widthAt(stroke, pts[i][2]) / 2);
-      as[i] = qa(alphaAt(stroke, pts[i][2]));
+      var rr0 = Math.max(0.18, widthAt(stroke, pts[i][2]) / 2);
+      var aa0 = qa(alphaAt(stroke, pts[i][2]));
+      if (compact && xs.length && Math.hypot(q[0] - xs[xs.length - 1], q[1] - ys[ys.length - 1]) < drop) {
+        // 太近：挪到后一个点的位置上（保留更靠后的压力），点数不增
+        xs[xs.length - 1] = q[0]; ys[ys.length - 1] = q[1];
+        rs[xs.length - 1] = rr0; as[xs.length - 1] = aa0;
+        continue;
+      }
+      xs.push(q[0]); ys.push(q[1]); rs.push(rr0); as.push(aa0);
+    }
+    n = xs.length;
+    if (n < 2) {
+      if (n === 1) {
+        ctx.globalAlpha = as[0];
+        ctx.beginPath();
+        ctx.arc(xs[0], ys[0], Math.max(0.35, rs[0]), 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+      return;
     }
 
     // 浓度分档（带滞回）：从当前档出发，往后找第一个「离本档够远」的点作为切点。
@@ -431,6 +456,19 @@
     }
   }
 
+  /** 取 [lo, hi] 这一段点里的拐角（点序号区间，含两端） */
+  function joinsIn(joins, lo, hi) {
+    if (!joins || !joins.length) return null;
+    var out = null;
+    for (var i = 0; i < joins.length; i++) {
+      var j = joins[i][0];
+      if (j < lo || j > hi) continue;
+      if (!out) out = [];
+      out.push(joins[i]);
+    }
+    return out;
+  }
+
   /**
    * 把 [i0,i1] 这段折线描成「左右各一条侧边」的变宽多边形，一次 fill。
    *
@@ -439,6 +477,10 @@
    *
    * 用的是**相邻段法线的角平分线**（miter 的方向）而不是单段法线：
    * 单段法线在拐角处会让左右侧边各自错位，窄笔还好，粗笔会出现缺口。
+   *
+   * ★ 2.0.10：**外侧改用真正的圆角（arc）**。以前两侧都按角平分线拉成 miter 尖角，
+   *   外角就多出一块方的尖角 —— 用户报的「笔迹转折处会变成方形」。
+   *   现在外角走一段半径 = 该点半宽的圆弧（内角仍然是 miter 交点，那里本来就该是尖的）。
    */
   function fillVariableRibbon(ctx, xs, ys, rs, i0, i1, roundStart, roundEnd) {
     var n = i1 - i0 + 1;
@@ -453,32 +495,43 @@
       return;
     }
 
-    // 每点的「左侧偏移单位向量」（法线）。拐角用前后两段的角平分方向。
-    var ox = new Array(n), oy = new Array(n), kk = new Array(n);
+    // 逐点算：入射 / 出射单位法线、半径、是不是拐角、外角在左还是在右、miter 交点
+    var px = [], py = [], rr = [], n1x = [], n1y = [], n2x = [], n2y = [];
+    var mLx = [], mLy = [], mRx = [], mRy = [], isC = [], outerR = [];
     for (var i = 0; i < n; i++) {
       var gi = i0 + i;
-      var dxa = 0, dya = 0, dxb = 0, dyb = 0;
-      if (gi > i0) { dxa = xs[gi] - xs[gi - 1]; dya = ys[gi] - ys[gi - 1]; }
-      if (gi < i1) { dxb = xs[gi + 1] - xs[gi]; dyb = ys[gi + 1] - ys[gi]; }
-      if (!dxa && !dya) { dxa = dxb; dya = dyb; }
-      if (!dxb && !dyb) { dxb = dxa; dyb = dya; }
-      var la = Math.hypot(dxa, dya) || 1, lb = Math.hypot(dxb, dyb) || 1;
-      var ux = (dxa / la + dxb / lb), uy = (dya / la + dyb / lb);
-      var lu = Math.hypot(ux, uy);
-      if (lu < 1e-6) { ux = -dya / la; uy = dxa / la; lu = 1; }   // 180° 掉头
+      var ax = 0, ay = 0, bx = 0, by = 0;
+      if (gi > i0) { ax = xs[gi] - xs[gi - 1]; ay = ys[gi] - ys[gi - 1]; }
+      if (gi < i1) { bx = xs[gi + 1] - xs[gi]; by = ys[gi + 1] - ys[gi]; }
+      if (!ax && !ay) { ax = bx; ay = by; }
+      if (!bx && !by) { bx = ax; by = ay; }
+      var la = Math.hypot(ax, ay) || 1, lb = Math.hypot(bx, by) || 1;
+      var t1x = ax / la, t1y = ay / la, t2x = bx / lb, t2y = by / lb;
+      var ux = t1x + t2x, uy = t1y + t2y, lu = Math.hypot(ux, uy);
+      if (lu < 1e-6) { ux = -t1y; uy = t1x; lu = 1; }              // 180° 掉头
       ux /= lu; uy /= lu;
-      // 法线 = 切线的垂线
-      ox[i] = -uy; oy[i] = ux;
-      // miter 拉伸系数：拐角越尖两侧拉得越长，夹一下免得炸出尖刺
-      var cosHalf = Math.abs(ux * (dxa / la) + uy * (dya / la));
-      kk[i] = cosHalf > 1e-3 ? Math.min(3, 1 / cosHalf) : 1;
+      var cosHalf = Math.abs(ux * t1x + uy * t1y);
+      var k = cosHalf > 1e-3 ? Math.min(3, 1 / cosHalf) : 1;       // miter 拉伸（夹一下防尖刺）
+      var r = rs[gi];
+      px[i] = xs[gi]; py[i] = ys[gi]; rr[i] = r;
+      n1x[i] = -t1y; n1y[i] = t1x;        // 入射段的左法线
+      n2x[i] = -t2y; n2y[i] = t2x;        // 出射段的左法线
+      var nbx = -uy, nby = ux;            // 角平分线的左法线
+      mLx[i] = px[i] + nbx * r * k; mLy[i] = py[i] + nby * r * k;
+      mRx[i] = px[i] - nbx * r * k; mRy[i] = py[i] - nby * r * k;
+      // 两端点不算拐角（那里由端帽负责）；其余按夹角判定，外角在右侧当 cross > 0
+      // （t1=(1,0)、t2=(0,1) 代进去：L 在下/左 = 内角，R 在上/右 = 外角 ✓）
+      isC[i] = i > 0 && i < n - 1 && (t1x * t2x + t1y * t2y) < 0.985;
+      outerR[i] = (t1x * t2y - t1y * t2x) > 0;
     }
 
-    var L = [], R = [];
-    for (var j = 0; j < n; j++) {
-      var r = rs[i0 + j] * kk[j];
-      L.push([xs[i0 + j] + ox[j] * r, ys[i0 + j] + oy[j] * r]);
-      R.push([xs[i0 + j] - ox[j] * r, ys[i0 + j] - oy[j] * r]);
+    /** 从方向 a 绕到方向 b 的**短圆弧**（圆角就是它） */
+    function arcBetween(cx, cy, rad, adx, ady, bdx, bdy) {
+      var s = Math.atan2(ady, adx), e = Math.atan2(bdy, bdx);
+      var d = e - s;
+      while (d > Math.PI) d -= Math.PI * 2;
+      while (d < -Math.PI) d += Math.PI * 2;
+      ctx.arc(cx, cy, rad, s, e, d < 0);
     }
 
     // ⚠ 路径顺序必须是「左侧边正向 → 终点 → 右侧边逆向 → closePath 收口」，
@@ -487,27 +540,41 @@
     //   canvas 的 nonzero 填充规则会把交叉区域互相抵消掉，
     //   一条本该 31px 宽的带子只填出 ~16px（实测）。
     //   所以：起点那条横边交给 closePath() 去补，绝不在开头画。
+    var L0x = px[0] + n2x[0] * rr[0], L0y = py[0] + n2y[0] * rr[0];
+    var R0x = px[0] - n2x[0] * rr[0], R0y = py[0] - n2y[0] * rr[0];
     ctx.beginPath();
+    ctx.moveTo(L0x, L0y);
     if (roundStart) {
       // 起点端帽（半圆，朝后）：从 L0 出发，画到 R0
-      ctx.moveTo(L[0][0], L[0][1]);
-      ctx.arc(xs[i0], ys[i0], rs[i0],
-        Math.atan2(L[0][1] - ys[i0], L[0][0] - xs[i0]),
-        Math.atan2(R[0][1] - ys[i0], R[0][0] - xs[i0]), false);
-    } else {
-      ctx.moveTo(L[0][0], L[0][1]);
+      ctx.arc(px[0], py[0], rr[0],
+        Math.atan2(L0y - py[0], L0x - px[0]), Math.atan2(R0y - py[0], R0x - px[0]), false);
     }
     // 左侧边（正向）
-    for (var a = 1; a < n; a++) ctx.lineTo(L[a][0], L[a][1]);
+    for (var a = 1; a < n; a++) {
+      if (isC[a] && !outerR[a]) {
+        ctx.lineTo(px[a] + n1x[a] * rr[a], py[a] + n1y[a] * rr[a]);
+        arcBetween(px[a], py[a], rr[a], n1x[a], n1y[a], n2x[a], n2y[a]);
+      } else {
+        ctx.lineTo(mLx[a], mLy[a]);
+      }
+    }
     // 终点端帽（半圆，朝前）：从 L(n-1) 画到 R(n-1)
-    var lastI = i0 + n - 1;
+    var lastI = n - 1;
     if (roundEnd) {
-      ctx.arc(xs[lastI], ys[lastI], rs[lastI],
-        Math.atan2(L[n - 1][1] - ys[lastI], L[n - 1][0] - xs[lastI]),
-        Math.atan2(R[n - 1][1] - ys[lastI], R[n - 1][0] - xs[lastI]), false);
+      ctx.arc(px[lastI], py[lastI], rr[lastI],
+        Math.atan2(mLy[lastI] - py[lastI], mLx[lastI] - px[lastI]),
+        Math.atan2(mRy[lastI] - py[lastI], mRx[lastI] - px[lastI]), false);
     }
     // 右侧边（逆向），最后 closePath 把 R0 → L0 的起点横边补上
-    for (var b = n - 1; b >= 0; b--) ctx.lineTo(R[b][0], R[b][1]);
+    for (var b = n - 1; b >= 0; b--) {
+      if (isC[b] && outerR[b]) {
+        // 反着走：先到出射段的右偏移点，再沿同一段圆弧绕回入射段的右偏移点
+        ctx.lineTo(px[b] - n2x[b] * rr[b], py[b] - n2y[b] * rr[b]);
+        arcBetween(px[b], py[b], rr[b], -n2x[b], -n2y[b], -n1x[b], -n1y[b]);
+      } else {
+        ctx.lineTo(mRx[b], mRy[b]);
+      }
+    }
     ctx.closePath();
     ctx.fill();
   }
@@ -523,16 +590,31 @@
       widthAt(stroke, pts[n - 1][2]) / 2, qa(alphaAt(stroke, pts[n - 1][2])));
   }
 
-  /** 散布：把采样点抖散成一簇小点（噪点笔） */
-  function paintScatter(ctx, stroke, pts, fromIndex, m) {
+  /**
+   * 散布：把采样点抖散成一簇小点（噪点笔）
+   *
+   * ★ 2.0.10：这一层**画在笔身后面**（调用方用 destination-over 合成），而且点的大小
+   *   跟着 scatter 走。以前它画在笔身**上面**、半径又是死的 `size*0.16`：
+   *   铅笔只要沾了一点散布（哪怕 0.05），68px 的笔就会沿笔身盖出一串**直径 22px 的深色圆点**，
+   *   用户原话是「铅笔笔刷出现明显的圆形停顿」。散布本来就是「画材颗粒」，
+   *   它只该在笔身边缘外面加一点毛边，绝不该把笔身压深。
+   */
+  function paintScatter(ctx, stroke, pts, fromIndex, m, behind) {
     strokeStyleSetup(ctx, stroke);
+    // behind = 笔身已经画好了：这一层只当「笔身外面的颗粒」。
+    // ⚠ canvas 的合成都是按 alpha 成比例叠加的（没有 max 那种并集），
+    //   所以笔身半透明的地方，颗粒仍会往上加一点点浓度 —— 这里把强度打到 35%，
+    //   那点增量就落在看不见的范围里（实测 ≤ 5%），而笔身外面的颗粒照旧清晰。
+    var mul = behind ? 0.35 : 1;
+    if (behind) ctx.globalCompositeOperation = 'destination-over';
     var rnd = mulberry32(((stroke.seed >>> 0) ^ 0x9e3779b9) >>> 0);
     var start = fromIndex || 0;
-    var radius = Math.max(0.4, stroke.size * 0.16);
+    // 点的大小跟着散布强度走：一点点散布 = 细颗粒（2~3px），满格散布才回到笔宽量级
+    var radius = Math.max(0.35, stroke.size * (0.03 + 0.13 * stroke.scatter));
     // 散布幅度按 scatter 本身缩放。以前是 `0.35 + scatter*1.15`，只要 scatter 不为 0
     // 起步就是笔刷直径的 35%，铅笔那种「一点点散布」直接炸成一团雾。
     var spread = stroke.size * (0.15 + stroke.scatter * 0.85);
-    var per = 2 + Math.round(stroke.scatter * 6);
+    var per = 1 + Math.round(stroke.scatter * 8);
     var i, k;
     // 让随机序列与「绝对点序号」绑定，保证分批绘制与整体重绘完全一致
     for (i = 0; i < start; i++) { for (k = 0; k < per; k++) { rnd(); rnd(); rnd(); } }
@@ -543,13 +625,14 @@
         var ang = rnd() * Math.PI * 2;
         var rad = Math.pow(rnd(), 0.6) * spread;
         var rr = radius * (0.55 + rnd() * 0.9);
-        ctx.globalAlpha = a;
+        ctx.globalAlpha = a * mul;
         ctx.beginPath();
         ctx.arc(base[0] + Math.cos(ang) * rad, base[1] + Math.sin(ang) * rad, rr, 0, Math.PI * 2);
         ctx.fill();
       }
     }
     ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
   }
 
   function shapePath(ctx, tool, a, b, m) {
@@ -657,6 +740,93 @@
     ctx.drawImage(tip, p[0] - d / 2, p[1] - d / 2, d, d);
   }
 
+  /* ---------------- ★ 2.0.10：笔尖形状（照 SAI2 的「笔刷形状」面板） ----------------
+   *
+   * 圆头仍然走「变宽多边形」那条路（连续、没有盖章感）。方头 / 平头（斜切）/ 三角 / 菱形
+   * 这几种**没法用一条描边表示** —— 它们的轮廓不是「沿路径等宽」的，所以改成
+   * 沿弧长**盖章**：每一枚章是旋转过的多边形，同一个浓度档里的章凑成**一条路径一次 fill**
+   * （nonzero 填充下是并集），因此重叠处不会叠加变深、拐角也自然就是这支笔该有的样子。
+   *
+   * 笔尖方向由 tipAngle 决定（平头 / 方头最常用：斜着运笔就有粗细变化）。
+   */
+  function isRoundTip(stroke) {
+    return !stroke.tipShape || stroke.tipShape === 'round';
+  }
+
+  /** 把一枚笔尖形状加进当前路径（一个子路径）。所有形状绕向一致，nonzero 下才能并集 */
+  function tipShapeSubPath(ctx, shape, cx, cy, r, ang) {
+    var c = Math.cos(ang), s = Math.sin(ang);
+    var pt = function (x, y) { return [cx + x * c - y * s, cy + x * s + y * c]; };
+    var q;
+    if (shape === 'square') {
+      q = [pt(-r, -r), pt(r, -r), pt(r, r), pt(-r, r)];
+    } else if (shape === 'flat') {
+      var hw = r, hh = Math.max(0.3, r * 0.32);          // 平头（斜切）：一块很扁的矩形
+      q = [pt(-hw, -hh), pt(hw, -hh), pt(hw, hh), pt(-hw, hh)];
+    } else if (shape === 'triangle') {
+      var tr = r * 1.16;
+      q = [pt(0, -tr), pt(tr * 0.92, tr * 0.68), pt(-tr * 0.92, tr * 0.68)];
+    } else if (shape === 'diamond') {
+      q = [pt(0, -r * 1.15), pt(r * 0.72, 0), pt(0, r * 1.15), pt(-r * 0.72, 0)];
+    } else {
+      ctx.moveTo(cx + r, cy);
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      return;
+    }
+    ctx.moveTo(q[0][0], q[0][1]);
+    for (var i = 1; i < q.length; i++) ctx.lineTo(q[i][0], q[i][1]);
+    ctx.closePath();
+  }
+
+  function paintTipShapeStroke(ctx, stroke, pts, fromIndex, m) {
+    var n = pts.length;
+    if (!n) return;
+    var ang = (stroke.tipAngle || 0) * Math.PI / 180;
+    // 盖章比「导入笔尖」那条路更密（一半间隔）：多边形章的边缘是折线，
+    // 间隔大了侧面会看出锯齿
+    var spacing = Math.max(0.5, stroke.size * clamp(stroke.spacing || 0.1, 0.02, 0.5) * 0.5);
+    var curKey = -1;
+    /** 攒着同一浓度档的章，换档时一次 fill */
+    var flush = function (key) {
+      if (key < 0) return;
+      ctx.globalAlpha = key / ALPHA_STEPS;
+      ctx.fill();
+    };
+    var add = function (x, y, press) {
+      var r = Math.max(0.2, widthAt(stroke, press) / 2);
+      var key = Math.round(qa(alphaAt(stroke, press)) * ALPHA_STEPS);
+      if (key !== curKey) {
+        flush(curKey);
+        ctx.beginPath();
+        curKey = key;
+      }
+      tipShapeSubPath(ctx, stroke.tipShape, x, y, r, ang);
+    };
+    var s = 0, next = 0;
+    var p0 = mp(m, pts[0][0], pts[0][1]);
+    add(p0[0], p0[1], pts[0][2]);
+    next = spacing;
+    for (var i = 1; i < n; i++) {
+      var a = mp(m, pts[i - 1][0], pts[i - 1][1]);
+      var b = mp(m, pts[i][0], pts[i][1]);
+      var seg = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (seg <= 0) continue;
+      while (next <= s + seg) {
+        var t = (next - s) / seg;
+        add(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t,
+          pts[i - 1][2] + (pts[i][2] - pts[i - 1][2]) * t);
+        next += spacing;
+      }
+      s += seg;
+    }
+    // 收尾：最后一枚章落在末点上（末段不足一个 spacing 时也要有）
+    var pn = mp(m, pts[n - 1][0], pts[n - 1][1]);
+    add(pn[0], pn[1], pts[n - 1][2]);
+    flush(curKey);
+    ctx.globalAlpha = 1;
+    void fromIndex;
+  }
+
   /** 把一笔完整画进「覆盖率蒙版」（单色，alpha 含笔压→浓度） */
   function paintStrokeShape(ctx, stroke, pts, fromIndex, opts) {
     opts = opts || {};
@@ -687,8 +857,11 @@
       // 带笔尖位图的（导入的 PS / CSP 笔刷）：盖章而不是描线。
       // 位图还没解出来时 paintTipStroke 返回 false，这一帧退回圆头，不影响落点数据。
       if (st.tip && paintTipStroke(ctx, st, pts, fromIndex, m)) continue;
+      // ★ 2.0.10：非圆头笔尖（方 / 平头 / 三角 / 菱形）走盖章那条路
+      if (!isRoundTip(st)) { paintTipShapeStroke(ctx, st, pts, fromIndex, m); continue; }
       paintRuns(ctx, st, pts, fromIndex, m, opts);
-      if (st.scatter > 0) paintScatter(ctx, st, pts, fromIndex, m);
+      // 散布叠在笔身**后面**（destination-over）：只在笔身外面加颗粒，不把笔身压深
+      if (st.scatter > 0) paintScatter(ctx, st, pts, fromIndex, m, true);
     }
 
     if (st.grain > 0 && !opts.noGrain) applyGrain(ctx, st, pts, copies);
@@ -1436,6 +1609,10 @@
       spacing: br.spacing,
       tip: br.tip,
       mix: br.mix,
+      // ★ 2.0.10：笔尖形状 / 方向（照 SAI2 的笔刷形状）—— 这道白名单漏了，
+      // 本地画得出来、别人的屏幕上会退回圆头（和导入笔尖漏字段是同一个坑）
+      tipShape: br.tipShape,
+      tipAngle: br.tipAngle,
       // 文字笔迹（第四道白名单见 app.strokeInfo / server.buildStroke）
       text: P.normalizeText(info.text),
       fontFamily: P.normalizeFontFamily(info.fontFamily),
@@ -1659,6 +1836,8 @@
       width: this.width, height: this.height, startCap: true, noGrain: isBlur(stroke)
     });
     if (isShape(stroke) || stroke.scatter > 0) return;
+    // ★ 2.0.10：非圆头笔尖的端头由最后一枚章自己盖出来，再补半圆端帽就多一块圆头
+    if (!isRoundTip(stroke) || stroke.tip) return;
     var copies = symmetryCopies(stroke, this.width, this.height);
     for (var i = 0; i < copies.length; i++) paintEndCap(sctx, stroke, stroke.points, copies[i]);
   };

@@ -811,6 +811,10 @@ function buildStroke(msg, member, layer) {
     spacing: br.spacing,
     tip: br.tip,
     mix: br.mix,
+    // ★ 2.0.10：笔尖形状与方向（照 SAI2 的笔刷形状）—— 不广播的话，
+    // 别人的屏幕上这支笔会退回圆头，两边画出来就不是同一支笔了
+    tipShape: br.tipShape,
+    tipAngle: br.tipAngle,
     text: P.normalizeText(br.text),
     fontFamily: P.normalizeFontFamily(br.fontFamily),
     fontSize: Math.max(6, Math.min(400, Number(br.fontSize) || 32)),
@@ -836,6 +840,9 @@ function strokeHeader(stroke) {
     strength: stroke.strength, tolerance: stroke.tolerance, expand: stroke.expand,
     blend: stroke.blend, sym: stroke.sym, brush: stroke.brush,
     filled: stroke.filled, seed: stroke.seed,
+    // 笔尖形状 / 方向（★ 2.0.10）与导入笔尖一样，属于「这支笔长什么样」
+    spacing: stroke.spacing, tip: stroke.tip, mix: stroke.mix,
+    tipShape: stroke.tipShape, tipAngle: stroke.tipAngle,
     target: stroke.target === 'mask' ? 'mask' : 'layer'
   };
   // 文字笔迹必须把**文字本身**和字体参数一起广播出去。

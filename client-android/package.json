@@ -1,0 +1,23 @@
+{
+  "name": "chahui-android",
+  "version": "2.0.9",
+  "private": true,
+  "description": "茶绘安卓壳（Capacitor）：托管 client/renderer 并提供原生能力桥接",
+  "scripts": {
+    "sync": "node ../tools/sync-android-core.js && cap sync android",
+    "add": "cap add android",
+    "open": "cap open android",
+    "build": "npm run sync && cd android && gradlew.bat assembleRelease",
+    "build-debug": "npm run sync && cd android && gradlew.bat assembleDebug"
+  },
+  "dependencies": {
+    "@capacitor/android": "^7.0.0",
+    "@capacitor/app": "^7.0.0",
+    "@capacitor/core": "^7.0.0",
+    "@capacitor/filesystem": "^7.0.0",
+    "@capacitor/share": "^7.0.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.0.0"
+  }
+}

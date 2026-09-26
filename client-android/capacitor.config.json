@@ -1,0 +1,11 @@
+{
+  "appId": "com.painterankry.chahui",
+  "appName": "茶绘",
+  "webDir": "../client/renderer",
+  "android": {
+    "allowMixedContent": true
+  },
+  "server": {
+    "androidScheme": "http"
+  }
+}
