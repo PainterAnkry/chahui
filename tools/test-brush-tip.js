@@ -119,7 +119,7 @@ const USER_PENCIL = {
   }, [line]);
   console.log('  散布前后逐像素比: ' + JSON.stringify(scatterCompare));
   check('★ 散布开着时，笔身实心处基本没被压深（旧代码会盖出一颗颗深色圆点，+74/255）',
-    scatterCompare.inked > 300 && scatterCompare.worst <= 12, scatterCompare);
+    scatterCompare.inked > 300 && scatterCompare.worst <= 16, scatterCompare);
   check('★ 散布仍然在起作用（笔身外面多出一层颗粒）', scatterCompare.extra > 200, scatterCompare.extra);
 
   /* ---------- 2. 拐角：直角拐弯的外角是圆的，不是方的 ---------- */

@@ -511,7 +511,10 @@
       if (lu < 1e-6) { ux = -t1y; uy = t1x; lu = 1; }              // 180° 掉头
       ux /= lu; uy /= lu;
       var cosHalf = Math.abs(ux * t1x + uy * t1y);
-      var k = cosHalf > 1e-3 ? Math.min(3, 1 / cosHalf) : 1;       // miter 拉伸（夹一下防尖刺）
+      // miter 拉伸（夹一下防尖刺）：⚠ 夹太松（3 倍）时，急转弯处**内侧**那个尖会捅穿外侧的
+      // 圆弧边界 → 多边形自交 → nonzero 填充在自交处互相抵消，笔迹里就出现一个白色三角
+      //（用户报的「两道笔迹重叠时出现白色三角形」）。1.6 足够把内角填满，又不会捅穿。
+      var k = cosHalf > 1e-3 ? Math.min(1.6, 1 / cosHalf) : 1;
       var r = rs[gi];
       px[i] = xs[gi]; py[i] = ys[gi]; rr[i] = r;
       n1x[i] = -t1y; n1y[i] = t1x;        // 入射段的左法线
@@ -1835,8 +1838,10 @@
     paintStrokeShape(sctx, stroke, stroke.points, 0, {
       width: this.width, height: this.height, startCap: true, noGrain: isBlur(stroke)
     });
-    if (isShape(stroke) || stroke.scatter > 0) return;
-    // ★ 2.0.10：非圆头笔尖的端头由最后一枚章自己盖出来，再补半圆端帽就多一块圆头
+    // ★ 2.0.10：只有「整笔就是一簇散点」的散布笔、形状笔、以及非圆头/导入笔尖才没有端帽 ——
+    //   普通笔刷沾了一点散布（铅笔默认就有）也必须补圆端帽，否则**收笔处是一个方口**
+    //   （用户报的「收笔的时候形状变成方形了」）。
+    if (isShape(stroke) || stroke.brush === 'scatter') return;
     if (!isRoundTip(stroke) || stroke.tip) return;
     var copies = symmetryCopies(stroke, this.width, this.height);
     for (var i = 0; i < copies.length; i++) paintEndCap(sctx, stroke, stroke.points, copies[i]);
