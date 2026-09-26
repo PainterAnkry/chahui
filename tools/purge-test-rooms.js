@@ -80,9 +80,13 @@ function namesUsedByTests() {
   });
   ws.send(JSON.stringify({ t: P.C2S.HELLO, name: '清理' }));
   await sleep(250);
+  let sent = 0;
   for (const r of hit) {
     ws.send(JSON.stringify({ t: P.C2S.ROOM_DEL, roomId: r.id }));
-    if (oks + errs >= 0) await sleep(12);            // 别把服务端打爆
+    sent++;
+    // 限流：在途请求（已发未确认）不超过 5 个，且每次至少等 100ms，别把服务端打爆
+    while (sent - (oks + errs) > 5) await sleep(50);
+    await sleep(100);
   }
   await sleep(2500);
   try { ws.close(); } catch (e) { /* */ }
