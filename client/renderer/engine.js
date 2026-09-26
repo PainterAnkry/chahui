@@ -517,11 +517,12 @@
       if (lu < 1e-6) { ux = -t1y; uy = t1x; lu = 1; }              // 180° 掉头
       ux /= lu; uy /= lu;
       var cosHalf = Math.abs(ux * t1x + uy * t1y);
-      // ★ 2.0.10：拐角两侧都**不拉伸**（k 夹到 1）。外角那段用圆弧补圆，内角那半个楔形
-      //   单独作为一条子路径并进同一个路径（见下面的 innerWedge）。
-      //   以前内侧用 miter 尖（拉到 3 倍 / 1.6 倍），急转弯时那个尖会捅穿外侧的圆弧边界，
-      //   多边形自交 → nonzero 在自交处抵消 → 笔迹里出现**白色三角 / 三角缺失**。
-      var k = cosHalf > 1e-3 ? Math.min(1, 1 / cosHalf) : 1;
+      // 拐角回到「两侧都用角平分线」的老做法（夹到 3 倍防尖刺）。
+      // ⚠ 我这一版试过「外侧走圆弧」：急转弯时内侧的尖会捅穿外侧圆弧 → 路径自交 →
+      //   nonzero 在自交处抵消 → 笔迹里出现**白色三角**（用户连报两轮）。
+      //   内侧楔形补块同样不可靠（绕向一错就是一块白洞）。这一版先回到不自交的做法，
+      //   宁可拐角是 miter 尖角，也绝不留白洞；圆弧拐角留到能把路径几何逐张比对时再做。
+      var k = cosHalf > 1e-3 ? Math.min(3, 1 / cosHalf) : 1;
       var r = rs[gi];
       px[i] = xs[gi]; py[i] = ys[gi]; rr[i] = r;
       n1x[i] = -t1y; n1y[i] = t1x;        // 入射段的左法线
@@ -560,14 +561,7 @@
         Math.atan2(L0y - py[0], L0x - px[0]), Math.atan2(R0y - py[0], R0x - px[0]), false);
     }
     // 左侧边（正向）
-    for (var a = 1; a < n; a++) {
-      if (isC[a] && !outerR[a]) {
-        ctx.lineTo(px[a] + n1x[a] * rr[a], py[a] + n1y[a] * rr[a]);
-        arcBetween(px[a], py[a], rr[a], n1x[a], n1y[a], n2x[a], n2y[a]);
-      } else {
-        ctx.lineTo(mLx[a], mLy[a]);
-      }
-    }    // 终点端帽（半圆，朝前）：从 L(n-1) 画到 R(n-1)
+    for (var a = 1; a < n; a++) ctx.lineTo(mLx[a], mLy[a]);    // 终点端帽（半圆，朝前）：从 L(n-1) 画到 R(n-1)
     var lastI = n - 1;
     if (roundEnd) {
       ctx.arc(px[lastI], py[lastI], rr[lastI],
@@ -575,40 +569,8 @@
         Math.atan2(mRy[lastI] - py[lastI], mRx[lastI] - px[lastI]), false);
     }
     // 右侧边（逆向），最后 closePath 把 R0 → L0 的起点横边补上
-    for (var b = n - 1; b >= 0; b--) {
-      if (isC[b] && outerR[b]) {
-        // 反着走：先到出射段的右偏移点，再沿同一段圆弧绕回入射段的右偏移点
-        ctx.lineTo(px[b] - n2x[b] * rr[b], py[b] - n2y[b] * rr[b]);
-        arcBetween(px[b], py[b], rr[b], -n2x[b], -n2y[b], -n1x[b], -n1y[b]);
-      } else {
-        ctx.lineTo(mRx[b], mRy[b]);
-      }
-    }
+    for (var b = n - 1; b >= 0; b--) ctx.lineTo(mRx[b], mRy[b]);
     ctx.closePath();
-    // ★ 2.0.10：内角的**楔形**。两侧都不拉伸之后，内侧边界走的是「角平分线上半径 r 那一点」，
-    //   拐角内侧会缺一小块（半径 r 与弦之间那块）。补法是把楔形三角形 (顶点, 两侧偏移点)
-    //   作为**同一条路径的另一个子路径**并进来：它整个落在半径 r 的圆内，
-    //   不会和外侧的圆弧交叉（以前用 miter 尖就是因为伸到圆外才会自交、抵消出白色三角）。
-    var bodyArea = 0;
-    for (var q2 = 0; q2 < n; q2++) {
-      var q3 = (q2 + 1) % n;
-      bodyArea += mLx[q2] * mLy[q3] - mLx[q3] * mLy[q2];
-      bodyArea += mRx[q3] * mRy[q2] - mRx[q2] * mRy[q3];
-    }
-    for (var w = 1; w < n - 1; w++) {
-      if (!isC[w]) continue;
-      var sgn = outerR[w] ? -1 : 1;                 // 内侧的法线方向
-      var wax = px[w] + n1x[w] * rr[w] * sgn, way = py[w] + n1y[w] * rr[w] * sgn;
-      var wbx = px[w] + n2x[w] * rr[w] * sgn, wby = py[w] + n2y[w] * rr[w] * sgn;
-      var wArea = (wax - px[w]) * (wby - py[w]) - (way - py[w]) * (wbx - px[w]);
-      ctx.moveTo(px[w], py[w]);
-      if ((wArea > 0) === (bodyArea > 0)) {
-        ctx.lineTo(wax, way); ctx.lineTo(wbx, wby);
-      } else {
-        ctx.lineTo(wbx, wby); ctx.lineTo(wax, way);
-      }
-      ctx.closePath();
-    }
     ctx.fill();
   }
 

@@ -147,8 +147,9 @@ const USER_PENCIL = {
     return lo < 0 ? 0 : hi - lo + 1;
   });
   console.log('  miter 尖角处=' + miterTip + '  弧上=' + onArc + '  正中=' + straight + '  笔宽=' + width);
-  check('★ 外角不再是方形尖角（miter 尖点那里没有墨）', miterTip <= 8, miterTip);
-  check('★ 圆角本身还在（外角弧上有墨）', onArc > 40, onArc);
+  check('★ 外角是 miter 尖角（不自交、不留白洞 —— 圆弧外角会捅穿内侧、导致白色三角，已回退）',
+    miterTip > 40, miterTip);
+  check('★ 外角两侧都有墨（角是实心的，没有缺口）', onArc > 40, onArc);
   check('★ 笔身宽度没被改坏（≈ 设定值）', width >= 52 && width <= 60, width);
 
   /* ---------- 3. 笔尖形状 ---------- */
