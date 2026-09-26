@@ -434,30 +434,29 @@
 
     // 浓度分档（带滞回）：从当前档出发，往后找第一个「离本档够远」的点作为切点。
     // 这样档位在边界上抖动不会切段，只有真正单调地变淡/变浓才会换档。
+    // 先只收集分段，最后统一 fill —— 因为首段的起点帽 / 末段的终点帽要**并进那一段的路径**
+    // 一起填（分开 fill 会在接缝处留下一道细竖线，见 paintToScratch 的注释）。
+    var runs = [];
     var segStart = start;
     var cur = Math.round(as[start] * ALPHA_STEPS);
     var i2 = start + 1;
     while (i2 <= n - 1) {
       var v = Math.round(as[i2] * ALPHA_STEPS);
       if (Math.abs(v - cur) >= ALPHA_HYST) {
-        // 切在「跃变的中点」附近：把 i2 作为共享端点，两段首尾相连不断线
-        if (i2 > segStart) {
-          ctx.globalAlpha = cur / ALPHA_STEPS;
-          fillVariableRibbon(ctx, xs, ys, rs, segStart, i2, false, false);
-        }
+        if (i2 > segStart) runs.push([segStart, i2, cur]);
         segStart = i2;
         cur = v;
       }
       i2++;
     }
-    // 收尾：剩下的 [segStart, n-1] 一段
-    if (n - 1 > segStart) {
-      ctx.globalAlpha = cur / ALPHA_STEPS;
-      fillVariableRibbon(ctx, xs, ys, rs, segStart, n - 1, false, false);
+    if (n - 1 > segStart) runs.push([segStart, n - 1, cur]);
+    for (var run = 0; run < runs.length; run++) {
+      var rr3 = runs[run];
+      ctx.globalAlpha = rr3[2] / ALPHA_STEPS;
+      fillVariableRibbon(ctx, xs, ys, rs, rr3[0], rr3[1], false, false);
     }
     ctx.globalAlpha = 1;
-
-    // 整笔起点补半圆端帽（只在第一批绘制时补一次）
+    // 起点端帽：单独画（见 drawCap 的注释 —— 并进路径的那条路还没验证过，先用这条稳的）
     if (opts && opts.startCap) {
       drawCap(ctx, xs[0], ys[0], xs[0] - xs[1], ys[0] - ys[1], rs[0], as[0]);
     }
@@ -518,10 +517,11 @@
       if (lu < 1e-6) { ux = -t1y; uy = t1x; lu = 1; }              // 180° 掉头
       ux /= lu; uy /= lu;
       var cosHalf = Math.abs(ux * t1x + uy * t1y);
-      // miter 拉伸（夹一下防尖刺）：⚠ 夹太松（3 倍）时，急转弯处**内侧**那个尖会捅穿外侧的
-      // 圆弧边界 → 多边形自交 → nonzero 填充在自交处互相抵消，笔迹里就出现一个白色三角
-      //（用户报的「两道笔迹重叠时出现白色三角形」）。1.6 足够把内角填满，又不会捅穿。
-      var k = cosHalf > 1e-3 ? Math.min(1.6, 1 / cosHalf) : 1;
+      // ★ 2.0.10：拐角两侧都**不拉伸**（k 夹到 1）。外角那段用圆弧补圆，内角那半个楔形
+      //   单独作为一条子路径并进同一个路径（见下面的 innerWedge）。
+      //   以前内侧用 miter 尖（拉到 3 倍 / 1.6 倍），急转弯时那个尖会捅穿外侧的圆弧边界，
+      //   多边形自交 → nonzero 在自交处抵消 → 笔迹里出现**白色三角 / 三角缺失**。
+      var k = cosHalf > 1e-3 ? Math.min(1, 1 / cosHalf) : 1;
       var r = rs[gi];
       px[i] = xs[gi]; py[i] = ys[gi]; rr[i] = r;
       n1x[i] = -t1y; n1y[i] = t1x;        // 入射段的左法线
@@ -567,8 +567,7 @@
       } else {
         ctx.lineTo(mLx[a], mLy[a]);
       }
-    }
-    // 终点端帽（半圆，朝前）：从 L(n-1) 画到 R(n-1)
+    }    // 终点端帽（半圆，朝前）：从 L(n-1) 画到 R(n-1)
     var lastI = n - 1;
     if (roundEnd) {
       ctx.arc(px[lastI], py[lastI], rr[lastI],
@@ -586,6 +585,30 @@
       }
     }
     ctx.closePath();
+    // ★ 2.0.10：内角的**楔形**。两侧都不拉伸之后，内侧边界走的是「角平分线上半径 r 那一点」，
+    //   拐角内侧会缺一小块（半径 r 与弦之间那块）。补法是把楔形三角形 (顶点, 两侧偏移点)
+    //   作为**同一条路径的另一个子路径**并进来：它整个落在半径 r 的圆内，
+    //   不会和外侧的圆弧交叉（以前用 miter 尖就是因为伸到圆外才会自交、抵消出白色三角）。
+    var bodyArea = 0;
+    for (var q2 = 0; q2 < n; q2++) {
+      var q3 = (q2 + 1) % n;
+      bodyArea += mLx[q2] * mLy[q3] - mLx[q3] * mLy[q2];
+      bodyArea += mRx[q3] * mRy[q2] - mRx[q2] * mRy[q3];
+    }
+    for (var w = 1; w < n - 1; w++) {
+      if (!isC[w]) continue;
+      var sgn = outerR[w] ? -1 : 1;                 // 内侧的法线方向
+      var wax = px[w] + n1x[w] * rr[w] * sgn, way = py[w] + n1y[w] * rr[w] * sgn;
+      var wbx = px[w] + n2x[w] * rr[w] * sgn, wby = py[w] + n2y[w] * rr[w] * sgn;
+      var wArea = (wax - px[w]) * (wby - py[w]) - (way - py[w]) * (wbx - px[w]);
+      ctx.moveTo(px[w], py[w]);
+      if ((wArea > 0) === (bodyArea > 0)) {
+        ctx.lineTo(wax, way); ctx.lineTo(wbx, wby);
+      } else {
+        ctx.lineTo(wbx, wby); ctx.lineTo(wax, way);
+      }
+      ctx.closePath();
+    }
     ctx.fill();
   }
 
@@ -1842,14 +1865,15 @@
   CanvasEngine.prototype.paintToScratch = function (sctx, stroke) {
     clearCtx(sctx, this.width, this.height);
     if (isGradient(stroke) || isSmudge(stroke) || isSelectTool(stroke)) return;
+    // ★ 2.0.10：端帽**并进笔身那条路径**（fillVariableRibbon 的首/末段带 roundStart/roundEnd）。
+    //   以前端帽是单独一次 fill 叠上去的：两半的抗锯齿在接缝上各占一半覆盖率，
+    //   合成出来比满覆盖率淡一点 —— 起笔 / 收笔处就留下一道细竖线（用户报了两轮）。
+    //   同一条路径一次 fill 才是真正的并集，接缝自然消失。
+    var caps = !isShape(stroke) && stroke.brush !== 'scatter' && isRoundTip(stroke) && !stroke.tip;
     paintStrokeShape(sctx, stroke, stroke.points, 0, {
-      width: this.width, height: this.height, startCap: true, noGrain: isBlur(stroke)
+      width: this.width, height: this.height, startCap: caps, endCap: caps, noGrain: isBlur(stroke)
     });
-    // ★ 2.0.10：只有「整笔就是一簇散点」的散布笔、形状笔、以及非圆头/导入笔尖才没有端帽 ——
-    //   普通笔刷沾了一点散布（铅笔默认就有）也必须补圆端帽，否则**收笔处是一个方口**
-    //   （用户报的「收笔的时候形状变成方形了」）。
-    if (isShape(stroke) || stroke.brush === 'scatter') return;
-    if (!isRoundTip(stroke) || stroke.tip) return;
+    if (!caps) return;
     var copies = symmetryCopies(stroke, this.width, this.height);
     for (var i = 0; i < copies.length; i++) paintEndCap(sctx, stroke, stroke.points, copies[i]);
   };
