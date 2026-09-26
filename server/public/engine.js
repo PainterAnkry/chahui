@@ -407,7 +407,7 @@
     var compact = !fromIndex;
     var drop = clamp(stroke.size * 0.06, 0.5, 6);
     var n = pts.length;
-    var xs = [], ys = [], rs = [], as = [];
+    var xs = [], ys = [], rs = [], as = [], ps = [];
     for (var i = 0; i < n; i++) {
       var q = mp(m, pts[i][0], pts[i][1]);
       var rr0 = Math.max(0.18, widthAt(stroke, pts[i][2]) / 2);
@@ -415,10 +415,10 @@
       if (compact && xs.length && Math.hypot(q[0] - xs[xs.length - 1], q[1] - ys[ys.length - 1]) < drop) {
         // 太近：挪到后一个点的位置上（保留更靠后的压力），点数不增
         xs[xs.length - 1] = q[0]; ys[ys.length - 1] = q[1];
-        rs[xs.length - 1] = rr0; as[xs.length - 1] = aa0;
+        rs[xs.length - 1] = rr0; as[xs.length - 1] = aa0; ps[xs.length - 1] = pts[i][2];
         continue;
       }
-      xs.push(q[0]); ys.push(q[1]); rs.push(rr0); as.push(aa0);
+      xs.push(q[0]); ys.push(q[1]); rs.push(rr0); as.push(aa0); ps.push(pts[i][2]);
     }
     n = xs.length;
     if (n < 2) {
@@ -432,34 +432,47 @@
       return;
     }
 
-    // 浓度分档（带滞回）：从当前档出发，往后找第一个「离本档够远」的点作为切点。
-    // 这样档位在边界上抖动不会切段，只有真正单调地变淡/变浓才会换档。
-    // 先只收集分段，最后统一 fill —— 因为首段的起点帽 / 末段的终点帽要**并进那一段的路径**
-    // 一起填（分开 fill 会在接缝处留下一道细竖线，见 paintToScratch 的注释）。
-    var runs = [];
-    var segStart = start;
-    var cur = Math.round(as[start] * ALPHA_STEPS);
-    var i2 = start + 1;
-    while (i2 <= n - 1) {
-      var v = Math.round(as[i2] * ALPHA_STEPS);
-      if (Math.abs(v - cur) >= ALPHA_HYST) {
-        if (i2 > segStart) runs.push([segStart, i2, cur]);
-        segStart = i2;
-        cur = v;
+    // ★ 2.0.10（重做）：圆头笔迹不再走「变宽多边形」，改成**沿路径盖章的并集**。
+    //
+    // 多边形那条路在拐角上三个约束无法同时满足：外侧要圆、内侧要填满、还不能自交 ——
+    // 尖角（miter）会拉出长刺，圆弧外角又会捅穿内侧造成自交、nonzero 抵消出**白色三角**，
+    // 端帽单独 fill 还会在接缝上留一道**细竖线**（用户连着报了四轮）。
+    // 而「圆头笔迹」的几何定义本来就是**一串圆盘的并集**：
+    //   · 端头天然是圆的（不需要额外的端帽 → 没有接缝）
+    //   · 拐角天然是圆的（不需要 miter → 没有尖刺、不会自交）
+    //   · 整条路径一次 fill（nonzero 并集）→ 重叠不叠深、也不可能抵消出洞
+    var step = Math.max(0.5, stroke.size * 0.06);
+    var key = -1, open = false;
+    var flush = function () {
+      if (!open) return;
+      ctx.globalAlpha = key / ALPHA_STEPS;
+      ctx.fill();
+      open = false;
+    };
+    var emit = function (x, y, press) {
+      var r = Math.max(0.18, widthAt(stroke, press) / 2);
+      var k2 = Math.round(qa(alphaAt(stroke, press)) * ALPHA_STEPS);
+      if (k2 !== key) { flush(); ctx.beginPath(); key = k2; open = true; }
+      ctx.moveTo(x + r, y);
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+    };
+    var arcPos = 0, next = 0;
+    emit(xs[0], ys[0], ps[0]);
+    next = step;
+    for (var si = 1; si < n; si++) {
+      var ax2 = xs[si - 1], ay2 = ys[si - 1], bx2 = xs[si], by2 = ys[si];
+      var seg = Math.hypot(bx2 - ax2, by2 - ay2);
+      if (seg <= 0) continue;
+      while (next <= arcPos + seg) {
+        var tt = (next - arcPos) / seg;
+        emit(ax2 + (bx2 - ax2) * tt, ay2 + (by2 - ay2) * tt, ps[si - 1] + (ps[si] - ps[si - 1]) * tt);
+        next += step;
       }
-      i2++;
+      arcPos += seg;
     }
-    if (n - 1 > segStart) runs.push([segStart, n - 1, cur]);
-    for (var run = 0; run < runs.length; run++) {
-      var rr3 = runs[run];
-      ctx.globalAlpha = rr3[2] / ALPHA_STEPS;
-      fillVariableRibbon(ctx, xs, ys, rs, rr3[0], rr3[1], false, false);
-    }
+    emit(xs[n - 1], ys[n - 1], ps[n - 1]);
+    flush();
     ctx.globalAlpha = 1;
-    // 起点端帽：单独画（见 drawCap 的注释 —— 并进路径的那条路还没验证过，先用这条稳的）
-    if (opts && opts.startCap) {
-      drawCap(ctx, xs[0], ys[0], xs[0] - xs[1], ys[0] - ys[1], rs[0], as[0]);
-    }
   }
 
   /** 取 [lo, hi] 这一段点里的拐角（点序号区间，含两端） */
@@ -1831,7 +1844,9 @@
     //   以前端帽是单独一次 fill 叠上去的：两半的抗锯齿在接缝上各占一半覆盖率，
     //   合成出来比满覆盖率淡一点 —— 起笔 / 收笔处就留下一道细竖线（用户报了两轮）。
     //   同一条路径一次 fill 才是真正的并集，接缝自然消失。
-    var caps = !isShape(stroke) && stroke.brush !== 'scatter' && isRoundTip(stroke) && !stroke.tip;
+    // ★ 2.0.10：圆头 / 非圆头现在都是「盖章的并集」，端头由最后一枚章自己盖出来，
+    //   所以**不需要**再单独补端帽（那正是起笔/收笔那道细竖线的来源）。
+    var caps = false;
     paintStrokeShape(sctx, stroke, stroke.points, 0, {
       width: this.width, height: this.height, startCap: caps, endCap: caps, noGrain: isBlur(stroke)
     });
