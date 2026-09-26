@@ -333,16 +333,23 @@
   }
 
   // 半圆端帽：只覆盖「笔身之外」的半个圆，与笔身零重叠，因此不会叠加变深
+  // ★ 2.0.10：用 **destination-over** 合成。以前是 source-over 画上去的，
+  //   端帽的直边正好压在笔身那条横截边上：两边的抗锯齿各占一半覆盖率，
+  //   source-over 合出来比满覆盖率淡一点 —— 起笔 / 收笔处就留下一道**细竖线**
+  //   （用户报的「起笔和收笔的时候都会出现这样的竖线」）。
+  //   画在笔身后面则只在没墨的地方补上，接缝处两半加起来正好是满覆盖率。
   function drawCap(ctx, x, y, dx, dy, r, alpha) {
     var len = Math.hypot(dx, dy);
     if (!len) return;
     var ang = Math.atan2(dy / len, dx / len);
+    ctx.save();
+    ctx.globalCompositeOperation = 'destination-over';
     ctx.globalAlpha = alpha;
     ctx.beginPath();
     ctx.arc(x, y, Math.max(0.35, r), ang - Math.PI / 2, ang + Math.PI / 2);
     ctx.closePath();
     ctx.fill();
-    ctx.globalAlpha = 1;
+    ctx.restore();
   }
 
   /**
