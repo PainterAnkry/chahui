@@ -547,6 +547,9 @@
    * 否则参数会被静默丢掉（选区加选用的 add/subtract 就在 newStroke 的白名单上丢过一次，
    * 表现是 Shift 加选退化成「替换」，页面不报错、很难查）。
    */
+  // ★ 2.0.10：笔尖形状（照 SAI2「笔刷形状」面板）。跟笔迹一起走，别人的屏幕上才是同一支笔。
+  var TIP_SHAPES = ['round', 'square', 'flat', 'triangle', 'diamond'];
+
   var BRUSH_DEFAULTS = {
     size: 12,          // 笔尖直径（像素）
     opacity: 1,        // 笔迹浓度
@@ -563,6 +566,8 @@
     expand: 0,         // 油漆桶扩大像素
     spacing: 0.1,      // 笔尖位图的落点间隔（占直径的比例），导入的 PS/CSP 笔刷用
     mix: 0,            // 混色：笔迹与「下面的颜色」融合的程度（SAI2 水彩笔的核心手感）
+    tipShape: 'round', // 笔尖形状：round / square / flat（平头斜切）/ triangle / diamond
+    tipAngle: 0,       // 笔尖方向（度）：只对方形 / 平头 / 三角 / 菱形有意义
     tip: ''            // 笔尖位图（打包成 32x32x4:base64 的 4 位灰度小图）
   };
 
@@ -616,6 +621,8 @@
     out.filled = !!src.filled;
     out.spacing = clampNum(src.spacing, BRUSH_DEFAULTS.spacing, 0.02, 1);
     out.mix = clampNum(src.mix, BRUSH_DEFAULTS.mix, 0, 1);
+    out.tipShape = pickOne(TIP_SHAPES, src.tipShape, 'round');
+    out.tipAngle = Math.round(clampNum(src.tipAngle, 0, 0, 180));
     out.tip = normalizeTip(src.tip);
     out.seed = Math.floor(clampNum(src.seed, 0, 0, 2147483646));
     /**

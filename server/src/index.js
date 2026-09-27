@@ -113,9 +113,13 @@ function serveStatic(req, res) {
   });
 }
 
-function json(res, code, obj) {
+// headers 可选：限流要回 Retry-After，别为此再写一遍 writeHead
+function json(res, code, obj, headers) {
   const body = JSON.stringify(obj);
-  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
+  res.writeHead(code, Object.assign({
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body)
+  }, headers || {}));
   res.end(body);
 }
 
@@ -138,8 +142,126 @@ function parseReqUrl(req) {
   }
 }
 
+/* ---------------------------------------------------------------------- 限流
+ *
+ * 为什么要有：服务端经常被 tools/expose.js 的隧道挂到公网（地址写在
+ * server/data/public-url.txt 里，谁拿到都能打开）。在这之前，服务端只有「容量」
+ * 上限（MAX_ROOMS / MAX_MEMBERS / maxPayload=12MB），没有「速率」上限 —— 一个脚本
+ * 每秒发几千条 /api/rooms、或者上来就开几万个 socket，就能把带宽和事件循环占满，
+ * 正常玩家连房间列表都刷不出来（CWE-770：分配资源时没有限流）。
+ *
+ * 三条闸门，都是令牌桶、按客户端 IP 记账：
+ *   · HTTP：/api/* 与 /health 一档，静态文件一档。静态那档必须**宽松** —— 打开一个
+ *     页面要拉 app.js / engine.js / 十几张图，卡太紧等于自己把自己 DDoS 了。
+ *   · WS 连接：单 IP 并发连接数 + 建连速率（最省事的攻击就是「开一堆 socket」，
+ *     每个 socket 都要一份缓冲区和一条心跳项）。另有一条全局连接数兜底。
+ *   · WS 消息：单连接入站消息速率。阈值必须**远高于**真实绘画流量 —— 客户端的
+ *     STROKE_POINTS 最多 45ms 一包（app.js 的 flushPoints，≈22 包/秒），给到 120/秒。
+ *
+ * 回环豁免（默认开）：自动化测试、purge 脚本、桌面端内置服务器走的都是 127.0.0.1，
+ * 它们本来就不是攻击面，挡住只会让测试跑出一片莫名其妙的红。但隧道流量也会被
+ * cloudflared 转成回环 —— 所以**回环对端带上 CF-Connecting-IP / X-Forwarded-For 时
+ * 照限不误**（这两个头只在 TCP 对端是回环时才认；直连的远程请求带什么头都不认，
+ * 否则伪造一个 X-Forwarded-For 就把限流绕过去了）。
+ * 没有 socket 的客户端（桌面端离线模式 / 安卓 shim 的 onClient(ws)）同样按本机算。
+ *
+ * 环境变量：RATE_LIMIT=0 全关；RATE_LIMIT_LOOPBACK=1 连回环也限（自测用）；
+ * TRUST_PROXY=0 不认转发头；其余见 README 的环境变量表。
+ */
+const LIMITS = (function () {
+  const N = (v, d) => { const n = parseInt(v, 10); return Number.isFinite(n) && n >= 0 ? n : d; };
+  return {
+    on: process.env.RATE_LIMIT !== '0',
+    local: process.env.RATE_LIMIT_LOOPBACK === '1',
+    trustProxy: process.env.TRUST_PROXY !== '0',
+    api: { rate: N(process.env.HTTP_API_RATE, 40), burst: N(process.env.HTTP_API_BURST, 80) },
+    file: { rate: N(process.env.HTTP_STATIC_RATE, 400), burst: N(process.env.HTTP_STATIC_BURST, 600) },
+    conn: { rate: N(process.env.WS_CONN_RATE, 20), burst: N(process.env.WS_CONN_BURST, 40) },
+    perIp: N(process.env.WS_CONN_PER_IP, 60),
+    connMax: N(process.env.WS_CONN_MAX, 1000),
+    msg: { rate: N(process.env.WS_MSG_RATE, 120), burst: N(process.env.WS_MSG_BURST, 240) }
+  };
+})();
+
+/** TCP 对端地址（去掉 IPv4-mapped 前缀，否则同一台机器会被记成两个 IP） */
+function peerIp(req) {
+  const raw = (req && req.socket && req.socket.remoteAddress) || '';
+  return raw.replace(/^::ffff:/, '');
+}
+function isLocalIp(ip) { return ip === '127.0.0.1' || ip === '::1'; }
+
+/** 记账用的客户端 IP —— 只有「对端是回环」时才认转发头（那正是隧道的样子） */
+function clientIp(req) {
+  const peer = peerIp(req);
+  if (LIMITS.trustProxy && isLocalIp(peer)) {
+    const h = (req && req.headers) || {};
+    const one = v => (Array.isArray(v) ? v[0] : v) || '';
+    const cf = one(h['cf-connecting-ip']).trim();
+    if (cf) return cf;
+    const xff = one(h['x-forwarded-for']).split(',')[0].trim();
+    if (xff) return xff;
+  }
+  return peer;
+}
+
+/** 令牌桶：每秒补 rate 个、最多攒 burst 个。返回 false = 这一发不该放行 */
+const buckets = new Map();
+const BUCKET_MAX = 4000;
+function allow(key, rate, burst) {
+  if (!(rate > 0) || !(burst > 0)) return true;
+  const now = Date.now();
+  let b = buckets.get(key);
+  if (!b) buckets.set(key, b = { tok: burst, at: now });
+  b.tok = Math.min(burst, b.tok + (now - b.at) / 1000 * rate);
+  b.at = now;
+  if (b.tok < 1) return false;
+  b.tok -= 1;
+  return true;
+}
+
+// 桶表本身也要有上限：伪造 X-Forwarded-For 能刷出无限多个「IP」，
+// 不清理就是拿我们自己的内存当靶子（那本身就是一条 CWE-770）。
+const bucketSweep = setInterval(() => {
+  const now = Date.now();
+  for (const [k, b] of buckets) if (now - b.at > 60000 && b.tok >= 1) buckets.delete(k);
+  if (buckets.size > BUCKET_MAX) {
+    const keep = Array.from(buckets.entries()).sort((x, y) => y[1].at - x[1].at).slice(0, BUCKET_MAX >> 1);
+    buckets.clear();
+    for (const [k, v] of keep) buckets.set(k, v);
+  }
+}, 60000);
+bucketSweep.unref && bucketSweep.unref();
+
+// 被拒的日志按 5 秒一条汇总 —— 限流不能变成新的日志洪水
+let limitLogAt = 0, limitLogN = 0;
+function logLimited(what, ip, extra) {
+  limitLogN++;
+  const now = Date.now();
+  if (now - limitLogAt < 5000) return;
+  limitLogAt = now;
+  console.warn('[limit] ' + what + ' 拒了 ' + ip + '（近 5 秒 ' + limitLogN + ' 次'
+    + (extra ? '，' + extra : '') + '）');
+  limitLogN = 0;
+}
+
+/** HTTP 闸门。返回 true = 已经回了 429，调用方直接 return */
+function httpThrottle(req, res, url) {
+  if (!LIMITS.on) return false;
+  const dyn = url.pathname === '/health' || url.pathname.indexOf('/api/') === 0;
+  const ip = clientIp(req);
+  if (!LIMITS.local && isLocalIp(ip)) return false;
+  const cfg = dyn ? LIMITS.api : LIMITS.file;
+  if (allow((dyn ? 'a:' : 's:') + ip, cfg.rate, cfg.burst)) return false;
+  const wait = Math.max(1, Math.ceil(1 / Math.max(1, cfg.rate)));
+  logLimited(dyn ? 'HTTP 接口' : 'HTTP 静态', ip, url.pathname);
+  json(res, 429, { error: 'rate_limited', message: '请求太快了，缓一缓再试', retryAfter: wait },
+    { 'Retry-After': String(wait) });
+  return true;
+}
+
 const server = http.createServer((req, res) => {
   const url = parseReqUrl(req);
+  if (httpThrottle(req, res, url)) return;
   // pid / 协议版本一并给：监控和自动化测试靠它判断「端口上挂着的还是不是我起的那一个」
   // （旧进程残留会静默顶替，光看 200 分辨不出来）。/api/share 也有，两处保持一致。
   // 服务端没有「应用版本」这个概念（那是 client 的 package.json），
@@ -339,7 +461,7 @@ function createWss() {
     maxPayload: 12 * 1024 * 1024,
     perMessageDeflate: { threshold: 1024, zlibDeflateOptions: { level: 6 } }
   });
-  s.on('connection', (ws) => onClient(ws));
+  s.on('connection', (ws, req) => onClient(ws, req));
   return s;
 }
 
@@ -973,6 +1095,62 @@ function leaveRoom(ws, silent) {
   if (room.game && room.game.active) room.game.onLeave(member);
 }
 
+/* ------------------------------------------------- WS 的两条闸门（连接 / 消息）
+ *
+ * 连接：单 IP 并发数 + 建连速率，另有一条全局连接数兜底。
+ * 消息：单连接入站速率 —— 阈值比真实绘画流量高一个量级（见文件头的限流说明），
+ * 正常用户永远碰不到，脚本刷消息会被直接 1008 掉。
+ * 两者都只对「有 socket 且不是本机」的连接生效：本机的是测试 / 桌面端内置服务器，
+ * 没有 socket 的是离线模式，都不是攻击面。
+ */
+const liveByIp = new Map();
+
+function wsAdmit(ws, req) {
+  const ip = (req && req.socket) ? clientIp(req) : 'local';
+  ws._ip = ip;
+  ws._local = !LIMITS.local && (ip === 'local' || isLocalIp(ip));
+  ws._msgAt = 0;
+  ws._msgTok = LIMITS.msg.burst;
+  if (!LIMITS.on || ws._local) return true;
+
+  const refuse = (code, why, what) => {
+    logLimited(what, ip);
+    try { send(ws, P.S2C.ERROR, { code: 'rate_limited', message: why }); } catch (e) { /* */ }
+    try { ws.close(code, why); } catch (e) { /* */ }
+    return false;
+  };
+
+  if (LIMITS.connMax > 0 && liveClients().size > LIMITS.connMax) {
+    return refuse(1013, '服务器连接数已满，稍后再试', 'WS 总连接数');
+  }
+  const n = liveByIp.get(ip) || 0;
+  if (LIMITS.perIp > 0 && n >= LIMITS.perIp) {
+    return refuse(1008, '同一个 IP 的连接太多了', 'WS 单 IP 连接数(' + n + ')');
+  }
+  if (!allow('w:' + ip, LIMITS.conn.rate, LIMITS.conn.burst)) {
+    return refuse(1008, '连接太频繁了', 'WS 建连速率');
+  }
+  liveByIp.set(ip, n + 1);
+  ws.on('close', () => {
+    const m = liveByIp.get(ip) || 0;
+    if (m <= 1) liveByIp.delete(ip); else liveByIp.set(ip, m - 1);
+  });
+  return true;
+}
+
+/** 单连接入站消息的令牌桶。返回 false = 这一条不该处理 */
+function wsMsgAllow(ws) {
+  if (!LIMITS.on || ws._local) return true;
+  if (!(LIMITS.msg.rate > 0) || !(LIMITS.msg.burst > 0)) return true;
+  const now = Date.now();
+  if (!ws._msgAt) { ws._msgAt = now; ws._msgTok = LIMITS.msg.burst; }
+  ws._msgTok = Math.min(LIMITS.msg.burst, ws._msgTok + (now - ws._msgAt) / 1000 * LIMITS.msg.rate);
+  ws._msgAt = now;
+  if (ws._msgTok < 1) return false;
+  ws._msgTok -= 1;
+  return true;
+}
+
 /**
  * 挂一个客户端连接。
  *
@@ -982,9 +1160,11 @@ function leaveRoom(ws, silent) {
  * 服务端逻辑 —— 不然离线就得另写一套房间状态机，两套迟早对不上。
  *
  * 参数只需要一个「像 ws 的东西」：readyState / OPEN / send(string) /
- * on('message'|'close'|'error'|'pong')。`req` 整个用不上，所以不收。
+ * on('message'|'close'|'error'|'pong')。`req` 可选：从 `wss.on('connection')`
+ * 过来时带着它取客户端 IP 做限流；离线模式那种调用不传，按本机算（不限流）。
  */
-function onClient(ws) {
+function onClient(ws, req) {
+  if (!wsAdmit(ws, req)) return;
   ws._connId = 'c' + (++connSeq);
   ws._roomId = null;
   ws._userId = null;
@@ -1000,6 +1180,11 @@ function onClient(ws) {
   });
 
   ws.on('message', (raw) => {
+    if (!wsMsgAllow(ws)) {
+      logLimited('WS 消息速率', ws._ip || '?', '连接 ' + ws._connId);
+      try { ws.close(1008, '消息发得太快'); } catch (e) { /* */ }
+      return;
+    }
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch (e) { return; }
     if (!msg || typeof msg.t !== 'string') return;

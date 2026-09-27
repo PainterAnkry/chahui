@@ -588,6 +588,34 @@ npm run server          # 默认监听 0.0.0.0:8437
 | `IDLE_ROOM_TTL` | `12h` | 有内容的房间闲置多久回收 |
 | `EMPTY_ROOM_TTL` | `5min` | 空房（没人在线 + 一笔没画）多久回收 |
 | `PUBLIC_URL_TTL` | `12h` | `public-url.txt` 里的公网地址多久算过期 |
+| `RATE_LIMIT` | `1` | 限流总开关（`0` 全关） |
+| `RATE_LIMIT_LOOPBACK` | `0` | 连本机回环也限（默认只限外部 IP，见下） |
+| `TRUST_PROXY` | `1` | 认不认隧道转发头（`CF-Connecting-IP` / `X-Forwarded-For`） |
+| `HTTP_API_RATE` / `HTTP_API_BURST` | `40` / `80` | 单 IP 每秒 / 突发的接口请求数（`/api/*`、`/health`） |
+| `HTTP_STATIC_RATE` / `HTTP_STATIC_BURST` | `400` / `600` | 单 IP 每秒 / 突发的静态文件请求数 |
+| `WS_CONN_PER_IP` | `60` | 单 IP 并发 WebSocket 连接数 |
+| `WS_CONN_RATE` / `WS_CONN_BURST` | `20` / `40` | 单 IP 每秒 / 突发的建连数 |
+| `WS_CONN_MAX` | `1000` | 全局并发连接数上限 |
+| `WS_MSG_RATE` / `WS_MSG_BURST` | `120` / `240` | 单连接每秒 / 突发的入站消息数 |
+
+#### 限流（挂公网时的兜底）
+
+服务端以前只有「容量」上限（`MAX_ROOMS` / `MAX_MEMBERS` / `maxPayload`），没有「速率」
+上限 —— 挂上隧道之后，一个脚本就能把带宽和事件循环占满，正常玩家连房间列表都刷不出来。
+现在三条闸门都是**按客户端 IP 记账的令牌桶**：
+
+- **HTTP**：`/api/*` 与 `/health` 一档、静态文件一档（各记各的账，静态那档故意宽松：
+  打开一个页面要拉十几个文件）。超了回 `429` + `Retry-After`，静一会儿自己恢复。
+- **WebSocket**：单 IP 并发连接数 + 建连速率，外加一条全局连接数上限；超了先回一条
+  `rate_limited` 的 error，再用 `1008` 断开。单连接的入站消息速率也有限制 ——
+  阈值比真实绘画流量高一个量级（笔迹最多 45ms 一包 ≈ 22 包/秒，给到 120/秒），
+  正常用户碰不到。
+- **回环豁免**：`127.0.0.1` 上的自动化测试、`npm run purge-rooms`、桌面端内置服务器
+  本来就不是攻击面，默认不受限（挡住它们只会让测试跑出一片假红）。而隧道请求的对端
+  **也是回环**，所以环回上带 `CF-Connecting-IP` / `X-Forwarded-For` 的请求照限不误 ——
+  这两个头只在 TCP 对端是回环时才认，直连的远程请求伪造它们没用（那正是隧道的样子）。
+- `RATE_LIMIT_LOOPBACK=1` 可以把回环也管起来，用来现场看到限流生效；回归用例见
+  `npm run test:rate-limit`。
 
 ### 关于房间存档目录
 
@@ -954,6 +982,8 @@ npm run test:server-button # 入口页那颗开关的界面回归（桌面端桥
                        #   按钮中心点没被提示文字盖住）
 npm run test:tunnel    # 公网隧道回归（假 cloudflared 跑全路径：捞地址 / 空端口拒绝 /
                        #   public-url.txt 写入与清理 / stop 真把进程杀掉 / 隧道自挂 / 无二进制时的报错）
+npm run test:rate-limit # 限流回归（自己起两台配了环境变量的服务端：HTTP 两档 429 + Retry-After 且互不牵连、
+                       #   WS 单 IP 连接数与消息速率到点 1008、回环豁免但**隧道流量照限**）
 npm run test:groups    # 图层组回归（组浓度只乘一次——直接读像素钉死 128，对照组 191；
                        #   折叠只影响面板、隐藏整组、同组图层连续的不变式、组内挪不出组、
                        #   整组连着挪、进出组、头顶栏改组不改层、解散 vs 连内容删除、工程往返）
