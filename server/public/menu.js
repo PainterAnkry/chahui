@@ -371,6 +371,23 @@
           ]
         }),
         SEP,
+        def('window', 'window.theme', '界面主题', {
+          sub: [
+            sub('window', 'window.theme.system', '跟随系统', {
+              run: function () { A().setUiTheme('system'); },
+              check: function () { var s = A().state; return !!(s && s.uiTheme === 'system'); }
+            }),
+            sub('window', 'window.theme.light', '浅色', {
+              run: function () { A().setUiTheme('light'); },
+              check: function () { var s = A().state; return !!(s && s.uiTheme === 'light'); }
+            }),
+            sub('window', 'window.theme.dark', '深色', {
+              run: function () { A().setUiTheme('dark'); },
+              check: function () { var s = A().state; return !!(s && s.uiTheme === 'dark'); }
+            })
+          ]
+        }),
+        SEP,
         def('window', 'window.cursorRing', '画笔工具显示画笔大小圆形', {
           mnemonic: 'Z',
           run: function () { A().setCursorMode('ring'); },

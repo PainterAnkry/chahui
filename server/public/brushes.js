@@ -66,6 +66,8 @@
     rect: '<rect x="4" y="6" width="16" height="12" rx="1.5"/>',
     ellipse: '<ellipse cx="12" cy="12" rx="8" ry="6"/>',
     picker: '<path d="m4 20 1-3.5L15.5 6l2.5 2.5L7.5 19z"/><path d="m15 3.5 5.5 5.5"/><path d="m13.5 5 5.5 5.5"/>',
+    // 抓手：一只张开的手（拖动画面 / 画布）
+    hand: '<path d="M9 11.5V5.6a1.6 1.6 0 0 1 3.2 0v5.1"/><path d="M12.2 10.7V4.6a1.6 1.6 0 0 1 3.2 0v6.6"/><path d="M15.4 11.2V6.6a1.6 1.6 0 0 1 3.2 0v7.6c0 3.6-2.4 6.2-6 6.2-2 0-3.4-.6-4.5-1.9l-3.4-4a1.5 1.5 0 0 1 2.2-2l2.1 2.1"/>',
     marquee: '<path stroke-dasharray="3 2.2" d="M4.5 4.5h15v15h-15z"/>',
     lasso: '<path stroke-dasharray="3 2.2" d="M12 4.6c4.3 0 7.6 2.2 7.6 5s-3.3 5-7.6 5-7.6-2.2-7.6-5 3.3-5 7.6-5z"/><path d="M8.4 14.2c-.9 1.5-.4 3 .9 3.6"/><circle cx="9.2" cy="19.4" r="1.6"/>',
     wand: '<path d="m4.4 19.6 9.6-9.6 1.8 1.8-9.6 9.6z"/><path d="M17.4 3.2l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z"/><path d="M21 12.4l.5 1.2 1.2.5-1.2.5-.5 1.2-.5-1.2-1.2-.5 1.2-.5z"/>'
@@ -266,7 +268,10 @@
     { id: 'line', name: '直线', tool: 'line', icon: 'line', type: 'shape', tip: '按住拖一条直线（Shift 吸附 45°）', params: params({ brush: 'line' }) },
     { id: 'rect', name: '矩形', tool: 'rect', icon: 'rect', type: 'shape', tip: '拖出矩形，可勾选填充', params: params({ brush: 'rect' }) },
     { id: 'ellipse', name: '椭圆', tool: 'ellipse', icon: 'ellipse', type: 'shape', tip: '拖出椭圆，可勾选填充', params: params({ brush: 'ellipse' }) },
-    { id: 'picker', name: '吸管', tool: 'picker', icon: 'picker', type: 'util', tip: '取画布上的颜色（按住 Alt 可临时取色）', params: params({ brush: 'picker' }) }
+    { id: 'picker', name: '吸管', tool: 'picker', icon: 'picker', type: 'util', tip: '取画布上的颜色（按住 Alt 可临时取色）', params: params({ brush: 'picker' }) },
+    // 抓手：不改画面，只挪视图。鼠标上等价于「空格 + 左键 / 中键拖动」；
+    // 手机 / 平板网页版上就是「单指拖画布」——以前只能靠双指，很多人根本不知道。
+    { id: 'hand', name: '抓手', tool: 'hand', icon: 'hand', type: 'util', tip: '拖动画布（鼠标：空格 + 左键 / 中键；触屏：单指拖）', params: params({ brush: 'hand' }) }
   ];
 
   var BY_ID = {};
@@ -339,7 +344,8 @@
     brush: '画笔', eraser: '橡皮', blur: '模糊', smudge: '涂抹',
     fill: '油漆桶', gradient: '渐变', select: '选区笔', selectErase: '选区擦',
     marquee: '框选', lasso: '套索', wand: '魔棒',
-    line: '直线', rect: '矩形', ellipse: '椭圆', picker: '吸管', text: '文字', liquify: '液化'
+    line: '直线', rect: '矩形', ellipse: '椭圆', picker: '吸管', text: '文字', liquify: '液化',
+    hand: '抓手'
   };
 
   // 纸张质感（颗粒 / 纸纹）

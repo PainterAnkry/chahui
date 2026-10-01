@@ -3,6 +3,10 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<!-- 界面主题（浅色 / 深色）由 app.js 启动时写到 <html data-theme> 上。
+     这里不插内联脚本：服务端给 .html 发的是 `script-src 'self'`，内联脚本会被 CSP 挡掉。
+     app.js 是本页最后一段同步脚本，跑完才首次绘制，所以不会闪一下白底。 -->
+<meta name="color-scheme" content="light dark" />
 <title>茶绘 · 多人实时协作画板</title>
 <link rel="icon" href="favicon.svg" />
 <link rel="stylesheet" href="styles.css" />

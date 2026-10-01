@@ -141,6 +141,7 @@
     imported: [],             // 导入的笔刷（PS .abr / CSP .sut），存 localStorage
     // 协作视图：别人的笔迹在本机显示得多淡（纯本地，见「他人笔触」那一段）
     dimMode: 'off',           // 'off' | 'soft' | 'faint' | 'hide'
+    uiTheme: 'system',        // 'system' | 'light' | 'dark'（见「界面主题」那一段）
     dimUsers: {},             // userId -> 0..1，成员面板里单独设的
     antsOn: true,             // 是否显示选区蚂蚁线（菜单里可勾）
     text: { fontFamily: 'sans', fontSize: 48, lineHeight: 1.35 },   // 文字工具的上次设置
@@ -448,6 +449,64 @@
         + '（只影响你自己的屏幕 —— 不影响导出，也不会同步给别人）';
     }
     renderMembers();
+  }
+
+  /* ---------------------------------------------------------------- 界面主题
+   *
+   * 三个值：'system'（跟随系统，默认）/ 'light' / 'dark'。
+   * 颜色本身全在 styles.css 的令牌里（:root 与 html[data-theme="dark"]），
+   * 这里只负责把「当前该用哪套」解析出来写到 <html data-theme> 上 ——
+   * CSS 里因此只有一处主题选择器，不用把深色那坨令牌写两遍（媒体查询一遍 + 手动一遍）。
+   *
+   * 为什么不做成 index.html 里的内联脚本（那样能更早一帧）：
+   * 服务端给 .html 发的 CSP 是 `script-src 'self'`，内联脚本会被直接挡掉；
+   * 而 app.js 是本页最后一段**同步**脚本，跑到这里才首次绘制，本来就不会闪白底。
+   */
+  var THEME_KEY = 'chahu.theme';
+  var THEME_MODES = [
+    { id: 'system', label: '跟随系统' },
+    { id: 'light', label: '浅色' },
+    { id: 'dark', label: '深色' }
+  ];
+  var DARK_MQ = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+
+  function loadThemePref() {
+    var v = lsGet(THEME_KEY, 'system');
+    S.uiTheme = THEME_MODES.some(function (m) { return m.id === v; }) ? v : 'system';
+  }
+
+  /** 当前**实际**生效的是哪套（把 system 解析成 light / dark） */
+  function resolvedTheme() {
+    if (S.uiTheme === 'system') return (DARK_MQ && DARK_MQ.matches) ? 'dark' : 'light';
+    return S.uiTheme === 'dark' ? 'dark' : 'light';
+  }
+
+  function applyUiTheme() {
+    var want = resolvedTheme();
+    if (document.documentElement.getAttribute('data-theme') !== want) {
+      document.documentElement.setAttribute('data-theme', want);
+    }
+    // 桌面端的窗口底色跟着走（Electron 边框那圈不会露出浅色）
+    try {
+      var meta = document.querySelector('meta[name="color-scheme"]');
+      if (meta) meta.setAttribute('content', want);
+    } catch (e) { /* ignore */ }
+  }
+
+  function setUiTheme(mode) {
+    if (!THEME_MODES.some(function (m) { return m.id === mode; })) mode = 'system';
+    S.uiTheme = mode;
+    lsSet(THEME_KEY, mode);
+    applyUiTheme();
+    var st = THEME_MODES.filter(function (m) { return m.id === mode; })[0];
+    // 「跟随系统」时说清楚现在实际是深是浅，免得用户以为没生效
+    toast('界面主题：' + st.label + (mode === 'system' ? '（当前' + (resolvedTheme() === 'dark' ? '深色' : '浅色') + '）' : ''), 'ok');
+  }
+
+  if (DARK_MQ) {
+    var onScheme = function () { if (S.uiTheme === 'system') applyUiTheme(); };
+    if (DARK_MQ.addEventListener) DARK_MQ.addEventListener('change', onScheme);
+    else if (DARK_MQ.addListener) DARK_MQ.addListener(onScheme);       // 老 Safari
   }
 
   /** 「只对我隐藏」：跟同步的显示/隐藏分开，别人那边不受影响。图层组也走它 */
@@ -808,7 +867,10 @@
     brush: 'B', eraser: 'E', blur: 'U', smudge: 'S',
     bucket: 'G', gradient: 'N', line: 'L', rect: 'R', ellipse: 'O',
     wand: 'W', picker: 'Alt',
-    select: '', selectErase: ''   // 选区类不占字母键：Alt 要留给「减选」
+    select: '', selectErase: '',   // 选区类不占字母键：Alt 要留给「减选」
+    // 抓手也不占字母键：H 已经给了「视图 → 左右翻转视图」，
+    // 临时抓手仍然是按住空格 + 左键（或中键），这一条不必再抢一个键。
+    hand: ''
   };
   var ITEM_KEYS = null;
   var ITEM_KEYS_STORE = 'chahu.itemKeys';
@@ -1423,7 +1485,9 @@
     $$('#toolGrid .tool').forEach(function (b) {
       b.classList.toggle('active', b.dataset.item === S.brushId);
     });
-    $('#stage').classList.toggle('drawing', S.tool !== 'picker');
+    // drawing = 把系统光标藏掉、只留我们画的笔刷光标。
+    // 吸管与抓手都不是「笔」：前者用自己的吸管图标，后者要的是系统那只手。
+    $('#stage').classList.toggle('drawing', S.tool !== 'picker' && S.tool !== 'hand');
     document.body.style.cursor = '';
     updateBrushCursor();
   }
@@ -4161,8 +4225,14 @@
   function updateBrushCursor() {
     var el = bcNode();
     if (!el) return;
-    // 变换模式下不显示画笔光标（那时指针在拖变换框）
-    var hide = !S.pointer.inside || !!S.pan || !S.joined || !!engine.transform;
+    // 变换模式下不显示画笔光标（那时指针在拖变换框）。
+    // 抓手工具也不显示：它不是「笔」，圈一个笔刷大小的环只会让人以为点下去会画。
+    // 但按住 Alt 时例外 —— 那时真的会取色，光标必须跟着变成吸管（见 altPicking）。
+    var handTool = S.tool === 'hand';
+    var hide = !S.pointer.inside || !!S.pan || !S.joined || !!engine.transform ||
+      (handTool && !altPicking());
+    // 抓手态把系统光标换成张开的手（拖动中由 .stage.panning 换成抓紧的手）
+    $('#stage').classList.toggle('hand-tool', handTool);
     var drop = !hide && altPicking();
     el.classList.toggle('hidden', hide);
     // 吸管状态下要把**系统光标**也藏掉，否则会跟吸管图标叠成两个指针。
@@ -4650,7 +4720,15 @@
         return;
       }
 
-      if (e.button === 1 || (e.button === 0 && (S.spaceDown || e.altKey && S.spaceDown))) {
+      /* ---- 抓手工具：按住左键拖画面 ----
+       * 和「空格 + 左键 / 中键」走的是同一条路（S.pan + engine.panBy），
+       * 所以视图平移的手感、边界、光标全都一致。
+       * Alt 不参与：这个应用里 Alt 是「临时吸管」，光标也是吸管，
+       * 让抓手把它吃掉就会变成「光标是吸管、拖出来却在平移」。
+       * 触屏（手机 / 平板网页版）同样是 pointer 事件，单指拖到这里就等于抓手，
+       * 不必去够双指手势。 */
+      var handDrag = S.tool === 'hand' && e.button === 0 && !e.altKey;
+      if (e.button === 1 || handDrag || (e.button === 0 && (S.spaceDown || e.altKey && S.spaceDown))) {
         e.preventDefault();
         S.pan = { x: e.clientX, y: e.clientY };
         $('#stage').classList.add('panning');
@@ -12820,6 +12898,8 @@
     bindRefWindow();
     loadDimPrefs();
     applyDimView();
+    loadThemePref();        // 界面主题（system / light / dark）
+    applyUiTheme();
     loadUiScale();          // 恢复上次的界面缩放（以前只写不读，刷新必丢）
     // 侧栏收拉：把手 / 窄条 / F4（菜单里那项也走同一个函数）
     $('#btnSideCollapse').addEventListener('click', function () { setSideCollapsed(true); });
@@ -15389,6 +15469,8 @@
     armRuler: armRuler, clearRuler: clearRuler, toggleRulerVisible: toggleRulerVisible, commitRuler: commitRuler,
     toggleQuickBarSteadier: toggleQuickBarSteadier,
     setDimMode: setDimMode, cycleDimMode: cycleDimMode, setUserDim: setUserDim,
+    // 界面主题：'system' / 'light' / 'dark'（菜单「窗口 → 界面主题」也走它）
+    setUiTheme: setUiTheme, uiTheme: function () { return S.uiTheme; },
     toggleLocalHideActive: toggleLocalHideActive, clearLocalHiddenUi: clearLocalHidden,
     openTextDialog: openTextDialog, commitText: commitText, placeTextAt: placeTextAt, textOpts: textOpts,
     bindQuickBar: bindQuickBar, updateQuickBar: updateQuickBar,
