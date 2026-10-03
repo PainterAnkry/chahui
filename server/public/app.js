@@ -262,9 +262,10 @@
     el.textContent = msg;
     wrap.appendChild(el);
     setTimeout(function () {
-      el.style.transition = 'opacity .25s';
+      el.style.transition = 'opacity .24s cubic-bezier(.25,1,.38,1), transform .24s cubic-bezier(.25,1,.38,1)';
       el.style.opacity = '0';
-      setTimeout(function () { el.remove(); }, 260);
+      el.style.transform = 'translateY(10px) scale(.94)';
+      setTimeout(function () { el.remove(); }, 250);
     }, ms || 2600);
   }
 
@@ -1137,9 +1138,10 @@
     refreshIcmKey();
     $('#icmDel').textContent = it.imported ? '删除笔刷' : '收起笔刷（编辑模式可放回）';
     m.classList.remove('hidden');
-    var r = m.getBoundingClientRect();
-    m.style.left = Math.max(4, Math.min(x, window.innerWidth - r.width - 8)) + 'px';
-    m.style.top = Math.max(4, Math.min(y, window.innerHeight - r.height - 8)) + 'px';
+    // 尺寸用 offsetWidth/offsetHeight：入场有缩放动画，rect 会被 transform 缩小
+    var w = m.offsetWidth, h = m.offsetHeight;
+    m.style.left = Math.max(4, Math.min(x, window.innerWidth - w - 8)) + 'px';
+    m.style.top = Math.max(4, Math.min(y, window.innerHeight - h - 8)) + 'px';
   }
   function closeItemCtx() {
     ctxItem = null; ctxCapturing = false;
@@ -4705,6 +4707,31 @@
         S.rulerDragging = true;
         return;
       }
+      /* ---- 已有尺子：抓住把手 / 旋钮移动 / 旋转，不画画（对照 SAI2 的尺子把手）----
+       * 只吃把手附近的一小片区域，其余地方照常画画（笔画照样被尺子吸附）。
+       * 手动平移 / 空格平移 / 抓手 / 吸管 / 变换中都不抢。 ---- */
+      if (engine.ruler && engine.ruler.type && engine.showRuler !== false && !S.rulerArm &&
+          e.button === 0 && !e.altKey && !S.spaceDown && S.tool !== 'hand' &&
+          !engine.transform && !engine.replayMode) {
+        var hsp = stagePoint(e);
+        var hdp = engine.screenToDoc(hsp.x, hsp.y);
+        var htol = 12 / Math.max(engine.scale, 0.02);
+        var rHit = global.ChaRuler.hitTest(engine.ruler, hdp.x, hdp.y, htol);
+        if (rHit) {
+          e.preventDefault();
+          view.setPointerCapture(e.pointerId);
+          var rCenter = global.ChaRuler.centerOf(engine.ruler);
+          S.rulerManip = {
+            mode: rHit,
+            lastX: hdp.x, lastY: hdp.y,
+            startRot: engine.ruler.type === 'ellipse'
+              ? (engine.ruler.rot || 0)
+              : Math.atan2(engine.ruler.p1.y - engine.ruler.p0.y, engine.ruler.p1.x - engine.ruler.p0.x),
+            startAngle: Math.atan2(hdp.y - rCenter.y, hdp.x - rCenter.x)
+          };
+          return;
+        }
+      }
       /* ---- 变换模式：所有指针事件都交给变换框 ---- */
       if (engine.transform) {
         if (e.button !== 0) return;
@@ -4779,6 +4806,13 @@
       notePointerSample(e);            // 攒样本：判断「报成 mouse 的是不是数位板」
       // Alt 状态以指针事件为准（离屏 / 焦点丢失时 keyup 是收不到的）
       S.altDown = !!e.altKey;
+      // 尺子把手悬停反馈：能抓的地方换成 move / crosshair，不然不知道哪儿能拖
+      if (engine.ruler && engine.ruler.type && engine.showRuler !== false && !S.rulerManip &&
+          !S.rulerArm && !S.session && e.buttons === 0 && S.tool !== 'hand' && !engine.transform) {
+        var hhp = engine.screenToDoc(sp.x, sp.y);
+        var hhit = global.ChaRuler.hitTest(engine.ruler, hhp.x, hhp.y, 12 / Math.max(engine.scale, 0.02));
+        view.style.cursor = hhit === 'move' ? 'move' : (hhit === 'rotate' ? 'crosshair' : '');
+      }
       // 落笔途中把浏览器合并掉的中间帧也补进来 —— 板子的采样率远高于事件频率，
       // 不取 coalesced 的话快速运笔会丢压力变化（笔迹忽粗忽细、转折处发直）
       if (S.session) {
@@ -4794,6 +4828,23 @@
         engine.rulerPreview = { type: S.rulerArm.type, p0: S.rulerArm.p0, p1: S.rulerArm.p1 };
         engine.drawOverlay();
         $('#cursorPos').textContent = Math.round(rdp.x) + ', ' + Math.round(rdp.y);
+        return;
+      }
+      // 尺子把手拖动中：移动 / 旋转（改的是本机这把尺子，不影响别人）
+      if (S.rulerManip && engine.ruler) {
+        var mmp = engine.screenToDoc(sp.x, sp.y);
+        var rm = S.rulerManip;
+        if (rm.mode === 'move') {
+          global.ChaRuler.moveBy(engine.ruler, mmp.x - rm.lastX, mmp.y - rm.lastY);
+          rm.lastX = mmp.x; rm.lastY = mmp.y;
+        } else {
+          var rmc = global.ChaRuler.centerOf(engine.ruler);
+          var delta = Math.atan2(mmp.y - rmc.y, mmp.x - rmc.x) - rm.startAngle;
+          if (engine.ruler.type === 'ellipse') engine.ruler.rot = rm.startRot + delta;
+          else global.ChaRuler.setAngle(engine.ruler, rm.startRot + delta);
+        }
+        engine.drawOverlay();
+        $('#cursorPos').textContent = Math.round(mmp.x) + ', ' + Math.round(mmp.y);
         return;
       }
       if (engine.transform) {
@@ -4833,6 +4884,12 @@
     });
 
     function up() {
+      // 尺子把手拖动收尾：尺子留在摆到的位置
+      if (S.rulerManip) {
+        S.rulerManip = null;
+        engine.drawOverlay();
+        return;
+      }
       // 尺子定义收尾：够长就摆上，太短就提示
       if (S.rulerDragging) {
         S.rulerDragging = false;
@@ -14362,7 +14419,10 @@
     } else if (plat === 'linux') {
       want = [/\.AppImage$/i, /\.tar\.gz$/i, /\.deb$/i];
     } else {
-      want = [/^chahui-setup-.*\.exe$/i, /-setup-.*\.exe$/i, /^chahui-portable-.*\.exe$/i, /\.exe$/i];
+      // 中文产物名（茶绘-安装程序- / 茶绘-便携版-）排在英文名前面：
+      // 实际发布用的就是中文名，放后面会被兜底的 /\.exe$/ 抢先、装成「随便第一个 exe」
+      want = [/安装程序.*\.exe$/i, /^chahui-setup-.*\.exe$/i, /-setup-.*\.exe$/i,
+              /便携版.*\.exe$/i, /^chahui-portable-.*\.exe$/i, /\.exe$/i];
     }
     for (var i = 0; i < want.length; i++) {
       for (var j = 0; j < list.length; j++) {

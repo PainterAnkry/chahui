@@ -66,7 +66,8 @@ const WANT = ['文件', '编辑', '图像', '图层', '选择', '尺子', '滤�
   });
   console.log('  子菜单 ' + extras.subs + ' 个 · 置灰项 ' + extras.disabled + ' 条 · 助记键 ' + extras.mnemonics + ' 个');
   ok('有 ▸ 子菜单（导出 / 画布背景 / 显示操作面板 …）', extras.subs >= 6, String(extras.subs));
-  ok('茶绘还没有的功能是「列出来但置灰」', extras.disabled >= 10, String(extras.disabled));
+  // 2.1.1 起政策反转：没有实现的功能不再「置灰占位」，直接不进菜单（用户要求清理多余项）
+  ok('没有的功能不占菜单（置灰占位项清零）', extras.disabled === 0, String(extras.disabled));
   ok('每项都带助记键 (X)', extras.mnemonics >= 60, String(extras.mnemonics));
 
   // 顶层工具条上那些按钮，功能都应该能在菜单里找到（不允许「藏起来」）
@@ -81,7 +82,7 @@ const WANT = ['文件', '编辑', '图像', '图层', '选择', '尺子', '滤�
       bake: ids.indexOf('layer.bake') >= 0,
       share: ids.indexOf('other.share') >= 0,
       undo: ids.indexOf('edit.undo') >= 0,
-      keys: ids.indexOf('edit.keys') >= 0
+      keys: ids.indexOf('other.keys') >= 0
     };
   });
   console.log('  关键功能: ' + JSON.stringify(has));

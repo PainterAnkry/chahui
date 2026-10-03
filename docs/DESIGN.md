@@ -1,6 +1,6 @@
 # 茶绘 · 界面设计系统（DESIGN.md）
 
-> 这份文档是**改界面的唯一入口**：颜色、圆角、阴影、动效、组件规格都从这里查，
+> 这份文档是**改界面的唯一入口**：颜色、玻璃材质、圆角、阴影、动效、组件规格都从这里查，
 > 不要再往 CSS 里写新的 `#hex`。
 > 代码位置：令牌在 [`client/renderer/styles.css`](../client/renderer/styles.css) 顶部（`:root` 与
 > `html[data-theme="dark"]`），主题开关在 [`client/renderer/app.js`](../client/renderer/app.js) 的「界面主题」一段
@@ -8,18 +8,29 @@
 
 ---
 
-## 一、三条硬约束（绘画工具和普通网页不一样）
+## 一、设计语言与三条硬约束（绘画工具和普通网页不一样）
+
+2.2 起界面语言换成 **iOS「Liquid Glass」**：模态与菜单是一块块半透明玻璃（模糊 + 提饱和 +
+顶部高光发丝线），按钮按压有轻微缩放的弹性反馈，弹层进出用 iOS 减速/弹性曲线。
+但这是**绘画工具**，有三条压倒一切的硬约束：
 
 1. **画布外围必须是无色相的中明度灰**，深色主题也不低于 `#45464a`。
    周围太暗会系统性抬高你对画面明度的主观判断 —— 画的时候觉得挺好，导出来发灰发暗。
    所以 `--stage-bg` 是中性灰，不是「深色主题的深灰」。
 2. **强调色只有一支**（蓝），只给主操作、焦点环、选中态；**不用它填面板、不做装饰**。
    面板一花，画面里的颜色就没法判断了。选区高亮另有一套 `--sel-*` 令牌，与品牌色分开。
-3. **动效 ≤200ms**，只允许 `opacity` / `background-color` / `border-color` / 小位移（≤2px）。
-   禁 `scale` / `rotate` / 弹跳 / 阴影动画 —— 这些都在抢画笔的 GPU 预算，手感会变糊。
+3. **玻璃不能糊住画面，动效不能抢画笔的 GPU 预算**：
+   - 玻璃分三档，透明度按「压在上面的文字多少」递增（`--glass` → `--glass-strong` → `--glass-modal`）；
+     深色主题下透明度只升不降，字永远压得住底。
+   - 动效只动 `transform` / `opacity`（合成器属性）；background / border / color ≤ .18s。
+     **永远不要动 backdrop-filter 的数值、不要给大面积玻璃做阴影动画。**
+   - 弹层（菜单 / 弹窗 / 右键小弹窗）的开合用 `@starting-style` +
+     `transition-behavior: allow-discrete` 纯 CSS 完成，JS 只 toggle `.hidden`；
+     落笔画画全程没有动画在跑。
+   - 靠 `transform` 定位的浮层（快捷栏 / HUD / 回放条的 `translateX(-50%)`）只做 opacity 进场。
 
-另外：**圆角保持茶绘原来的手感**（7 / 5 / 4 / 12 / 999），不往大了做。
-大圆角在像素级对齐的工具界面里会显得松垮、也挤占画布。
+圆角整体比 2.1 外扩一档（5 / 7 / 9 / 14 / 20 / 999），往 iOS 的连续圆角手感靠；
+**不使用 `linear-gradient` 渐变底**（强调色 `--accent-grad` 只给字标与主按钮）。
 
 ---
 
@@ -38,7 +49,23 @@
 | `--panel-2` / `--surface` | `#ffffff` | `#2f3237` | 小节卡片 / 按钮 / 输入框 / 气泡 |
 | `--surface-sunken` | `#f6f8fb` | `#23262a` | 凹陷块：弹窗底栏、预览块、禁用输入 |
 | `--surface-mute` | `#fbfcfe` | `#2a2d31` | 比卡片再浅一档的底 |
-| `--surface-trans` | `rgba(255,255,255,.92)` | `rgba(47,50,55,.92)` | 浮在画布上的半透明条（快捷栏 / 参考图标签） |
+| `--surface-trans` | = `--glass` | = `--glass` | 旧引用别名（快捷栏 / 参考图标签） |
+
+### 液态玻璃（浮在画布上的东西才用）
+
+玻璃 = `--glass-sheen`（顶部高光渐变）叠 `--glass*` 半透明底 + `backdrop-filter: blur() saturate()`
++ `--glass-border` 外圈发丝线 + `--glass-inset` 内圈高光 + `--glass-shadow` 分层阴影。
+三档按「压在上面的文字多少」递增透明度：
+
+| 令牌 | 浅色 | 深色 | 用在哪 |
+| --- | --- | --- | --- |
+| `--glass` | 白 .62 + blur 18px | 黑 .66 | 贴画布的窄条：快捷栏 / HUD / 接龙条 / 参考图标签 |
+| `--glass-strong` | 白 .80 + blur 30px | 黑 .80 | 菜单 / 右键弹窗 / Toast / 浮窗 / 计分板 |
+| `--glass-modal` | 白 .90 + blur 30px | 黑 .91 | 模态弹窗（文字最多，最不透） |
+| `--glass-blur` / `--glass-blur-lg` | 18 / 30px | 同左 | 模糊半径（配 `--glass-sat` 提饱和） |
+| `--glass-border` / `--glass-line` | 外圈深发丝 / 内圈白高光 | 反过来 | 玻璃的双圈描边 |
+| `--glass-inset` / `--glass-sheen` | 顶部高光 inset + 高光渐变 | 减弱版 | 玻璃的「光从上面来」 |
+| `--glass-shadow` | 三层分离阴影 | 更重 | 玻璃的落影（**不要给它做动画**） |
 
 ### 交互态
 
@@ -86,20 +113,48 @@
 | `--shadow-xs` / `-sm` / `--shadow` / `--shadow-lg` | 多层小偏移阴影；深色一般不用阴影、靠表面阶梯分层 |
 | `--highlight-top` | 浮层顶边 1px 微高光（深色下区分浮层很有用） |
 
+### 动效
+
+| 令牌 | 值 | 用在哪 |
+| --- | --- | --- |
+| `--dur-fast` | .12s | 悬停 / 按下的颜色过渡 |
+| `--dur` | .18s | 弹层退场、遮罩淡入淡出 |
+| `--dur-slow` | .3s | 弹层开场的弹性上浮 |
+| `--ease` | `cubic-bezier(.25,1,.38,1)` | HIG 减速曲线（默认） |
+| `--ease-spring` | `cubic-bezier(.36,1.22,.4,1)` | 弹性回弹，**只给 transform 用**（opacity 会闪） |
+
+弹层开合的标准写法（JS 只 toggle `.hidden`，不需要任何 setTimeout）：
+
+```css
+.menu-drop {
+  transition: opacity var(--dur) var(--ease), transform var(--dur) var(--ease-spring),
+              display var(--dur) allow-discrete;
+}
+.menu-drop.hidden { opacity: 0; transform: scale(.97) translateY(-5px); }
+@starting-style { .menu-drop { opacity: 0; transform: scale(.97) translateY(-5px); } }
+```
+
+注意：带 `fill-mode: forwards/both` 的入场动画会一直压着内联样式，Toast 这类
+**JS 还要补内联退场过渡**的元素不能加 fill；`@starting-style` 方案则没有这个冲突。
+
 ---
 
 ## 三、组件规格
 
 | 组件 | 规格 |
 | --- | --- |
-| **主按钮** `.btn.primary` | 高 30 左右、`padding 6px 12px`、圆角 `--radius-sm`、`--accent-grad` 底、白字、`--accent-glow`；悬停提亮 6%，按下取消阴影 |
-| **常规按钮** `.btn` | `--surface` 底 + `--line-strong` 描边 + `--shadow-xs`；悬停换 `--hover`；**不加位移** |
-| **小片** `.mini` | 高 24、圆角 `--radius-xs`、11.5px 字；面板里成排出现，所以悬停**只有颜色变化** |
-| **图标按钮** `.icon-btn` | 26×26、透明底；悬停才有 `--hover`；焦点 `--ring` |
+| **主按钮** `.btn.primary` | `--accent-grad` 底、白字、`--accent-glow`；悬停提亮 6%，**按下 scale(.96)** |
+| **常规按钮** `.btn` | `--surface` 底 + `--line-strong` 描边 + `--shadow-xs` + 顶边高光；悬停换 `--hover`；按下 scale(.96) |
+| **小片** `.mini` | 高 24、圆角 `--radius-xs`、11.5px 字；悬停只有颜色变化，按下 scale(.95) |
+| **图标按钮** `.icon-btn` | 26×26、透明底；悬停才有 `--hover`；按下 scale(.9)；焦点 `--ring` |
 | **输入框 / 下拉** | `--surface` 底、`--line-strong` 描边、圆角 `--radius-xs`；聚焦**换描边 + 加环，尺寸与底色都不动**（避免跳动） |
+| **滑条** | 5px 轨道胶囊、15px 白圆点 thumb（无描边、立体小投影）；按住 thumb scale(1.15) |
 | **卡片** `.group` | `--panel-2` 底 + `--line-soft` 描边 + `--radius` + `--shadow-xs`；小节标题 12px/600 `--text` |
-| **下拉菜单** `.menu-drop` | `--surface` 底、`--line-strong` 描边、8px 圆角、`--shadow-lg` + `--highlight-top`；**必须保持 `position: fixed`**（`menu.js` 用 rect 算坐标，改 absolute 会「看得见点不到」） |
-| **弹窗** `.modal` | `--surface` 底、`--radius-lg`、`--shadow-lg`；遮罩 `--overlay` + `backdrop-filter: blur(2px)` |
+| **分段控件** `.tabs` / `.seg` | 凹槽 = `--surface-sunken` 底 + 10px 圆角；选中 = 白胶囊 + `--shadow-xs`；不要用下划线态 |
+| **下拉菜单** `.menu-drop` | 玻璃 strong、`--radius-lg`；行高亮 = 整行 `--accent` 底白字 + `--radius-sm` 圆角；禁用行 opacity .4；**必须保持 `position: fixed`**（`menu.js` 用 offsetWidth/offsetHeight 算坐标，改 absolute 会「看得见点不到」） |
+| **右键小弹窗** `#itemCtxMenu` | 与 `.menu-drop` 完全同一块玻璃、同一套行样式 —— 右键呼出的东西必须长得一样 |
+| **弹窗** `.modal` | 玻璃 modal、`--radius-xl`、`--glass-shadow` + `--glass-inset`；遮罩 `--overlay` + `blur(6px)`；开场弹性上浮、退场 .18s 缩回 |
+| **Toast** | 深玻璃胶囊（`--tooltip-bg` + blur）；入场 spring 弹起，退场由 JS 补内联过渡下沉 |
 | **滚动条** | 9px、轨道透明、滑块 `--line-strong`、悬停 `--text-mute`、胶囊形 |
 | **状态标签** | 同色 `-soft` 底 + `-line` 边 + `-ink` 字（如 `.pen-hint`、`.badge.guest`） |
 | **列表行**（图层 / 成员 / 房间） | 行高不变、悬停只换 `--hover`、选中 = `--accent-soft` 底 + 高亮字 |
@@ -167,15 +222,16 @@ node tools/test-layer-panel.js       http://127.0.0.1:8440   # 图层面板排�
 
 ## 六、参考来源
 
-令牌分档、焦点环、层叠微阴影、列表行规格、动效时长这些做法，参考了下面这些公开的设计系统
-（只借鉴通用的颜色 / 间距 / 组件规则，没有复制任何商标、插画或字体文件；界面字体用系统的
+令牌分档、焦点环、层叠微阴影、列表行规格这些做法，参考了下面这些公开的设计系统；
+2.2 的玻璃材质、弹性动效曲线与分段控件参考的是 Apple 公开的 HIG / 「Liquid Glass」设计语言
+（只借鉴通用的材质层级 / 曲线 / 组件规则，没有复制任何商标、插画或字体文件；界面字体用系统的
 Inter / Segoe UI / PingFang SC，等宽用 JetBrains Mono / Consolas）：
 
+- Apple Human Interface Guidelines — <https://developer.apple.com/design/human-interface-guidelines/materials>
 - Cursor DESIGN.md — <https://github.com/VoltAgent/awesome-design-md/blob/main/design-md/cursor/DESIGN.md>
 - Linear DESIGN.md — <https://github.com/VoltAgent/awesome-design-md/blob/main/design-md/linear.app/DESIGN.md>
 - Vercel DESIGN.md — <https://github.com/VoltAgent/awesome-design-md/blob/main/design-md/vercel/DESIGN.md>
 - Figma DESIGN.md — <https://github.com/VoltAgent/awesome-design-md/blob/main/design-md/figma/DESIGN.md>
-- rico-skills 主题（唯一含浅色 + 深色双模式的）— <https://github.com/ricocc/rico-skills>（`skills/rico-ui-ux-themes/references/styles/linear.md`、`saas-dark.md`）
 
-**没有照抄的三条**（它们对营销站/IDE 合适，对绘画工具不合适）：超大 hero 字号与 80px 标题、
+**没有照抄的三条**（它们对营销站/IDE/手机系统合适，对绘画工具不合适）：超大 hero 字号与 80px 标题、
 大面积高饱和渐变、以及把画布外围压到近黑。理由见开头「三条硬约束」。

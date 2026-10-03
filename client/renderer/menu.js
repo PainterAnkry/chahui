@@ -58,12 +58,6 @@
       id: 'file', name: '文件', mnemonic: 'F', items: [
         def('file', 'file.new', '新建', { mnemonic: 'N', key: 'Ctrl+N', run: function () { A().openEntry(true); } }),
         def('file', 'file.open', '打开', { mnemonic: 'O', key: 'Ctrl+O', run: function () { A().openEntry(true); } }),
-        off('file', '从剪贴板创建画布', 'B', 'Ctrl+B'),
-        def('file', 'file.recent', '最近所用文件', {
-          mnemonic: 'T', sub: [
-            { label: '（暂无最近文件）', disabled: true }
-          ]
-        }),
         SEP,
         // 工程文件（.chahu）：画布 + 图层 + 每层像素的一份自包含快照。
         // 「打开工程」= 新建一个房间来承载它，所以 Ctrl+Shift+O 而不是接管 Ctrl+O
@@ -90,19 +84,10 @@
             sub('file', 'file.export.webp', 'WebP（.webp）', { run: function () { A().exportAs('webp'); } }),
             sub('file', 'file.export.bmp', 'BMP（.bmp，24 位）', { run: function () { A().exportAs('bmp'); } }),
             sub('file', 'file.export.tga', 'TGA（.tga，32 位）', { run: function () { A().exportAs('tga'); } }),
-            sub('file', 'file.export.more', '更多格式 / 画质…', { run: function () { A().openExportDialog(); } }),
             sub('file', 'file.export.webm', '导出录制视频（WebM）', { run: function () { A().toggleRecord(); } }),
             sub('file', 'file.export.replay', '导出回放视频（WebM，按当前倍速）', { run: function () { A().exportReplayVideo(); } })
           ]
         }),
-        SEP,
-        def('file', 'file.viewerAlways', '总是使用文件查看器', {
-          mnemonic: 'V', check: function () { return false; }, disabled: true
-        }),
-        off('file', '在文件查看器中打开', 'F'),
-        off('file', '在文件查看器中保存', 'L'),
-        SEP,
-        off('file', '恢复文件', 'R'),
         SEP,
         def('file', 'file.leave', '关闭（离开房间）', { mnemonic: 'C', run: function () { A().leaveRoom(); } }),
         SEP,
@@ -114,16 +99,11 @@
         def('edit', 'edit.undo', '还原', { mnemonic: 'U', key: 'Ctrl+Z', run: function () { A().undo(); } }),
         def('edit', 'edit.redo', '重做', { mnemonic: 'R', key: 'Ctrl+Y', run: function () { A().redo(); } }),
         SEP,
-        off('edit', '剪切', 'T', 'Ctrl+X'),
+        // 「拷贝」和「拷贝选区」本来就是同一个动作（copySelection），只留一个
         def('edit', 'edit.copy', '拷贝', { mnemonic: 'C', key: 'Ctrl+C', run: function () { A().copySelection(); } }),
         def('edit', 'edit.paste', '粘贴', { mnemonic: 'P', key: 'Ctrl+V', run: function () { A().pasteImage(); } }),
         SEP,
-        def('edit', 'edit.copySel', '拷贝选区', { mnemonic: 'S', run: function () { A().copySelection(); } }),
-        off('edit', '粘贴（不取消选区）', 'W'),
-        SEP,
-        def('edit', 'edit.selectAll', '全选', { mnemonic: 'A', key: 'Ctrl+A', run: function () { A().selectAll(); } }),
-        SEP,
-        def('edit', 'edit.keys', '快捷键设置', { mnemonic: 'K', run: function () { openKeyDialog(); } })
+        def('edit', 'edit.selectAll', '全选', { mnemonic: 'A', key: 'Ctrl+A', run: function () { A().selectAll(); } })
       ]
     },
     {
@@ -181,9 +161,7 @@
         }),
         def('layer', 'layer.localShowAll', '取消所有「只对我隐藏」', {
           run: function () { A().clearLocalHiddenUi(); }
-        }),
-        SEP,
-        off('layer', '图层属性', 'R')
+        })
       ]
     },
     {
@@ -197,17 +175,8 @@
           check: function () { var s = A().state; return !!(s && s.antsOn); }
         }),
         SEP,
-        off('select', '扩展选区', 'L'),
-        off('select', '收缩选区', 'O'),
         def('select', 'select.grow1', '扩展选区 1 像素', { mnemonic: 'A', run: function () { A().growSelection(1); } }),
         def('select', 'select.shrink1', '收缩选区 1 像素', { mnemonic: 'R', run: function () { A().shrinkSelection(1); } }),
-        SEP,
-        off('select', '选择选区内的锚点', 'P'),
-        off('select', '选择与选区重叠的笔画', 'T'),
-        SEP,
-        off('select', '取消选择所有锚点', 'E'),
-        SEP,
-        def('select', 'select.all', '全选', { mnemonic: 'A', key: '', run: function () { A().selectAll(); } }),
         SEP,
         def('select', 'select.fromLayer', '按图层不透明区域建立选区', { mnemonic: 'F', run: function () { A().selectFromLayer(); } }),
         def('select', 'select.mesh', '网格变换', { mnemonic: 'M', run: function () { A().toggleMeshTransform(); } }),
@@ -218,7 +187,7 @@
     },
     {
       id: 'ruler', name: '尺子', mnemonic: 'R', items: [
-        def('ruler', 'ruler.grid', '显示尺子（网格）', {
+        def('ruler', 'ruler.grid', '显示网格', {
           mnemonic: 'H', key: 'Ctrl+R',
           run: function () { A().toggleGrid(); },
           check: function () { var s = A().state; return !!(s && s.gridOn); }
@@ -278,12 +247,6 @@
     },
     {
       id: 'view', name: '视图', mnemonic: 'V', items: [
-        def('view', 'view.newView', '新建视图', { mnemonic: 'N', disabled: true }),
-        def('view', 'view.newFloat', '新建浮动视图', { mnemonic: 'L', disabled: true }),
-        SEP,
-        def('view', 'view.closeView', '关闭视图', { mnemonic: 'C', key: 'Ctrl+W', disabled: true }),
-        def('view', 'view.closeAll', '关闭所有视图', { mnemonic: 'A', disabled: true }),
-        SEP,
         def('view', 'view.zoomIn', '放大', { mnemonic: 'I', key: '=', run: function () { A().zoomBy(1.25); } }),
         def('view', 'view.zoomOut', '缩小', { mnemonic: 'O', key: '-', run: function () { A().zoomBy(1 / 1.25); } }),
         def('view', 'view.rotL', '逆时针旋转', { mnemonic: 'W', key: 'Shift+PageUp', run: function () { A().rotateView(-15); } }),
@@ -296,14 +259,7 @@
         SEP,
         def('view', 'view.zoom100', '100% 大小', { key: 'Ctrl+Alt+0', run: function () { A().zoom100(); } }),
         def('view', 'view.zoomFit', '按窗口大小缩放视图', { mnemonic: 'F', key: '0', run: function () { A().zoomFit(); } }),
-        def('view', 'view.resetPos', '重置视图的显示位置', { mnemonic: 'H', key: 'Home', run: function () { A().zoomFit(); } }),
         def('view', 'view.resetAngle', '重置视图的显示角度', { mnemonic: 'G', key: 'Shift+Home', run: function () { A().rotateView(0, true); } }),
-        SEP,
-        def('view', 'view.nav', '导航器', {
-          mnemonic: 'N', key: '',
-          run: function () { A().toggleNav(); },
-          check: function () { var s = A().state; return !!(s && s.navOpen); }
-        }),
         SEP,
         // 回放洋葱皮：茶绘没有帧动画，回放是唯一有时间轴的地方 ——
         // 把刚画完的几笔染成暖色、马上要画的几笔染成冷色，看清运笔在往哪走。
@@ -360,9 +316,6 @@
             })
           ]
         }),
-        def('window', 'window.detach', '分离操作面板', {
-          mnemonic: 'P', sub: [{ label: '（网页版不支持分离窗口）', disabled: true }]
-        }),
         def('window', 'window.uiscale', '用户界面缩放', {
           mnemonic: 'A', sub: [
             sub('window', 'window.ui.reset', '恢复默认（100%）', { run: function () { A().setUiScale(1); } }),
@@ -388,18 +341,24 @@
           ]
         }),
         SEP,
-        def('window', 'window.cursorRing', '画笔工具显示画笔大小圆形', {
-          mnemonic: 'Z',
-          run: function () { A().setCursorMode('ring'); },
-          check: function () { var s = A().state; return !!(s && s.cursorStyle === 'ring'); }
+        // 画笔光标三档收进一个子菜单：跟画笔参数面板里的「光标形状」下拉同源
+        //（setCursorMode 内部把 'dot' 翻译成十字档，这里按实际效果写文案）
+        def('window', 'window.cursor', '画笔光标', {
+          mnemonic: 'Z', sub: [
+            sub('window', 'window.cursor.auto', '智能（小笔刷自动切十字）', {
+              run: function () { A().setCursorMode('auto'); },
+              check: function () { var s = A().state; return !!s && s.cursorStyle === 'auto'; }
+            }),
+            sub('window', 'window.cursor.ring', '圆环（显示画笔大小）', {
+              run: function () { A().setCursorMode('ring'); },
+              check: function () { var s = A().state; return !!s && s.cursorStyle === 'ring'; }
+            }),
+            sub('window', 'window.cursor.cross', '十字准星', {
+              run: function () { A().setCursorMode('dot'); },
+              check: function () { var s = A().state; return !!s && s.cursorStyle === 'cross'; }
+            })
+          ]
         }),
-        def('window', 'window.cursorDot', '画笔工具使用圆点光标', {
-          mnemonic: 'D',
-          run: function () { A().setCursorMode('dot'); },
-          check: function () { var s = A().state; return !!(s && s.cursorStyle === 'dot'); }
-        }),
-        off('window', '只用数值显示画笔大小列表的项目', 'N'),
-        off('window', '在上面显示画笔大小列表', 'U'),
         SEP,
         def('window', 'window.allPanels', '显示所有的操作面板', {
           mnemonic: 'E', key: 'Tab',
@@ -410,13 +369,7 @@
           mnemonic: 'F', key: 'F11',
           run: function () { A().toggleFullscreen(); },
           check: function () { return !!document.fullscreenElement; }
-        }),
-        SEP,
-        off('window', '靠右显示导航器和图层的操作面板', 'L'),
-        off('window', '靠右显示颜色和工具的面板', 'T'),
-        SEP,
-        off('window', 'HSV/HSL 模式', 'M'),
-        off('window', '色板项目大小', 'W')
+        })
       ]
     },
     {
@@ -577,11 +530,6 @@
   }
 
   /**
-   * 子菜单定位：默认往右下方展开，但**碰到窗口下边缘就改成向上弹**，
-   * 碰到右边缘就往左移回来。以前是纯 CSS 定位，靠底部的「色阶」这类
-   * 最后几项的子菜单会掉到屏幕外，根本点不到。
-   */
-  /**
    * 顶级菜单下拉定位。
    *
    * 为什么不用纯 CSS 的 `position:absolute; top:100%`：
@@ -590,64 +538,67 @@
    * 下拉超出菜单栏那 30px 的部分照样会被画出来（所以「看得见」），
    * 但整个盒子收不到点击（所以「点不到」）。
    * 改成 fixed 定位、坐标用 JS 算，就彻底摆脱祖先 overflow 的裁剪。
+   *
+   * 尺寸用 offsetWidth/offsetHeight 而不是 getBoundingClientRect：
+   * 下拉现在带入场缩放动画（见 .menu-drop 的 transition），rect 会被
+   * transform 缩小（量出来偏小 → 贴边翻转判断失误）；layout 尺寸不吃 transform。
    */
   function placeDrop(drop, btn) {
     var r = btn.getBoundingClientRect();
     var vw = window.innerWidth || document.documentElement.clientWidth;
     var vh = window.innerHeight || document.documentElement.clientHeight;
+    var w = drop.offsetWidth;
+    var h = drop.offsetHeight;
 
-    // 先摆到标题正下方，再量真实尺寸决定是否翻转
-    drop.style.left = Math.round(r.left) + 'px';
-    drop.style.top = Math.round(r.bottom) + 'px';
-    drop.style.right = 'auto';
-    drop.style.bottom = 'auto';
-
-    var d = drop.getBoundingClientRect();
+    // 先按「标题正下方」摆，再按真实尺寸决定是否翻转
+    var left = r.left;
+    var top = r.bottom;
     // 右边界超出就往左收（但不越过屏幕左边缘）
-    if (d.right > vw - 4) {
-      var left = Math.max(4, Math.min(r.left, vw - d.width - 4));
-      drop.style.left = Math.round(left) + 'px';
-      d = drop.getBoundingClientRect();
+    if (left + w > vw - 4) {
+      left = Math.max(4, Math.min(r.left, vw - w - 4));
     }
     // 下边界超出就向上弹
-    if (d.bottom > vh - 4) {
-      var top = r.top - d.height;
-      drop.style.top = Math.round(Math.max(4, top)) + 'px';
+    if (top + h > vh - 4) {
+      top = Math.max(4, r.top - h);
     }
+    drop.style.left = Math.round(left) + 'px';
+    drop.style.top = Math.round(top) + 'px';
+    drop.style.right = 'auto';
+    drop.style.bottom = 'auto';
   }
 
   function placeSub(subBox, wrap) {
     // 下拉与子菜单都是 fixed 定位（见 .menu-drop 的注释），
     // 所以子菜单的坐标必须显式按「父项矩形」算，不能再靠 CSS 的 left:100%。
-    var pr = wrap.getBoundingClientRect();
+    // 尺寸用 offsetWidth/offsetHeight（不吃入场动画的 transform），见 placeDrop。
     subBox.classList.remove('up', 'flip-x');
-    subBox.style.left = Math.round(pr.right) + 'px';
-    subBox.style.right = 'auto';
-    subBox.style.top = Math.round(pr.top - 5) + 'px';
-    subBox.style.bottom = 'auto';
-
+    var pr = wrap.getBoundingClientRect();
     var vh = window.innerHeight || document.documentElement.clientHeight;
     var vw = window.innerWidth || document.documentElement.clientWidth;
-    var r = subBox.getBoundingClientRect();
+    var w = subBox.offsetWidth;
+    var h = subBox.offsetHeight;
+
+    var left = pr.right;
+    var top = pr.top - 5;
 
     // 下边界超出：向上弹（对齐父项底部）
-    if (r.bottom > vh - 4) {
+    if (top + h > vh - 4) {
       subBox.classList.add('up');
-      subBox.style.top = Math.round(pr.bottom + 5 - r.height) + 'px';
-      subBox.style.bottom = 'auto';
-      r = subBox.getBoundingClientRect();
+      top = pr.bottom + 5 - h;
     }
     // 右边界超出：翻到父项左侧
-    if (r.right > vw - 4) {
+    if (left + w > vw - 4) {
       subBox.classList.add('flip-x');
-      subBox.style.left = Math.round(pr.left - r.width) + 'px';
-      subBox.style.right = 'auto';
-      r = subBox.getBoundingClientRect();
+      left = pr.left - w;
     }
     // 左边界也超出（屏幕太窄）：贴左边，别掉出屏幕
-    if (r.left < 4) {
-      subBox.style.left = '4px';
+    if (left < 4) {
+      left = 4;
     }
+    subBox.style.left = Math.round(left) + 'px';
+    subBox.style.right = 'auto';
+    subBox.style.top = Math.round(top) + 'px';
+    subBox.style.bottom = 'auto';
   }
 
   function buildMenuBar() {
@@ -723,8 +674,9 @@
     if (!bar) return;
     bar.querySelectorAll('.menu-drop').forEach(function (d) {
       d.classList.add('hidden');
-      // fixed 定位的内联坐标要一起清掉，否则下次打开会残留上一次的位置
-      if (d.classList.contains('menu-sub')) { d.style.left = d.style.top = ''; }
+      // 内联坐标不能在这里清：下拉退场有 ~180ms 的淡出动画，
+      // 提前清掉 left/top 会让它飞到 (0,0) 再消失。placeDrop/placeSub 每次
+      // 展开前都会重写全部四个坐标，不存在「残留上一次位置」的问题。
     });
     bar.querySelectorAll('.menu-title').forEach(function (b) { b.classList.remove('active'); });
     bar.querySelectorAll('.menu-row').forEach(function (b) { b.classList.remove('active'); });
