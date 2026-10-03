@@ -81,6 +81,9 @@ const FAKE = {
       winBareExe: f(mk(['something.exe']), 'win32'),
       winUpper: f(mk([A, S]), 'Win32'),
       winNoExe: f(mk(['a.zip', 'b.dmg']), 'win32'),
+      // 实际发布用的中文产物名（茶绘-安装程序- / 茶绘-便携版- / 茶绘-绿色版-）
+      winCnName: f(mk(['茶绘-便携版-2.1.1.exe', '茶绘-安装程序-2.1.1.exe', '茶绘-绿色版-2.1.1.zip']), 'win32'),
+      winCnPortableOnly: f(mk(['茶绘-绿色版-2.1.1.zip', '茶绘-便携版-2.1.1.exe']), 'win32'),
       // Mac
       macDmg: f(mk(['a.zip', 'b.dmg']), 'darwin'),
       macOnlyZip: f(mk(['a.zip']), 'darwin'),
@@ -101,6 +104,8 @@ const FAKE = {
   ok('Windows：只有便携版时就用便携版', nm(pick.winOnlyPortable) === 'chahui-portable-1.0.0.exe', nm(pick.winOnlyPortable));
   ok('Windows：认通用的 xxx-setup-*.exe 命名', nm(pick.winGenericSetup) === 'chahui-setup-x.exe', nm(pick.winGenericSetup));
   ok('Windows：兜底认得任何 .exe', nm(pick.winBareExe) === 'something.exe', nm(pick.winBareExe));
+  ok('Windows：中文产物名也认得「安装程序」优先', nm(pick.winCnName) === '茶绘-安装程序-2.1.1.exe', nm(pick.winCnName));
+  ok('Windows：只有中文便携版时用便携版（zip 绿色版不算安装包）', nm(pick.winCnPortableOnly) === '茶绘-便携版-2.1.1.exe', nm(pick.winCnPortableOnly));
   ok('平台名大小写不影响（Win32 ≈ win32）', nm(pick.winUpper) === 'chahui-setup-1.0.0.exe', nm(pick.winUpper));
   ok('Windows：只有 zip / dmg 时返回 null（不硬塞一个装不了的）', pick.winNoExe === null, pick.winNoExe);
   ok('Mac：dmg 优先于 zip', nm(pick.macDmg) === 'b.dmg', nm(pick.macDmg));

@@ -1,7 +1,7 @@
 {
   "name": "chahui-desktop",
   "productName": "茶绘",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "private": true,
   "description": "茶绘 · 多人实时协作绘画聊天室（桌面端）",
   "author": "Ankry",
@@ -52,8 +52,18 @@
           "arch": [
             "x64"
           ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
         }
       ]
+    },
+    "portable": {
+      "artifactName": "茶绘-便携版-${version}.${ext}",
+      "unpackDirName": "chahui-portable"
     },
     "protocols": [
       {
@@ -72,9 +82,7 @@
       "shortcutName": "茶绘",
       "artifactName": "茶绘-安装程序-${version}.${ext}"
     },
-    "portable": {
-      "artifactName": "茶绘-便携版-${version}.${ext}"
-    },
-    "compression": "maximum"
+    "compression": "maximum",
+    "artifactName": "茶绘-绿色版-${version}.${ext}"
   }
 }
