@@ -29,6 +29,7 @@ npm run video:shoot -- http://127.0.0.1:8451
 | `node tools/video/timeline.js video/shots/02-duo-a.webm 1` | 每 1 秒量一次画布着墨比例，一眼看出「第几秒开始画、第几秒画完」——分镜的 `in` 就是这么定的，别靠眼睛猜 |
 | `node tools/video/grab.js video/shots/01-solo.webm 3,8,14 video/frames` | 从视频里按时间点抓帧存 PNG（看成片、找问题都靠它） |
 | `node tools/video/build.js --preview 9,21,44 --scale 0.5` | 只渲染几个时间点的单帧，改样式时不用整段重跑 |
+| `node tools/video/cover.js` | 生成 B 站封面 `docs/cover-bilibili.png`（图标 + 成品画 + 标题卖点，改文案直接编辑脚本里的 HTML） |
 
 ## 结构
 
