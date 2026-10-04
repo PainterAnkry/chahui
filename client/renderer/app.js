@@ -6558,8 +6558,14 @@
   /** 应用内链接：chahui://join?room=<房间号>&server=<当前服务器> */
   function appRoomLink() {
     if (!S.room) return '';
+    // 安卓隧道开着时，房间在本机、访客走隧道端点 —— server 参数必须是
+    // 隧道访客地址而不是 net.url（离线模式下那是 local://，点开等于进错门）
+    var srv = net.url || '';
+    if (S.tunnel && S.tunnel.phase === 'on' && /^wss?:\/\//i.test(S.publicUrl || '')) {
+      srv = S.publicUrl;
+    }
     return 'chahui://join?room=' + encodeURIComponent(S.room.id) +
-      '&server=' + encodeURIComponent(net.url || '');
+      '&server=' + encodeURIComponent(srv);
   }
 
   function showInfo(text) {
