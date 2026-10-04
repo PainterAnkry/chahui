@@ -7,7 +7,7 @@
 
 ![主界面](docs/01-主界面.png)
 
-📹 **[53 秒介绍视频](https://github.com/PainterAnkry/chahui/releases/download/v1.5.4/chahui-intro-1080p.mp4)**（1920×1080 · MP4）
+📹 **[74 秒介绍视频](https://github.com/PainterAnkry/chahui/releases/download/v2.1.1/chahui-intro-1080p.mp4)**（1920×1080 · MP4 · 含尺子 / 双主题 / 手机联机）
 —— 两部电脑、一张画布，朋友用浏览器打开地址就进来了。视频也是**脚本拍出来的**，
 重做一遍只要 `npm run video:shoot && npm run video:build`，详见 [`video/README.md`](video/README.md)。
 

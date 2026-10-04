@@ -64,6 +64,12 @@ const TIMELINE = [
   { kind: 'shot', dur: 7.0, shot: '01-solo', in: 3.6, rate: 1.15,
     zoom: [C.full, C.wide], caption: '不用注册 · 打开就能画', fade: 0.5 },
 
+  { kind: 'shot', dur: 8.5, shot: '04-ruler', in: 8.2, rate: 1.05,
+    zoom: [C.full, C.wide], caption: 'SAI2 式尺子：笔画自动吸附，拖把手就能挪', fade: 0.5 },
+
+  { kind: 'shot', dur: 6.0, shot: '05-theme', in: 6.2, rate: 1.0,
+    zoom: [C.full, C.wide], caption: '深浅双主题 · 界面是液态玻璃', fade: 0.5 },
+
   { kind: 'shot', dur: 6.5, shot: '02-duo-a', in: 8.4, rate: 1.0,
     pip: { shot: '02-duo-b', in: 8.4, rate: 1.0 },
     zoom: [C.wide, C.canvas], caption: '同一 WiFi，两台电脑，一张画布', fade: 0.4 },
@@ -79,10 +85,14 @@ const TIMELINE = [
   { kind: 'shot', dur: 7.5, shot: '03-guest-b', in: 0.05, rate: 0.9,
     zoom: [C.full, C.wide], caption: '把地址发出去，朋友用浏览器就能进来', fade: 0.5 },
 
+  { kind: 'phone', dur: 7.5, shot: '06-host-a', in: 4.5, rate: 1.0,
+    phone: '06-phone-b', phoneIn: 1.0, rate1: 1.0,
+    caption: '手机打开也能画（安卓 App 支持公网联机）', fade: 0.5 },
+
   { kind: 'still', dur: 6.5, shot: '02-duo-a', in: 25.4,
     zoom: [C.canvas, C.doc], caption: '一起画完的', fade: 0.6 },
 
-  { kind: 'card', dur: 6.5, title: '茶绘', sub: '开源免费 · 一个人画，一群人画，都行', tail: true }
+  { kind: 'card', dur: 6.5, title: '茶绘', sub: '开源免费 · 手机、电脑、公网，都能一起画', tail: true }
 ];
 
 const TOTAL = TIMELINE.reduce((s, x) => s + x.dur, 0);
@@ -111,6 +121,7 @@ TIMELINE.forEach(s => {
   if (s.shot) needed.add(s.shot);
   if (s.pip) needed.add(s.pip.shot);
   if (s.shot2) needed.add(s.shot2);
+  if (s.phone) needed.add(s.phone);
 });
 const readyList = [];
 for (const name of needed) {
@@ -303,7 +314,48 @@ function drawShotScene(c, s, local, globalT) {
   const card = { x: (W - cw) / 2, y: 64, w: cw, h: ch };
   paintBg(c, 'light');
 
-  if (s.kind === 'split') {
+  if (s.kind === 'phone') {
+    // 左：电脑（16:9 卡片）；右：竖屏手机素材放进圆角「机身」
+    const gap = 56;
+    const ph = card.h - 40;
+    const pw = ph * 390 / 844;                    // 素材就是 390×844，等比放进机身
+    // 电脑那块：占掉手机宽度 + gap 之后的剩余宽度
+    const dwidth = card.w - pw - gap;
+    const dheight = dwidth * 9 / 16;
+    const dRect = { x: card.x, y: card.y + (card.h - dheight) / 2, w: dwidth, h: dheight };
+    drawCard(c, sources[s.shot], src, dRect, 18, true);
+
+    const prect = { x: card.x + card.w - pw, y: card.y + 20, w: pw, h: ph };
+    const pv2 = sources[s.phone];
+    c.save();
+    c.shadowColor = 'rgba(20,24,35,.32)';
+    c.shadowBlur = 26; c.shadowOffsetY = 10;
+    c.fillStyle = '#0d0f14';
+    rr(c, prect.x - 8, prect.y - 8, prect.w + 16, prect.h + 16, 30);
+    c.fill();
+    c.restore();
+    c.save();
+    rr(c, prect.x, prect.y, prect.w, prect.h, 24);
+    c.clip();
+    const pvv = pv2 && pv2.readyState >= 2;
+    if (pvv) {
+      // 竖屏素材：整帧铺进去（390×844 与机身同宽高比）；播放/seek 由 syncVideos 统一管
+      c.drawImage(pv2, 0, 0, pv2.videoWidth, pv2.videoHeight, prect.x, prect.y, prect.w, prect.h);
+    } else {
+      c.fillStyle = '#10141c'; c.fillRect(prect.x, prect.y, prect.w, prect.h);
+    }
+    c.restore();
+    c.save();
+    c.globalAlpha = 0.94;
+    c.fillStyle = '#111418';
+    rr(c, prect.x + 12, prect.y + 12, 150, 34, 17);
+    c.fill();
+    c.fillStyle = '#fff';
+    c.font = '500 17px ' + FONT;
+    c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillText('手机浏览器', prect.x + 87, prect.y + 29);
+    c.restore();
+  } else if (s.kind === 'split') {
     // 一左一右两台电脑，同时播
     const gap = 34;
     const sw = (card.w - gap) / 2;
@@ -443,6 +495,7 @@ function syncVideos(t) {
       add(s.shot, s.in, s.rate);
       if (s.pip) add(s.pip.shot, s.pip.in, s.pip.rate);
       if (s.shot2) add(s.shot2, s.in2, s.rate2);
+      if (s.phone) add(s.phone, s.phoneIn, s.rate1 || 1);
     }
     acc += s.dur;
   }

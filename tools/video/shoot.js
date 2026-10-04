@@ -211,6 +211,49 @@ async function wander(page, pts, stepMs) {
   }
 }
 
+/** 打开某个菜单并点其中一项（文本匹配；二级菜单先 hover 展开） */
+async function pickMenuItem(page, menu, rowText, sub) {
+  await page.click('.menu-title[data-menu="' + menu + '"]');
+  await sleep(420);
+  if (sub) {
+    await page.hover('.menu-drop:not(.hidden) .menu-row:has-text("' + rowText + '")');
+    await sleep(560);                       // 子菜单有玻璃入场动画，等它弹出来
+    await page.click('.menu-sub:not(.hidden) .menu-row:has-text("' + sub + '")');
+  } else {
+    await page.click('.menu-drop:not(.hidden) .menu-row:has-text("' + rowText + '")');
+  }
+  await sleep(320);
+}
+
+/** 关掉还开着的菜单（点底栏，不会落笔） */
+async function dismissMenu(page) {
+  await page.mouse.click(1560, 1066);
+  await sleep(260);
+}
+
+/**
+ * 裸拖拽（不落笔）：摆尺子 / 拖尺子把手都用它。坐标同样是文档比例。
+ * 会分 8 步挪过去，让「拖动」这件事在录屏里看得见。
+ */
+async function rawDrag(page, from, to, stepMs) {
+  const box = await page.locator('#view').boundingBox();
+  const at = (fx, fy) => page.evaluate(([fx2, fy2]) => {
+    const e = window.ChaApp.engine;
+    return window.ChaApp.engine.docToScreen(fx2 * e.width, fy2 * e.height);
+  }, [fx, fy]);
+  const a = await at(from[0], from[1]);
+  await page.mouse.move(box.x + a.x, box.y + a.y);
+  await sleep(90);
+  await page.mouse.down();
+  for (let k = 1; k <= 8; k++) {
+    const s = await at(from[0] + (to[0] - from[0]) * k / 8, from[1] + (to[1] - from[1]) * k / 8);
+    await page.mouse.move(box.x + s.x, box.y + s.y);
+    await sleep(stepMs || 42);
+  }
+  await page.mouse.up();
+  await sleep(320);
+}
+
 /**
  * 把鼠标挪出画布（停到左栏上）。
  * 收尾用：不然画面定格的时候，画布上会挂着两个光标圈 ——
@@ -388,6 +431,122 @@ const C = {
     await sleep(1500);
     await finishShot(A);
     await finishShot(B);
+  }
+
+  /* ================= 镜头 4：SAI2 式尺子 ================= */
+  if (want(4)) {
+  console.log('\n[镜头 4] ruler');
+    const s = await newShot(browser, '04-ruler');
+    await createOnPage(s.page, '小茶', '尺子画的小镇');
+    // 先画条地平线，让画面不空
+    await pickBrush(s.page, 'hardRound');
+    await setSize(s.page, 44);
+    await setColor(s.page, C.hillBack);
+    await stroke(s.page, ART.hillBack, { stepMs: 46, after: 500 });
+
+    // 摆一把直线尺（尺子菜单 → 直线尺 → 在画布上拖一下）
+    await pickMenuItem(s.page, 'ruler', '直线尺');
+    await sleep(500);
+    await rawDrag(s.page, [0.14, 0.62], [0.86, 0.58], 46);
+    await sleep(600);
+
+    // 三条不同颜色 / 不同位置的笔画全部吸附到尺子上
+    await setSize(s.page, 20);
+    await setColor(s.page, '#33413C');
+    await stroke(s.page, [[0.18, 0.50], [0.82, 0.46]], { stepMs: 40, after: 260 });
+    await setColor(s.page, '#D9534F');
+    await stroke(s.page, [[0.24, 0.72], [0.78, 0.70]], { stepMs: 40, after: 260 });
+    await setColor(s.page, '#2F7DE1');
+    await stroke(s.page, [[0.30, 0.44], [0.72, 0.42]], { stepMs: 40, after: 500 });
+
+    // 抓住中央把手，把整把尺子往下挪 —— 笔画跟着新位置吸
+    await rawDrag(s.page, [0.50, 0.60], [0.50, 0.78], 52);
+    await sleep(400);
+    await setSize(s.page, 20);
+    await setColor(s.page, '#8A5D12');
+    await stroke(s.page, [[0.26, 0.60], [0.74, 0.58]], { stepMs: 40, after: 600 });
+
+    await pickMenuItem(s.page, 'ruler', '重置尺子');
+    await parkMouse(s.page);
+    await sleep(1400);
+    await finishShot(s);
+  }
+
+  /* ================= 镜头 5：深浅双主题（液态玻璃） ================= */
+  if (want(5)) {
+  console.log('\n[镜头 5] theme');
+    const s = await newShot(browser, '05-theme');
+    await createOnPage(s.page, '小茶', '一起画的小风景');
+    await pickBrush(s.page, 'hardRound');
+    await setSize(s.page, 54);
+    await setColor(s.page, C.hillBack);
+    await stroke(s.page, ART.hillBack, { stepMs: 44, after: 400 });
+    await setSize(s.page, 190);
+    await setColor(s.page, C.sun);
+    await stroke(s.page, ART.sun, { smooth: false, stepMs: 140, after: 600 });
+
+    // 菜单本身就是玻璃的：打开 → 悬停「界面主题」弹出子菜单 → 深色
+    await pickMenuItem(s.page, 'window', '界面主题', '深色');
+    await sleep(300);
+    await dismissMenu(s.page);
+    await sleep(2200);                      // 深色玻璃 UI 停一会儿，让观众看清
+    await parkMouse(s.page);
+    await sleep(900);
+    await finishShot(s);
+  }
+
+  /* ================= 镜头 6：手机浏览器加进来 ================= */
+  if (want(6)) {
+  console.log('\n[镜头 6] phone（电脑 + 手机同时录）');
+    const A = await newShot(browser, '06-host-a');
+    const room = await createOnPage(A.page, '小茶', '一起画的小风景');
+    await pickBrush(A.page, 'hardRound');
+    await setSize(A.page, 54);
+    await setColor(A.page, C.hillBack);
+    await stroke(A.page, ART.hillBack, { stepMs: 48, after: 400 });
+    await setColor(A.page, C.hillFront);
+    await setSize(A.page, 62);
+    await stroke(A.page, ART.hillFront, { stepMs: 46, after: 600 });
+
+    // B 是一台「手机」：竖屏 + 触屏模拟 —— 侧边滑条 / 抽屉面板都会出现
+    const pctx = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+      deviceScaleFactor: 2,
+      isMobile: true,
+      hasTouch: true,
+      recordVideo: { dir: OUT, size: { width: 390, height: 844 } }
+    });
+    const ppage = await pctx.newPage();
+    ppage.on('pageerror', e => console.log('  !! [phone] pageerror:', String(e).split('\n')[0]));
+    await ppage.goto(BASE + '/?room=' + encodeURIComponent(room), { waitUntil: 'domcontentloaded' });
+    await ppage.waitForFunction(() => window.ChaApp && window.ChaApp.state && window.ChaApp.state.joined, { timeout: 25000 });
+    await sleep(1000);
+    await ppage.evaluate(() => {
+      const m = document.getElementById('entryMask');
+      if (m) m.classList.add('hidden');
+      if (window.ChaApp.state.room) window.ChaApp.zoomFit();
+    });
+    await sleep(900);
+
+    // 手机上画太阳和云（左侧的 Procreate 式滑条全程可见）
+    await setSize(ppage, 190);
+    await setColor(ppage, C.sun);
+    await stroke(ppage, ART.sun, { smooth: false, stepMs: 150, after: 500 });
+    await pickBrush(ppage, 'airbrush');
+    await setSize(ppage, 120);
+    await setColor(ppage, C.cloud);
+    await stroke(ppage, ART.cloud1, { stepMs: 70, after: 400 });
+    await stroke(ppage, ART.cloud2, { stepMs: 70, after: 900 });
+    await sleep(1200);
+
+    await finishShot(A);
+    const pv = ppage.video();
+    await pctx.close();
+    const psrc = await pv.path();
+    const pdst = path.join(OUT, '06-phone-b.webm');
+    fs.copyFileSync(psrc, pdst);
+    try { fs.unlinkSync(psrc); } catch (e) { /* ignore */ }
+    log('06-phone-b.webm', (fs.statSync(pdst).size / 1024 / 1024).toFixed(1) + 'MB');
   }
 
   await browser.close();
