@@ -793,6 +793,14 @@
       </div>
     </div>
 
+    <!-- 手机（窄屏 + 粗指针）专用的 Procreate 式侧边滑条：画笔大小 / 不透明度。
+         默认 display:none，CSS 媒体查询放行；#stageEmpty 没收起来之前用兄弟选择器压住，
+         拖动直接驱动面板里的 #sizeRange / #opacityRange（dispatch 同一条 input 链路）。 -->
+    <div class="side-sliders" id="sideSliders">
+      <div class="ss-group"><input type="range" id="ssSize" min="1" max="300" value="6" aria-label="画笔大小" /></div>
+      <div class="ss-group"><input type="range" id="ssOpacity" min="2" max="100" value="100" aria-label="不透明度" /></div>
+    </div>
+
     <!-- 变换面板（对照 SAI2 的「变换」小窗） -->
     <div class="transform-panel hidden" id="transformPanel">
       <label class="tp-mode"><input type="radio" name="tpMode" value="free" checked /><span>自由变换</span></label>
@@ -964,6 +972,9 @@
         <label>服务器</label>
         <input type="text" id="serverInput" spellcheck="false" placeholder="ws://localhost:8437/ws" />
       </div>
+      <!-- 服务器现状一行：连的哪个服 / 连没连上。安卓默认连官方公网服，
+           这行让人随时知道自己在哪、连不上时该换地址还是先离线。 -->
+      <p class="hint srv-hint" id="serverHint"></p>
       <!-- ★ 2.0.10：别人发来的房间链接粘这里就能进 ——
            http(s) 分享链接 / chahui:// 应用链接 / 光一个房间号，三种都认。
            链接里带服务器地址时会先切过去再进房。 -->

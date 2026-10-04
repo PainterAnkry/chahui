@@ -2740,6 +2740,84 @@ body.panel-dragging * { cursor: grabbing !important; }
 
 /* ============================== 响应式 ============================== */
 
+/* ---- 入口页「服务器」输入框下面的现状行 ---- */
+.srv-hint {
+  margin: -3px 0 8px;
+  padding-left: 70px;
+  min-height: 1.2em;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.srv-hint b { color: var(--text); font-variant-numeric: tabular-nums; }
+.srv-hint .bad { color: var(--danger); }
+.srv-link {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: 11px;
+  color: var(--accent-ink);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+/* ---- 手机侧边滑条（Procreate 式）：默认没有，窄屏 + 粗指针才出现 ---- */
+.side-sliders { display: none; }
+@media (max-width: 660px) and (pointer: coarse) {
+  .side-sliders {
+    display: flex;
+    position: absolute;
+    left: 10px;
+    top: 64px;
+    z-index: 13;                 /* 画布之上、抽屉(17/18)与快捷栏(40)之下 */
+    flex-direction: row;
+    gap: 12px;
+  }
+}
+/* 还没进房（空态开着）时不出现 —— sliders 紧跟在 #stageEmpty 后面，兄弟选择器压住 */
+.stage-empty:not(.hidden) ~ .side-sliders { display: none !important; }
+.ss-group {
+  position: relative;
+  width: 36px;
+  height: 172px;
+  border-radius: 999px;
+  background: var(--glass-sheen), var(--glass);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow), var(--glass-inset);
+  overflow: hidden;
+}
+/* 竖着的滑条 = 横条旋转 -90°（WebKit 对 vertical writing-mode 的 range 支持参差，旋转最稳） */
+.ss-group input[type=range] {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 148px;
+  height: 16px;
+  margin: 0;
+  transform: translate(-50%, -50%) rotate(-90deg);
+  touch-action: none;
+}
+.ss-group input[type=range]::-webkit-slider-thumb {
+  width: 17px;
+  height: 17px;
+  margin-top: -6px;
+}
+
+/* 入口页在手机上改单列：房间列表 / 创建表单不再挤成两条 180px 的细柱，
+   行高加大到手指点得准（对照 Procreate / 画世界Pro 的全宽列表卡） */
+@media (max-width: 700px) {
+  .modal.entry .split { grid-template-columns: 1fr; gap: 14px; }
+  .modal.entry .modal-body { padding: 12px; }
+  .modal.entry .form-row { margin-bottom: 10px; }
+  .room-list { max-height: 34vh; }
+  .room-list .room-item { padding: 12px; }
+  .room-list .room-item .rn b { font-size: 13.5px; }
+  .room-list .room-item .room-del { width: 28px; height: 28px; line-height: 24px; }
+  .srv-hint { padding-left: 0; }
+}
+
 @media (max-width: 1280px) {
   :root { --left-w: 248px; --right-w: 268px; }
   #colorWheel { width: 148px; height: 148px; }

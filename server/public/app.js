@@ -3431,6 +3431,7 @@
       renderAvaPreview();
       renderLanBar();
       renderServerToggle();
+      renderServerHint();
       refreshServerState();
       if (net.isOpen()) net.send(P.C2S.ROOM_LIST, {});
       else toast('尚未连接到服务器，房间列表可能为空');
@@ -4172,6 +4173,74 @@
     if (!u) return;
     Cfg.remember(u);
     if (net.url !== u) net.connect(u);
+    renderServerHint();
+  }
+
+  /**
+   * 入口页「服务器」输入框下面那行现状：连的哪个服 / 连没连上。
+   * 安卓端默认连官方公网服，这行让人随时知道自己在哪；连不上时给出明确的
+   * 「换地址 / 切回官方服」出口，而不是只留一个空房间列表。
+   */
+  function renderServerHint() {
+    var el = $('#serverHint');
+    if (!el) return;
+    var url = net.url || '';
+    var bits = [];
+    if (net.isOpen()) {
+      bits.push('已连接 <b>' + esc(url) + '</b>' + (net.latency ? '（' + net.latency + 'ms）' : ''));
+    } else if (net.status === 'connecting') {
+      bits.push('正在连接 ' + esc(url || '…') + ' …');
+    } else if (url) {
+      bits.push('<span class="bad">连不上 ' + esc(url) + '</span>：检查地址和网络，或换一个服务器');
+    } else if (net.isLocal && net.isLocal()) {
+      bits.push('离线模式（自己单机画，房间存在本机）');
+    } else {
+      bits.push('尚未连接服务器');
+    }
+    var official = Cfg.normalize(Cfg.cfg.publicServer);
+    if (url && official && url !== official) {
+      bits.push('<button class="srv-link" id="btnOfficialSrv" type="button">切回官方服</button>');
+    }
+    el.innerHTML = bits.join(' · ');
+    var b = $('#btnOfficialSrv');
+    if (b) {
+      b.onclick = function () {
+        Cfg.remember(official);
+        var si = $('#serverInput');
+        if (si) si.value = official;
+        toast('正在连接官方服 ' + official);
+        net.connect(official);
+        renderServerHint();
+      };
+    }
+  }
+
+  /**
+   * 手机侧边滑条（Procreate / 画世界Pro 习惯：大小、不透明度常驻画布边上手边）。
+   * 拖它 = 拖面板里的 #sizeRange / #opacityRange —— dispatch 同一条 input 链路，
+   * 预览、快捷栏数字、引擎参数的既有联动原样生效；反向（面板里改动）也镜像回来。
+   * 只在「窄屏 + 粗指针」由 CSS 显示，桌面端永远不出现。
+   */
+  function initSideSliders() {
+    var ss = $('#ssSize'), so = $('#ssOpacity');
+    var pr = $('#sizeRange'), po = $('#opacityRange');
+    if (!ss || !so || !pr || !po) return;
+    function mirror() { ss.value = pr.value; so.value = po.value; }
+    ss.addEventListener('input', function () {
+      if (String(pr.value) !== String(this.value)) {
+        pr.value = this.value;
+        pr.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    });
+    so.addEventListener('input', function () {
+      if (String(po.value) !== String(this.value)) {
+        po.value = this.value;
+        po.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    });
+    pr.addEventListener('input', mirror);
+    po.addEventListener('input', mirror);
+    mirror();
   }
 
   /* ============================================================ 指针绘制 */
@@ -12951,6 +13020,7 @@
     bindPanelDnD();
     bindColumnResizers();
     bindQuickBar();
+    initSideSliders();      // 手机侧边滑条（大小 / 不透明度，镜像面板滑条）
     bindLayoutSettings();
     bindRefWindow();
     loadDimPrefs();
@@ -13011,6 +13081,7 @@
       // 在线 / 离线是「那一行按钮 + 菜单里那个勾」的输入，两处都得跟着重画。
       // status 事件只在**真的换档**时才会发（setStatus 里同值会提前 return），所以不贵。
       renderServerToggle();
+      renderServerHint();
       refreshMenuChecks();
     });
     net.on('open', function () {

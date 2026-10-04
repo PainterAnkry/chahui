@@ -780,6 +780,38 @@ npm run dist
 
 ---
 
+### 打包安卓 APK（Capacitor 壳）
+
+安卓端是同一份 `client/renderer` 套一层 Capacitor 壳（`client-android/`）：WebView 里托管渲染层，
+离线房间直接在 WebView 里跑服务端状态机（`tools/sync-android-core.js` 把 `server/src` 同步成
+`client/renderer/local-core/`，生成物不进 git）。
+
+```bash
+cd client-android
+npm install                # 首次
+npm run sync               # 同步 local-core + cap sync（把 client/renderer 拷进 android 资产）
+cd android && gradlew.bat assembleRelease
+```
+
+构建环境：**JDK 21**（Capacitor 7 的 android 模块源级别是 21；`~/.jdks/jdk21.0.12_12` 可直接用，
+设 `JAVA_HOME` 指过去即可）+ Android SDK（`android/local.properties` 写一行
+`sdk.dir=C:/Users/Ankry/AppData/Local/Android/Sdk`）。签名走仓库根的 `chahui.keystore`，
+口令在 `android/gradle.properties`。产物：`android/app/build/outputs/apk/release/app-release.apk`，
+按惯例复制到仓库根改名 `茶绘-安卓版-<版本>.apk`。
+
+**安卓端的联机行为**（和桌面端的差异）：
+
+- 没有「本机服务器 / cloudflared 隧道」——手机上跑不了 Node 和 cloudflared。
+- **公网联机 = 直接用房间服务器**：App 默认连官方公网服，创建的房间就开在这台服务器上，
+  「复制分享链接」给的就是公网地址，任何网络的朋友都能进；入口页的服务器输入框填
+  `ws://地址/ws` 可以**加入别人的服务器**，「服务器」输入框下方的状态行随时显示连的是哪个服、
+  连不上时给「切回官方服」一键恢复。
+- 房间开在服务器上而不是手机上：手机关掉 App 房间还在（按服务器的存活策略清理），比隧道更适合手机。
+- 移动端界面：入口页单列布局、房间卡片大点击区；画布左侧常驻 **Procreate 式大小 / 不透明度滑条**
+  （仅窄屏 + 触屏出现），面板抽屉、快捷条折叠等沿用既有响应式规则。
+
+---
+
 ## 操作
 
 | 操作 | 快捷键 |
