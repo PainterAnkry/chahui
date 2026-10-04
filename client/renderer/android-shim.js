@@ -386,7 +386,32 @@
     function WebSocketServer() { this.clients = new Set(); }
     WebSocketServer.prototype.on = function () { return this; };
     WebSocketServer.prototype.close = function () { };
-    return { WebSocketServer: WebSocketServer };
+    WebSocketServer.Server = WebSocketServer;      // tunnel.js 用 WebSocket.Server 的写法
+    return { WebSocketServer: WebSocketServer, Server: WebSocketServer };
+  }
+
+  function createCryptoStub() {
+    // 只覆盖 server/src/tunnel.js 在**加载期**用到的面（randomBytes 生成会话 id）。
+    // 隧道中继在 WebView 里只被加载、永远不会被触发（升级路由挂在 http 桩上）。
+    function randomBytes(n) {
+      var out = '';
+      var ABC = 'abcdefghijklmnopqrstuvwxyz0123456789';
+      for (var i = 0; i < (n || 0); i++) out += ABC[Math.floor(Math.random() * ABC.length)];
+      return { toString: function () { return out; } };
+    }
+    return { randomBytes: randomBytes };
+  }
+
+  function createUrlStub() {
+    // tunnel.js 在加载期只需要 url.parse 的 pathname 字段
+    return {
+      parse: function (u) {
+        var s = String(u || '');
+        var q = s.indexOf('?');
+        if (q >= 0) s = s.slice(0, q);
+        return { pathname: s, query: null };
+      }
+    };
   }
 
   /* ================================================================ 加载器
@@ -494,7 +519,9 @@
       path: parts.path,
       http: createHttpStub(),
       os: createOsStub(),
-      ws: createWsStub()
+      ws: createWsStub(),
+      crypto: createCryptoStub(),
+      url: createUrlStub()
     };
     var loader = createLoader({ path: parts.path, builtins: builtins });
     return {
@@ -520,6 +547,171 @@
       }
     };
   }
+
+  /* ================================================================ 公网隧道宿主（中继方案）
+   * 对照桌面端 client/tunnel.js 的职责：桌面 = cloudflared 快速隧道（起进程 + 临时域名），
+   * 安卓跑不了它 —— 走「中继服务器」：手机主动连一根 WebSocket 到中继的 /tunnel-host，
+   * 中继发回一个访客端点 ws://<中继>/tunnel/<id>，朋友的连接被中继**原样管道**到这台手机。
+   * 房间状态机仍然跑在本 WebView（core.boot() 那份），中继是哑管道 —— 也就是说：
+   * 任何一台 2.1.1+ 的茶绘服务端都是现成的中继，地址可换，不绑定谁。
+   * 与渲染层的接口和桌面端完全同名（startTunnel/stopTunnel/getTunnelStatus/onTunnelState
+   * + S.tunnel 的 phase 约定），所以入口页 / 房间信息的隧道 UI 零改动。
+   * 独立成工厂（core / LocalWs 由调用方注入）：Node 测试（tools/test-android-tunnel.js）
+   * 能在真中继上把它整条路径跑一遍。 */
+  function createTunnelHost(core, LocalWs) {
+    var tunnel = null;            // { ws, relayWsUrl, tunnelId, guests, phase }
+    var tunnelState = { phase: 'off', url: '', error: '' };
+    var tunnelSink = null;        // 渲染层 onTunnelState 登记的回调
+
+    function pushTunnelState(s) {
+      tunnelState = {
+        phase: s.phase || 'off',
+        url: s.url || '',
+        error: s.error || ''
+      };
+      if (tunnelSink) { try { tunnelSink(s); } catch (e) { /* 渲染层的问题不甩给隧道 */ } }
+    }
+
+    /** 中继的宿主端点：ws(s)://host[/ws] → ws(s)://host/tunnel-host（口径同 ChaConfig.normalize） */
+    function relayHostUrl(addr) {
+      var u = String(addr || '').trim();
+      if (!u || /^local:\/\//i.test(u)) return '';
+      if (!/^wss?:\/\//i.test(u)) u = 'ws://' + u;
+      u = u.replace(/\/+$/, '').replace(/\/ws$/i, '');
+      return u + '/tunnel-host';
+    }
+
+    function teardownTunnel(reason) {
+      if (tunnel) {
+        var guests = tunnel.guests || {};
+        Object.keys(guests).forEach(function (k) {
+          try { guests[k].close(); } catch (e) { /* 已经死了 */ }
+        });
+        try { tunnel.ws.close(); } catch (e) { /* 已经死了 */ }
+      }
+      tunnel = null;
+      pushTunnelState({
+        phase: 'off', url: '',
+        error: (reason && reason !== 'stop' && reason !== 'relay-closed') ? ('隧道断开：' + reason) : ''
+      });
+    }
+
+    function startTunnelHost(relayAddr) {
+      var cfgAddr = (typeof CHAHU_CONFIG_REF === 'function') ? CHAHU_CONFIG_REF() : '';
+      var relayWs = relayHostUrl(relayAddr || cfgAddr || '');
+      if (!relayWs) return Promise.resolve({ ok: false, error: '没有可用的中继服务器地址' });
+      if (tunnel && tunnel.ws && tunnel.ws.readyState === 1) return Promise.resolve({ ok: true, reused: true });
+      // 房间状态机先热好：访客一进来就要走 onClient
+      return core.boot().then(function () {
+        return new Promise(function (resolve) {
+          pushTunnelState({ phase: 'starting', url: '' });
+          var ws;
+          try { ws = new WebSocket(relayWs); } catch (e) {
+            pushTunnelState({ phase: 'off', error: e.message });
+            resolve({ ok: false, error: e.message });
+            return;
+          }
+          var settled = false;
+          var timer = setTimeout(function () {
+            if (settled) return;
+            settled = true;
+            try { ws.close(); } catch (e2) { /* ignore */ }
+            pushTunnelState({ phase: 'off', error: '中继没有响应（地址对吗？服务端更新到 2.1.1 了吗？）' });
+            resolve({ ok: false, error: '中继没有响应' });
+          }, 12000);
+
+          ws.onopen = function () {
+            try { ws.send(JSON.stringify({ t: 'TUNNEL_OPEN' })); } catch (e) { /* ignore */ }
+          };
+          ws.onmessage = function (ev) {
+            var m = null;
+            try { m = JSON.parse(ev.data); } catch (e) { return; }
+            if (!m || !m.t) return;
+            if (m.t === 'TUNNEL_OPENED') {
+              clearTimeout(timer);
+              settled = true;
+              tunnel = { ws: ws, relayWsUrl: relayWs, tunnelId: m.id, guests: {}, phase: 'on' };
+              var origin = relayWs.replace(/\/tunnel-host$/, '');
+              pushTunnelState({ phase: 'on', url: origin + '/tunnel/' + m.id });
+              resolve({ ok: true });
+              return;
+            }
+            if (m.t === 'TUNNEL_GUEST_OPEN') {
+              var g = m.g | 0;
+              // ⚠ 访客 open 之后立刻就会发 hello（net.js 同款行为），而本地客户端要等
+              // core.boot() 完成才挂上状态机 —— 这中间的帧必须**先缓冲**，挂上后按序补喂，
+              // 否则新访客的第一句话会被静默丢掉（真机必踩的竞态，测试抓的）。
+              var client = null;
+              var pending = [];
+              var slot = {
+                feed: function (d) {
+                  if (client) client.feed(d);
+                  else if (pending.length < 200) pending.push(d);
+                },
+                close: function () {
+                  if (client) client.close();
+                  client = null; pending = null;
+                }
+              };
+              core.boot().then(function (server) {
+                client = new LocalWs(function (raw) {
+                  // 房间服务器 → 访客：包成 TUNNEL_DATA 发回中继（原始帧在 d 字段里）
+                  if (tunnel && tunnel.ws && tunnel.ws.readyState === 1) {
+                    try { tunnel.ws.send(JSON.stringify({ t: 'TUNNEL_DATA', g: g, d: String(raw) })); } catch (e) { /* 中继正在死 */ }
+                  }
+                });
+                server.onClient(client);
+                if (pending) { pending.forEach(function (d) { client.feed(d); }); pending = null; }
+              }).catch(function () { /* boot 不了就没有这个访客 */ });
+              if (tunnel) tunnel.guests[g] = slot;
+              return;
+            }
+            if (m.t === 'TUNNEL_DATA') {
+              var c = tunnel && tunnel.guests[m.g | 0];
+              if (c) c.feed(m.d);          // 中继 → 房间服务器：原样喂进去（未挂载就先缓冲）
+              return;
+            }
+            if (m.t === 'TUNNEL_GUEST_CLOSE') {
+              var cc = tunnel && tunnel.guests[m.g | 0];
+              if (cc) { try { cc.close(); } catch (e2) { /* ignore */ } }
+              if (tunnel) delete tunnel.guests[m.g | 0];
+              return;
+            }
+            if (m.t === 'TUNNEL_CLOSED') teardownTunnel(m.reason || 'relay-closed');
+          };
+          ws.onclose = function () {
+            clearTimeout(timer);
+            if (!settled) {
+              settled = true;
+              pushTunnelState({ phase: 'off', error: '连不上中继服务器' });
+              resolve({ ok: false, error: '连不上中继服务器' });
+              return;
+            }
+            teardownTunnel('relay-disconnect');
+          };
+          ws.onerror = function () { /* onclose 会跟着来 */ };
+          tunnel = { ws: ws, relayWsUrl: relayWs, tunnelId: null, guests: {}, phase: 'starting' };
+        });
+      });
+    }
+
+    function stopTunnelHost() {
+      if (tunnel) teardownTunnel('stop');
+      return Promise.resolve({ ok: true });
+    }
+
+    return {
+      start: startTunnelHost,
+      stop: stopTunnelHost,
+      getStatus: function () {
+        return { phase: tunnelState.phase, url: tunnelState.url, error: tunnelState.error };
+      },
+      onState: function (fn) { tunnelSink = typeof fn === 'function' ? fn : null; }
+    };
+  }
+
+  /** 中继地址的缺省值：惰性取（激活时 CHAHU_CONFIG 还没进来的场合） */
+  var CHAHU_CONFIG_REF = null;
 
   /* ================================================================ 激活 */
 
@@ -551,6 +743,9 @@
         });
       }
     });
+
+    var tunnelHost = createTunnelHost(core, LocalWs);
+    CHAHU_CONFIG_REF = function () { return (global.CHAHU_CONFIG && global.CHAHU_CONFIG.publicServer) || ''; };
 
     /* ---------- 离线会话（与桌面端 client/main.js 的 localSession 同构） */
     var session = null;
@@ -650,6 +845,20 @@
       onLocalMessage: function (cb) {
         localSink = function (raw) { try { cb(raw); } catch (e) { /* ignore */ } };
         return function () { localSink = null; };
+      },
+
+      /* ---- 公网隧道（中继方案，职责对照桌面端 tunnel.js；见 createTunnelHost 头注）----
+       * startTunnel(relayAddr)：relayAddr 缺省时用 CHAHU_CONFIG.publicServer。
+       * 渲染层拿到 onTunnelState({phase:'on', url:'ws://中继/tunnel/<id>'}) 后，
+       * 分享链接拼成 http://<中继>/?room=<房间号>&server=<url 编码的访客端点>。 */
+      startTunnel: function (relayAddr) { return tunnelHost.start(relayAddr); },
+      stopTunnel: function () { return tunnelHost.stop(); },
+      getTunnelStatus: function () { return Promise.resolve(tunnelHost.getStatus()); },
+      onTunnelState: function (cb) {
+        tunnelHost.onState(cb);
+        // 登记完立刻把现状推一遍（桌面端 onTunnelState 只推增量，这里补一次全量）
+        try { cb(tunnelHost.getStatus()); } catch (e) { /* ignore */ }
+        return Promise.resolve({ ok: true });
       }
     };
 
@@ -672,10 +881,13 @@
       createHttpStub: createHttpStub,
       createOsStub: createOsStub,
       createWsStub: createWsStub,
+      createCryptoStub: createCryptoStub,
+      createUrlStub: createUrlStub,
       createLoader: createLoader,
       LocalWs: LocalWs,
       CORE_ENV: CORE_ENV,
-      assembleCore: assembleCore
+      assembleCore: assembleCore,
+      createTunnelHost: createTunnelHost
     };
   }
 })(typeof window !== 'undefined' ? window : globalThis);

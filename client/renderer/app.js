@@ -4199,7 +4199,7 @@
     }
     var official = Cfg.normalize(Cfg.cfg.publicServer);
     if (url && official && url !== official) {
-      bits.push('<button class="srv-link" id="btnOfficialSrv" type="button">切回官方服</button>');
+      bits.push('<button class="srv-link" id="btnOfficialSrv" type="button">切回默认服务器</button>');
     }
     el.innerHTML = bits.join(' · ');
     var b = $('#btnOfficialSrv');
@@ -4208,7 +4208,7 @@
         Cfg.remember(official);
         var si = $('#serverInput');
         if (si) si.value = official;
-        toast('正在连接官方服 ' + official);
+        toast('正在连接默认服务器 ' + official);
         net.connect(official);
         renderServerHint();
       };
@@ -6288,10 +6288,30 @@
    */
   function shareBase() {
     // 公网隧道优先：外网朋友也能打开，局域网地址只对同一 WiFi 的人有效
-    if (S.publicUrl) return S.publicUrl;
+    if (S.publicUrl) {
+      // 安卓隧道：publicUrl 是「访客 ws 端点」，分享链接用中继的 http 地址
+      //（?server= 参数由 roomShareLink 补上）
+      var m = /^(wss?):\/\/([^\/]+)/i.exec(S.publicUrl);
+      if (m) return (m[1] === 'wss' ? 'https://' : 'http://') + m[2];
+      return S.publicUrl;
+    }
     var lan = Cfg.lanBase ? Cfg.lanBase() : '';
     if (lan) return lan;
     return Cfg.httpBaseOf(net.url);
+  }
+
+  /**
+   * 房间分享链接。普通情形 = base + ?room=；安卓隧道开着时还要把
+   * 「访客 ws 端点」作为 server 参数带上 —— 朋友的客户端要连的是隧道的
+   * 那根管道，不是中继自己的房间服务。
+   */
+  function roomShareLink(base, roomId) {
+    if (!base) return roomId || '';
+    var link = base + '/?room=' + roomId;
+    if (S.tunnel && S.tunnel.phase === 'on' && /^wss?:\/\//i.test(S.publicUrl || '')) {
+      link += '&server=' + encodeURIComponent(S.publicUrl);
+    }
+    return link;
   }
 
   /**
@@ -6405,8 +6425,14 @@
     if (S.tunnel && S.tunnel.phase !== 'off') return;      // 正在下 / 正在起，别重复点
     S.tunnel = { phase: 'starting', url: '', error: '', percent: 0 };
     refreshTunnelUi();
-    toast('正在准备公网入口……第一次会先下载一个几十兆的组件', 'ok', 3600);
-    d.startTunnel().then(function (r) {
+    // 安卓走中继方案（不下载组件）；桌面端第一次要下 cloudflared
+    if (!(global.chahuDesktop && global.chahuDesktop.isAndroid)) {
+      toast('正在准备公网入口……第一次会先下载一个几十兆的组件', 'ok', 3600);
+    } else {
+      toast('正在向中继服务器申请公网入口……', 'ok', 3000);
+    }
+    // 中继地址：安卓缺省用配置里的默认服务器（任何 2.1.1+ 服务端都能当中继）
+    d.startTunnel(global.chahuDesktop && global.chahuDesktop.isAndroid ? '' : undefined).then(function (r) {
       if (r && r.ok) return;
       if (r && r.error) {
         S.tunnel = { phase: 'off', url: '', error: r.error, percent: 0 };
@@ -6447,6 +6473,15 @@
     var btn = $('#btnTunnelToggle');
     var st = $('#tunnelState');
     var t = S.tunnel || { phase: 'off' };
+    // 安卓的隧道服务的是**本机房间**（WebView 里的离线状态机）——
+    // 在线连着别的服务器时，当前房间不在本机，开隧道只会分享出一个空链接。
+    if (d.isAndroid && !net.isLocal() && t.phase !== 'on') {
+      btn.disabled = true;
+      btn.textContent = '开启公网联机';
+      st.className = 'srv-state off';
+      st.textContent = '先切到离线模式（房间里开隧道，别人才能进来）';
+      return;
+    }
     btn.disabled = false;
     if (S.publicUrl || t.phase === 'on') {
       btn.textContent = '关闭公网联机';
@@ -6508,7 +6543,7 @@
     //   ② chahui:// 应用链接：装了茶绘的机器点一下直接拉起客户端进房
     //      （安装时注册了这个协议，见 client/package.json 的 build.protocols）。
     //   两条一起复制，粘给谁都能用；本应用自己的「房间链接」输入框两种都认。
-    var text = base ? base + '/?room=' + S.room.id : S.room.id;
+    var text = roomShareLink(base, S.room.id);
     if (base) text += '\n茶绘应用链接：' + appRoomLink();
     var note = text + (S.room.hasPassword ? '（房间有密码，请向房主索取）' : '');
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -6533,7 +6568,7 @@
     // 没显式传链接就自己算一条（会优先用公网地址）
     if (text === undefined || text === null) {
       var b0 = shareBase();
-      text = b0 && r.id ? b0 + '/?room=' + r.id : (r.id || '');
+      text = r.id ? roomShareLink(b0, r.id) : (r.id || '');
     }
     $('#infoBody').innerHTML =
       '<div class="kv"><label>房间名</label><div>' + esc(r.name || '-') + '</div></div>' +
