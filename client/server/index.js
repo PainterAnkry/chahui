@@ -14,6 +14,9 @@ const { SkinGame, SKIN_PHASE, SKIN_PHASE_LABEL, ROLE_INFO, CAMP, CFG: SKIN_CFG }
 const PREFS = require('./game-prefs');
 const THEMES = require('./themes');
 const WORDS = require('./words');
+// 隧道中继：让手机 / 任何宿主把本机房间经这台服务器暴露到公网（见 tunnel.js 头注）。
+// ⚠ attach 必须发生在 createWss() 之前（upgrade 监听按注册顺序执行，见 tunnel.js）。
+const tunnelRelay = require('./tunnel');
 
 const PORT = parseInt(process.env.PORT || '8437', 10);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -271,6 +274,7 @@ const server = http.createServer((req, res) => {
     rooms: store.rooms.size,
     uptime: process.uptime(),
     pid: process.pid,
+    tunnels: tunnels.stats(),
     protocolVersion: P.PROTOCOL_VERSION
   });
   if (url.pathname === '/api/rooms') return json(res, 200, { rooms: store.list() });
@@ -344,6 +348,20 @@ const server = http.createServer((req, res) => {
     return res.end('茶绘服务端运行中（端口 ' + PORT + '）。桌面客户端可直接连接 /ws。');
   }
   serveStatic(req, res);
+});
+
+// 隧道中继（见 tunnel.js）：让手机 / 任何宿主把本机房间经这台服务器暴露到公网。
+// 它接管整个 upgrade 分发：/tunnel-host 与 /tunnel/<id> 归它，其余（/ws）回落到
+// 下面的 fallback —— 用当前 wss 完成 noServer 升级，非 /ws 路径照旧销毁。
+// `tunnels` 在任何请求到达前必然已初始化（请求只会在 listen 之后来）。
+const tunnels = tunnelRelay.attach(server, {
+  log: (...a) => logLimited('隧道', ...a),
+  fallbackUpgrade: (req, socket, head) => {
+    const pathname = (require('url').parse(req.url || '/').pathname || '/');
+    if (pathname !== '/ws' && pathname !== '/ws/') { socket.destroy(); return; }
+    if (!wss) { socket.destroy(); return; }
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+  }
 });
 
 /* ------------------------------------------------------------------ 自定义主题词库 API
@@ -455,11 +473,15 @@ let wss = null;
 const NO_CLIENTS = new Set();
 
 function createWss() {
+  // noServer：升级统一走隧道中继注册的那条 'upgrade' 路由（见 tunnel.js attach 的头注 ——
+  // 两个监听都会跑，/ws 不能再让 ws 自己那个 {server, path} 监听去抢）。
   const s = new WebSocketServer({
-    server,
-    path: '/ws',
+    noServer: true,
     maxPayload: 12 * 1024 * 1024,
-    perMessageDeflate: { threshold: 1024, zlibDeflateOptions: { level: 6 } }
+    // permessage-deflate：只压 >4KB 的大包（底图 / 蒙版广播），并用最快的 level 1。
+    // 旧配置 level 6 + 阈值 1KB：中等的笔迹 / 聊天包也要过一遍 zlib（占 libuv
+    // 线程池、每包几十毫秒级延迟），跟磁盘写盘抢线程 —— 房主端表现为「输入明显卡顿」。
+    perMessageDeflate: { threshold: 4096, zlibDeflateOptions: { level: 1 } }
   });
   s.on('connection', (ws, req) => onClient(ws, req));
   return s;

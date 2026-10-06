@@ -478,7 +478,10 @@ function createWss() {
   const s = new WebSocketServer({
     noServer: true,
     maxPayload: 12 * 1024 * 1024,
-    perMessageDeflate: { threshold: 1024, zlibDeflateOptions: { level: 6 } }
+    // permessage-deflate：只压 >4KB 的大包（底图 / 蒙版广播），并用最快的 level 1。
+    // 旧配置 level 6 + 阈值 1KB：中等的笔迹 / 聊天包也要过一遍 zlib（占 libuv
+    // 线程池、每包几十毫秒级延迟），跟磁盘写盘抢线程 —— 房主端表现为「输入明显卡顿」。
+    perMessageDeflate: { threshold: 4096, zlibDeflateOptions: { level: 1 } }
   });
   s.on('connection', (ws, req) => onClient(ws, req));
   return s;

@@ -4748,3 +4748,43 @@ body.chain-bar-on .toast-wrap { bottom: calc(var(--cb-h, 104px) + 60px); }
   .chain-canvas-layer .ccl-band { height: 32px; font-size: 12px; padding: 0 9px; }
 }
 
+
+/* ============================================================
+   PS 式「图标栏」收纳（body.left-rail-mode）
+   左栏缩成一条竖排的工具小图标：只留工具栏小节、藏掉小节标题与
+   文字标签，对照 PS 左侧的工具条。展开按钮留在顶栏（❯ / ❮）。
+   逻辑在 app.js 的 setLeftRailMode()，状态存 chahu.leftRailMode。
+   ============================================================ */
+body.left-rail-mode aside.panel.left,
+body.left-rail-mode .workspace > .panel.left { width: 56px !important; min-width: 56px !important; }
+body.left-rail-mode .panel.left .panel-head-bar .phb-label { display: none; }
+body.left-rail-mode .panel.left .panel-head-bar { padding: 4px; justify-content: center; gap: 4px; }
+/* 图标栏里只留「工具栏」小节本身；拖动提示条 / 其他小节全部隐藏 */
+body.left-rail-mode .panel.left .panel-handle,
+body.left-rail-mode .panel.left [data-section] > h4,
+body.left-rail-mode .panel.left [data-section="tools"] .tool-edit-bar,
+body.left-rail-mode .panel.left [data-section="tools"] .tool-hidden,
+body.left-rail-mode .panel.left [data-section]:not([data-section="tools"]) { display: none; }
+body.left-rail-mode .panel.left .panel-scroll { padding: 4px 3px; overflow-x: hidden; }
+/* 工具九宫格 → 单列图标：藏文字标签和键位角标，只留图标 */
+body.left-rail-mode .panel.left .tool-grid { grid-template-columns: 1fr; gap: 3px; }
+body.left-rail-mode .panel.left .tool-grid .tool { min-height: 0; padding: 6px 0; }
+body.left-rail-mode .panel.left .tool-grid .tool > span { display: none; }
+body.left-rail-mode .panel.left .tool-grid .tool svg { width: 22px; height: 22px; }
+
+/* ============================================================
+   触屏（安卓 / 平板）：加大触控目标 —— 手指不是鼠标，
+   44px 上下是触屏可用性的常见下限。布局不变，只放大命中区。
+   ============================================================ */
+@media (pointer: coarse) {
+  .tool-grid .tool { min-height: 54px; }
+  .tool-grid .tool svg { width: 22px; height: 22px; }
+  input[type="range"] { height: 26px; }
+  input[type="range"]::-webkit-slider-thumb { width: 22px; height: 22px; }
+  .qb-btn { min-width: 34px; min-height: 34px; }
+  .mini { min-height: 30px; }
+}
+
+/* 缩放工具（PS 放大镜）的系统光标：默认放大，按住 Alt / 缩小工具为缩小 */
+.stage.zoom-tool { cursor: zoom-in; }
+.stage.zoom-tool.zoom-out { cursor: zoom-out; }

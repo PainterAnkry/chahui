@@ -176,6 +176,9 @@
     session: null,
     pan: null,
     spaceDown: false,
+    // Shift 直线约束的锚点：按住 Shift 画笔会从锚点拉一条 45° 吸附的直线（PS 习惯）。
+    // 落笔时按住 Shift → 锚点 = 起笔点；画到一半按住 → 锚点 = 当前笔尖（见 bindKeys）。
+    lineAnchor: null,
     altDown: false,
     cursors: new Map(),
     historyQueue: [],
@@ -869,9 +872,13 @@
     bucket: 'G', gradient: 'N', line: 'L', rect: 'R', ellipse: 'O',
     wand: 'W', picker: 'Alt',
     select: '', selectErase: '',   // 选区类不占字母键：Alt 要留给「减选」
-    // 抓手也不占字母键：H 已经给了「视图 → 左右翻转视图」，
-    // 临时抓手仍然是按住空格 + 左键（或中键），这一条不必再抢一个键。
-    hand: ''
+    // 抓手的快捷键是空格：按住空格 + 拖 = 临时抓手（PS 习惯），松开回到原来的工具。
+    // 空格由 bindKeys 单独处理（S.spaceDown），不会走到「按字母选工具」那条路，
+    // 所以这里标 'Space' 只是为了在格子角标 / 提示里说出来，不参与按键匹配。
+    // H 已经给了「视图 → 左右翻转视图」，不必再抢一个字母键。
+    hand: 'Space',
+    // 缩放工具不占键：+ / - 已经是全局的缩放快捷键（见 bindKeys），别在这里撞车
+    zoomIn: '', zoomOut: ''
   };
   var ITEM_KEYS = null;
   var ITEM_KEYS_STORE = 'chahu.itemKeys';
@@ -909,6 +916,7 @@
   /** 格子角上的键位角标：字母/Alt 优先，没设键的笔刷显示槽位号 1-9 */
   function itemKeyBadge(it, list, isBrushList) {
     var k = itemKey(it.id);
+    if (k === 'Space') return '␣';   // 空格键的角标画个「空格」符号，两个字放不下
     if (k) return k;
     if (isBrushList) {
       var i = list.indexOf(it);
@@ -932,7 +940,7 @@
       b.className = 'tool' + (it.id === S.brushId ? ' active' : '');
       b.dataset.tool = it.tool;
       b.dataset.item = it.id;
-      b.title = it.name + (keyBadge ? '（快捷键 ' + keyBadge + '）' : '') + '｜' + it.tip;
+      b.title = it.name + (keyBadge ? '（快捷键 ' + (keyBadge === '␣' ? '空格' : keyBadge) + '）' : '') + '｜' + it.tip;
       b.innerHTML = Brushes.iconSvg(it.icon || it.id) + '<span>' + esc(it.name) + '</span>' +
         (keyBadge ? '<span class="tkey">' + esc(keyBadge) + '</span>' : '') +
         (S.toolEdit
@@ -1329,6 +1337,9 @@
 
   var STROKE_TOOLS = ['brush', 'eraser', 'blur', 'smudge', 'line', 'rect', 'ellipse', 'select', 'selectErase', 'gradient'];
 
+  /** 视图类工具：不改画面，不该出现「笔刷环」光标（抓手 / 吸管 / 缩放） */
+  function isViewTool(t) { return t === 'picker' || t === 'hand' || t === 'zoomIn' || t === 'zoomOut'; }
+
   var PARAM_TOOLS = {
     sizeRange: ['brush', 'eraser', 'blur', 'smudge', 'line', 'rect', 'ellipse', 'select', 'selectErase'],
     opacityRange: ['brush', 'eraser', 'blur', 'smudge', 'fill', 'gradient', 'line', 'rect', 'ellipse'],
@@ -1488,8 +1499,8 @@
       b.classList.toggle('active', b.dataset.item === S.brushId);
     });
     // drawing = 把系统光标藏掉、只留我们画的笔刷光标。
-    // 吸管与抓手都不是「笔」：前者用自己的吸管图标，后者要的是系统那只手。
-    $('#stage').classList.toggle('drawing', S.tool !== 'picker' && S.tool !== 'hand');
+    // 吸管 / 抓手 / 缩放都不是「笔」：前两者有自己的图标，缩放要的是系统十字。
+    $('#stage').classList.toggle('drawing', !isViewTool(S.tool));
     document.body.style.cursor = '';
     updateBrushCursor();
   }
@@ -4297,13 +4308,18 @@
     var el = bcNode();
     if (!el) return;
     // 变换模式下不显示画笔光标（那时指针在拖变换框）。
-    // 抓手工具也不显示：它不是「笔」，圈一个笔刷大小的环只会让人以为点下去会画。
+    // 抓手 / 缩放工具也不显示：不是「笔」，圈一个笔刷大小的环只会让人误会。
     // 但按住 Alt 时例外 —— 那时真的会取色，光标必须跟着变成吸管（见 altPicking）。
     var handTool = S.tool === 'hand';
+    var viewTool = handTool || S.tool === 'zoomIn' || S.tool === 'zoomOut';
     var hide = !S.pointer.inside || !!S.pan || !S.joined || !!engine.transform ||
-      (handTool && !altPicking());
+      (viewTool && !altPicking());
     // 抓手态把系统光标换成张开的手（拖动中由 .stage.panning 换成抓紧的手）
     $('#stage').classList.toggle('hand-tool', handTool);
+    // 缩放工具给个放大镜光标（方向随 Alt 翻转）
+    var zoomOutNow = S.tool === 'zoomOut' ? !S.altDown : (S.tool === 'zoomIn' && S.altDown);
+    $('#stage').classList.toggle('zoom-tool', S.tool === 'zoomIn' || S.tool === 'zoomOut');
+    $('#stage').classList.toggle('zoom-out', zoomOutNow);
     var drop = !hide && altPicking();
     el.classList.toggle('hidden', hide);
     // 吸管状态下要把**系统光标**也藏掉，否则会跟吸管图标叠成两个指针。
@@ -4637,15 +4653,35 @@
     var sp = stagePoint(ce);
     var dp = engine.screenToDoc(sp.x, sp.y);
     if (dp.x < -2 || dp.y < -2 || dp.x > engine.width + 2 || dp.y > engine.height + 2) return;
-    moveLocal(dp.x, dp.y, ce.pressure, ce.pointerType || 'pen');
+    moveLocal(dp.x, dp.y, ce.pressure, ce.pointerType || 'pen', !!ce.shiftKey);
   }
 
-  function moveLocal(px, py, pressure, pointerType) {
+  /**
+   * Shift 直线吸附：把 p 投影到「过锚点、按 45° 一档吸附」的方向上。
+   * 和 PS 一致：水平 / 垂直 / 45°，取离当前运笔方向最近的那一档。
+   */
+  function snapShiftPoint(ax, ay, px, py) {
+    var dx = px - ax, dy = py - ay;
+    var len = Math.hypot(dx, dy);
+    if (len < 0.001) return { x: ax, y: ay };
+    var step = Math.PI / 4;
+    var a = Math.round(Math.atan2(dy, dx) / step) * step;
+    return { x: ax + Math.cos(a) * len, y: ay + Math.sin(a) * len };
+  }
+
+  function moveLocal(px, py, pressure, pointerType, shiftKey) {
     if (!S.session) return;
     var usePressure = pressureUsable(pointerType);
     // 移动阶段压力是可信的（真鼠标这里恒定 0.5，会被 normPressure 退回默认值）
     var curP = usePressure ? normPressure({ pressure: pressure }, S.lastPressure) : 0.5;
     if (usePressure && pressure > 0 && pressure < 1) S.lastPressure = pressure;
+    // 按住 Shift：整笔约束成过锚点的 45° 吸附直线。约束要落在 stabilizer **之前**，
+    // 否则平滑器会把直线拖弯；同时把平滑点直接钉到约束结果上，消除拖影。
+    if (shiftKey && S.lineAnchor && !S.session.local) {
+      var snapped = snapShiftPoint(S.lineAnchor.x, S.lineAnchor.y, px, py);
+      px = snapped.x; py = snapped.y;
+      smooth.x = px; smooth.y = py;
+    }
     var x = px, y = py;
     if (S.stabilize > 0) {
       var k = 1 - Math.min(0.88, S.stabilize * 0.058);
@@ -4694,6 +4730,7 @@
     var local = S.session.local;
     var tool = S.session.tool;
     S.session = null;
+    S.lineAnchor = null;   // Shift 直线约束随落笔结束
     engine.clearOverlay();
     // 选区笔 / 选区擦是本机私有状态：既不上传，也不进历史，更不该占撤销栈。
     // 以前这里无条件走网络 + 压撤销栈，后果是
@@ -4847,6 +4884,30 @@
       if (S.altDown !== !!e.altKey) { S.altDown = !!e.altKey; updateBrushCursor(); }
       var dp = engine.screenToDoc(sp.x, sp.y);
 
+      // 触屏：手指落在画布外的透明区域 → 直接拖动画布（Procreate 的习惯：
+      // 画布外没有内容，按住拖就是挪视图）。只对手指生效，鼠标行为不变，
+      // 免得桌面端「点画布外」的手感被误改。
+      if (e.pointerType === 'touch' &&
+          (dp.x < -2 || dp.y < -2 || dp.x > engine.width + 2 || dp.y > engine.height + 2)) {
+        e.preventDefault();
+        S.pan = { x: e.clientX, y: e.clientY };
+        $('#stage').classList.add('panning');
+        view.setPointerCapture(e.pointerId);
+        return;
+      }
+
+      // 缩放工具（PS 的放大镜）：点哪缩哪 —— 以点击处为中心放大 / 缩小。
+      // 按住 Alt 反向（放大工具变缩小、反之亦然）；右键同样反向（PS 习惯）。
+      if (S.tool === 'zoomIn' || S.tool === 'zoomOut') {
+        e.preventDefault();
+        var zsp = stagePoint(e);
+        var zoomDir = ((S.tool === 'zoomIn') !== (!!e.altKey || e.button === 2)) ? 1.25 : 1 / 1.25;
+        engine.setZoom(engine.scale * zoomDir, zsp.x, zsp.y);
+        S.pointer.sx = zsp.x; S.pointer.sy = zsp.y;
+        updateBrushCursor();
+        return;
+      }
+
       // Alt 临时吸管（SAI 习惯）。
       // 但选区工具下 Alt 是「减选」，不能被吸管抢走 —— 否则 Alt 减选永远用不了。
       if (S.tool === 'picker' || (e.altKey && !isSelectToolId(S.tool))) {
@@ -4862,6 +4923,11 @@
       view.setPointerCapture(e.pointerId);
       e.preventDefault();
       notePointerSample(e);            // 攒一帧样本，供「这块鼠标是不是板子」判断
+      // 落笔时就按住 Shift：整笔从起笔点约束成 45° 吸附直线（PS 习惯）。
+      // 两点类工具（直线/矩形/椭圆）有自己的 Shift 吸附；选区类的 Shift 是「加选」，都不抢。
+      S.lineAnchor = (e.shiftKey && !isSelectToolId(S.tool) && !isTwoPointTool(S.tool) &&
+        S.tool !== 'fill' && S.tool !== 'wand' && S.tool !== 'picker')
+        ? { x: dp.x, y: dp.y } : null;
       beginLocal(dp.x, dp.y, e.pressure, e.pointerType);
     });
 
@@ -4947,7 +5013,7 @@
           if (!S.session.pending.length) S.session.pending.push(tp);
           else S.session.pending[0] = tp;
         } else {
-          moveLocal(dp.x, dp.y, e.pressure, e.pointerType);
+          moveLocal(dp.x, dp.y, e.pressure, e.pointerType, e.shiftKey);
         }
       }
     });
@@ -5025,6 +5091,9 @@
     if (!stage || !global.PointerEvent) return;
     var pts = new Map();
     S.touchPts = pts;
+    // 本轮多指手势的元信息：给「双指轻点撤销 / 三指轻点重做」用
+    //（Procreate 习惯：轻点 = 手势短 + 没怎么挪 + 手指全部抬起）
+    var gest = null;
 
     function snapshot() {
       var it = pts.values();
@@ -5033,7 +5102,8 @@
       return {
         midX: (a.x + b.x) / 2,
         midY: (a.y + b.y) / 2,
-        dist: Math.hypot(a.x - b.x, a.y - b.y)
+        dist: Math.hypot(a.x - b.x, a.y - b.y),
+        ang: Math.atan2(b.y - a.y, b.x - a.x)
       };
     }
 
@@ -5041,7 +5111,9 @@
       if (e.pointerType !== 'touch') return;
       // 手掌误触：不进手势集合。捕获阶段吞掉，落笔那条路也走不到（双保险见 view 的 pointerdown）
       if (isPalmTouch(e)) { e.preventDefault(); e.stopPropagation(); return; }
-      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY });
+      if (!gest) gest = { t0: Date.now(), maxPts: 1, moved: 0 };
+      gest.maxPts = Math.max(gest.maxPts, pts.size);
       if (pts.size < 2) return;          // 第一根手指照常画画（不拦）
       e.preventDefault();
       e.stopPropagation();               // 第二根手指不落笔
@@ -5053,15 +5125,26 @@
 
     stage.addEventListener('pointermove', function (e) {
       if (e.pointerType !== 'touch' || !pts.has(e.pointerId)) return;
-      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      var rec = pts.get(e.pointerId);
+      if (gest) {
+        gest.moved = Math.max(gest.moved, Math.hypot(e.clientX - rec.sx, e.clientY - rec.sy));
+      }
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: rec.sx, sy: rec.sy });
       if (pts.size < 2 || !S.pinch) return;
       e.preventDefault();
       e.stopPropagation();
       var g = snapshot();
       if (!g) return;
       engine.panBy(g.midX - S.pinch.midX, g.midY - S.pinch.midY);
-      // 两指离得太近时比值会抖成噪声，先平移稳一下再缩放
-      if (S.pinch.dist > 24) engine.setZoom(engine.scale * (g.dist / S.pinch.dist), g.midX, g.midY);
+      // 两指离得太近时比值 / 角度都会抖成噪声，先平移稳一下再缩放 / 旋转
+      if (S.pinch.dist > 24) {
+        engine.setZoom(engine.scale * (g.dist / S.pinch.dist), g.midX, g.midY);
+        // 双指旋转（Procreate 同款）：两指连线跟着转，画布视图跟着转
+        var dAng = (g.ang - S.pinch.ang) * 180 / Math.PI;
+        if (dAng > 180) dAng -= 360;
+        if (dAng < -180) dAng += 360;
+        if (Math.abs(dAng) > 0.05) engine.rotateBy(dAng);
+      }
       S.pinch = g;
       updateBrushCursor();     // setZoom 会 emit viewport，缩放输入框由那边刷新
     }, true);
@@ -5069,6 +5152,23 @@
     function release(e) {
       if (e.pointerType !== 'touch') return;
       pts.delete(e.pointerId);
+      // 双指轻点 = 撤销、三指轻点 = 重做（Procreate 习惯）。
+      // 只认「真的轻点」：手势短（<300ms）、没挪动（<14px）、手指全部抬起。
+      // 挪动过的（平移 / 缩放 / 旋转）不算，画完一笔接个双指轻点就能撤，很顺手。
+      if (gest && pts.size === 0 && gest.maxPts >= 2 &&
+          Date.now() - gest.t0 < 300 && gest.moved < 14) {
+        // undo/redo 自己会对「没东西可撤」弹提示，这里只在真的撤/重做了才补手势来源
+        if (gest.maxPts === 2) {
+          var un = S.opUndo.length;
+          undo();
+          if (S.opUndo.length < un) toast('已撤销（双指轻点）');
+        } else if (gest.maxPts >= 3) {
+          var rn = S.opRedo.length;
+          redo();
+          if (S.opRedo.length < rn) toast('已重做（三指轻点）');
+        }
+      }
+      if (pts.size === 0) gest = null;
       if (pts.size >= 2) return;
       if (S.pinch) { S.pinch = null; stage.classList.remove('gesturing'); }
     }
@@ -7175,6 +7275,11 @@
         if (!typing) { S.spaceDown = true; $('#stage').classList.add('panning'); e.preventDefault(); }
         return;
       }
+      // 画到一半按住 Shift：从当前笔尖继续拉一条 45° 吸附直线（锚点 = 笔尖位置）。
+      // 落笔前就按住的那条路在 view 的 pointerdown 里（锚点 = 起笔点）。
+      if (e.key === 'Shift' && !typing && S.session && !S.session.local && !S.lineAnchor) {
+        S.lineAnchor = { x: S.session.last[0], y: S.session.last[1] };
+      }
       if (typing) return;
       // 右键弹窗的「捕获新快捷键」模式：把下一个字母 / Alt 吃下来，别的键都不响应
       if (ctxCapturing && ctxItem) {
@@ -7273,6 +7378,8 @@
         S.spaceDown = false;
         if (!S.pan) $('#stage').classList.remove('panning');
       }
+      // 松开 Shift = 直线约束结束，回到自由运笔（从当前位置继续）
+      if (e.key === 'Shift') S.lineAnchor = null;
     });
 
     /* ---- Alt = 临时吸管，光标要跟着变成吸管 ----
@@ -13074,6 +13181,7 @@
     $('#sideRail').addEventListener('click', function () { setSideCollapsed(false); });
     // 左栏同理：顶部 « 收起、左边窄条拉回（菜单项和 Tab 键也走这里）
     var blc = $('#btnLeftCollapse'); if (blc) blc.addEventListener('click', function () { setLeftCollapsed(true); });
+    var brm = $('#btnLeftRailMode'); if (brm) brm.addEventListener('click', function () { setLeftRailMode(!S.leftRailMode); });
     var lr = $('#leftRail'); if (lr) lr.addEventListener('click', function () { setLeftCollapsed(false); });
     // 窄屏抽屉：点暗色遮罩把抽屉都关掉
     var db = $('#drawerBack');
@@ -13825,6 +13933,35 @@
     engine.resize();
   }
 
+  /**
+   * PS 式「图标栏」收纳：面板缩成一条竖排的工具小图标（对照 PS 左侧工具条）。
+   * 只留工具栏小节、隐藏文字标签，一列图标 + 顶部展开按钮；
+   * 再点一次（或 Tab / «）回到完整面板。窄屏抽屉模式下不生效。
+   * 记忆在 localStorage['chahu.leftRailMode']。
+   */
+  function setLeftRailMode(on, opts) {
+    var el = document.querySelector('aside.panel.left');
+    if (!el) return;
+    S.leftRailMode = !!on;
+    document.body.classList.toggle('left-rail-mode', !!on);
+    // 工具栏小节若被拖去了右栏，图标栏里就什么都没有了 —— 进图标栏前先请回左栏
+    var toolsSec = document.querySelector('[data-section="tools"]');
+    if (on && toolsSec && toolsSec.closest('#rightPanelScroll')) {
+      $('#leftPanelScroll').appendChild(toolsSec);
+      savePanelOrder();
+    }
+    var btn = $('#btnLeftRailMode');
+    if (btn) {
+      btn.textContent = on ? '❮' : '❯';
+      btn.title = on ? '展开操作面板' : '收纳成图标栏（只留一列工具小图标）';
+    }
+    if (on && S.leftPanelOpen === false) setLeftCollapsed(false, { persist: false });
+    if (!opts || opts.persist !== false) {
+      try { localStorage.setItem('chahu.leftRailMode', on ? '1' : '0'); } catch (e) { /* ignore */ }
+    }
+    engine.resize();
+  }
+
   function toggleLeftPanel(opts) {
     setLeftCollapsed(S.leftPanelOpen, opts);   // 现在开着 → 收；关着 → 开
     if (!opts || !opts.silent) toast(S.leftPanelOpen ? '已展开操作面板' : '已收起操作面板');
@@ -13853,9 +13990,12 @@
       setLeftCollapsed(true, { persist: false });
       setSideCollapsed(true, { persist: false });
       setQuickBarCollapsed(true, false);
+      // 图标栏是宽屏玩法（对照 PS 的桌面布局），窄屏抽屉里没有意义
+      setLeftRailMode(false, { persist: false });
     } else {
       setLeftCollapsed(lsGet('chahu.leftOpen', '1') === '0', { persist: false });
       setSideCollapsed(lsGet('chahu.side', '1') === '0', { persist: false });
+      setLeftRailMode(lsGet('chahu.leftRailMode', '0') === '1', { persist: false });
     }
     syncDrawerBack();
     engine.resize();

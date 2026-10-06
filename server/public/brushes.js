@@ -68,6 +68,9 @@
     picker: '<path d="m4 20 1-3.5L15.5 6l2.5 2.5L7.5 19z"/><path d="m15 3.5 5.5 5.5"/><path d="m13.5 5 5.5 5.5"/>',
     // 抓手：一只张开的手（拖动画面 / 画布）
     hand: '<path d="M9 11.5V5.6a1.6 1.6 0 0 1 3.2 0v5.1"/><path d="M12.2 10.7V4.6a1.6 1.6 0 0 1 3.2 0v6.6"/><path d="M15.4 11.2V6.6a1.6 1.6 0 0 1 3.2 0v7.6c0 3.6-2.4 6.2-6 6.2-2 0-3.4-.6-4.5-1.9l-3.4-4a1.5 1.5 0 0 1 2.2-2l2.1 2.1"/>',
+    // 放大镜：PS 的缩放工具。镜身 + 柄，镜内 ± 号区分放大 / 缩小
+    zoomIn: '<circle cx="10.5" cy="10.5" r="6.2"/><path d="M15.2 15.2 20.5 20.5"/><path d="M10.5 7.8v5.4M7.8 10.5h5.4"/>',
+    zoomOut: '<circle cx="10.5" cy="10.5" r="6.2"/><path d="M15.2 15.2 20.5 20.5"/><path d="M7.8 10.5h5.4"/>',
     marquee: '<path stroke-dasharray="3 2.2" d="M4.5 4.5h15v15h-15z"/>',
     lasso: '<path stroke-dasharray="3 2.2" d="M12 4.6c4.3 0 7.6 2.2 7.6 5s-3.3 5-7.6 5-7.6-2.2-7.6-5 3.3-5 7.6-5z"/><path d="M8.4 14.2c-.9 1.5-.4 3 .9 3.6"/><circle cx="9.2" cy="19.4" r="1.6"/>',
     wand: '<path d="m4.4 19.6 9.6-9.6 1.8 1.8-9.6 9.6z"/><path d="M17.4 3.2l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z"/><path d="M21 12.4l.5 1.2 1.2.5-1.2.5-.5 1.2-.5-1.2-1.2-.5 1.2-.5z"/>'
@@ -271,7 +274,11 @@
     { id: 'picker', name: '吸管', tool: 'picker', icon: 'picker', type: 'util', tip: '取画布上的颜色（按住 Alt 可临时取色）', params: params({ brush: 'picker' }) },
     // 抓手：不改画面，只挪视图。鼠标上等价于「空格 + 左键 / 中键拖动」；
     // 手机 / 平板网页版上就是「单指拖画布」——以前只能靠双指，很多人根本不知道。
-    { id: 'hand', name: '抓手', tool: 'hand', icon: 'hand', type: 'util', tip: '拖动画布（鼠标：空格 + 左键 / 中键；触屏：单指拖）', params: params({ brush: 'hand' }) }
+    { id: 'hand', name: '抓手', tool: 'hand', icon: 'hand', type: 'util', tip: '拖动画布（鼠标：空格 + 左键 / 中键；触屏：单指拖）', params: params({ brush: 'hand' }) },
+    // 缩放工具（PS 的放大镜）：点画布以点击处为中心放大 / 缩小，Alt 反向。
+    // 和抓手一样是「视图类」工具：不改画面、不参与笔刷参数。
+    { id: 'zoomIn', name: '放大', tool: 'zoomIn', icon: 'zoomIn', type: 'util', tip: '点画布放大视图，按住 Alt 变为缩小（快捷键 +）', params: params({ brush: 'hand' }) },
+    { id: 'zoomOut', name: '缩小', tool: 'zoomOut', icon: 'zoomOut', type: 'util', tip: '点画布缩小视图，按住 Alt 变为放大（快捷键 -）', params: params({ brush: 'hand' }) }
   ];
 
   var BY_ID = {};
@@ -345,7 +352,7 @@
     fill: '油漆桶', gradient: '渐变', select: '选区笔', selectErase: '选区擦',
     marquee: '框选', lasso: '套索', wand: '魔棒',
     line: '直线', rect: '矩形', ellipse: '椭圆', picker: '吸管', text: '文字', liquify: '液化',
-    hand: '抓手'
+    hand: '抓手', zoomIn: '放大', zoomOut: '缩小'
   };
 
   // 纸张质感（颗粒 / 纸纹）

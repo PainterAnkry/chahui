@@ -1,6 +1,6 @@
 {
   "name": "chahui-android",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "private": true,
   "description": "茶绘安卓壳（Capacitor）：托管 client/renderer 并提供原生能力桥接",
   "scripts": {

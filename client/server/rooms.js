@@ -9,6 +9,10 @@ const MAX_STROKES_PER_ROOM = 60000;
 const MAX_CHAT = 300;
 const MAX_ROOM_STROKE_BYTES = 24 * 1024 * 1024; // 房间历史（不含底图）序列化上限
 const ROOM_SCHEMA = 3;                          // 存档结构版本：旧版本存档在启动时清理
+/** 距最后一次活动多久才存盘（trailing 防抖） */
+const SAVE_DEBOUNCE_MS = 1500;
+/** 持续忙碌的房间最多隔这么久强制存一次（断电最多丢这么多的进度） */
+const MAX_SAVE_DELAY_MS = 8000;
 
 /**
  * 待删目录的中转站（rooms/.trash）。
@@ -872,37 +876,74 @@ class RoomStore {
 
   markDirty(room) {
     room.dirty = true;
-    if (this.saveTimers.has(room.id)) return;
+    // trailing 防抖：每次有新活动就重置计时器，安静 1.5 秒后才存。
+    // 旧逻辑是「第一次 markDirty 后固定 1.5 秒必存」：多人连续作画时
+    // 每隔 1.5 秒就是一次全量同步存盘（整份笔迹 JSON.stringify + 各层
+    // 底图 base64 解码写盘），全部压在主进程事件循环上 —— 桌面端把服务端
+    // 嵌在主进程里跑，主进程一停，房主自己的界面立刻跟着卡。
+    // 为防「一直很忙的房间永远存不了盘」，最多隔 MAX_SAVE_DELAY_MS 强制存一次。
+    const now = Date.now();
+    if (!room._firstDirtyAt) room._firstDirtyAt = now;
+    const existing = this.saveTimers.get(room.id);
+    if (existing) clearTimeout(existing);
+    const forced = now - room._firstDirtyAt >= MAX_SAVE_DELAY_MS;
+    if (forced) room._firstDirtyAt = 0;
     const t = setTimeout(() => {
       this.saveTimers.delete(room.id);
-      try { this.save(room); } catch (e) { console.error('[store] save failed', room.id, e.message); }
-    }, 1500);
+      this.saveAsync(room).catch((e) => console.error('[store] save failed', room.id, e && e.message));
+    }, forced ? 0 : SAVE_DEBOUNCE_MS);
     t.unref && t.unref();
     this.saveTimers.set(room.id, t);
   }
 
-  save(room) {
-    if (!room.dirty || room.dropped || !this.rooms.has(room.id)) return;
+  /**
+   * 拼存档 payload + 待写文件清单（save / saveAsync 共用）。
+   *
+   * 底图 / 蒙版 PNG 按 seq 水位增量写：距上次写盘后 baseSeq 没动过的层直接跳过。
+   * 旧代码每次存盘都把**每一层**底图重新 base64 解码 + 写文件 —— 一个带几张
+   * 底图的房间，每次存盘就是几 MB 的同步 IO，忙时每 1.5 秒来一遍。
+   */
+  buildSave(room) {
     const dir = this.roomDir(room.id);
-    fs.mkdirSync(dir, { recursive: true });
+    // 「本进程已写盘」水位表：进程启动后第一次存盘必然全量（表为空），
+    // 之后没动过的层不再重写。写盘失败不记水位，下次照旧重试。
+    const savedBase = room._savedBase || (room._savedBase = new Map());
+    const savedMask = room._savedMask || (room._savedMask = new Map());
+    // 图层删掉了就把水位记录摘掉：万一之后又有同 id 的新层，也能正确全量重写
+    const present = new Set(room.layers.map(l => l.id));
+    for (const id of savedBase.keys()) if (!present.has(id)) savedBase.delete(id);
+    for (const id of savedMask.keys()) if (!present.has(id)) savedMask.delete(id);
 
+    const writes = [];
     const layers = room.layers.map(l => {
       const copy = Object.assign({}, l);
       if (l.baseImage) {
-        try {
-          const b64 = l.baseImage.split(',')[1] || '';
-          fs.writeFileSync(path.join(dir, 'base_' + l.id + '.png'), Buffer.from(b64, 'base64'));
-          copy.baseImageFile = 'base_' + l.id + '.png';
-        } catch (e) { /* ignore */ }
+        copy.baseImageFile = 'base_' + l.id + '.png';
+        if (savedBase.get(l.id) !== l.baseSeq) {
+          try {
+            const b64 = l.baseImage.split(',')[1] || '';
+            writes.push({
+              file: path.join(dir, copy.baseImageFile),
+              buffer: Buffer.from(b64, 'base64'),
+              done: () => { savedBase.set(l.id, l.baseSeq); }
+            });
+          } catch (e) { /* ignore */ }
+        }
       }
       delete copy.baseImage;
       // 蒙版跟底图一样拆出来单独存文件 —— 塞进 room.json 会把那个文件撑到几十 MB
       if (l.maskImage) {
-        try {
-          const mb64 = l.maskImage.split(',')[1] || '';
-          fs.writeFileSync(path.join(dir, 'mask_' + l.id + '.png'), Buffer.from(mb64, 'base64'));
-          copy.maskImageFile = 'mask_' + l.id + '.png';
-        } catch (e) { /* ignore */ }
+        copy.maskImageFile = 'mask_' + l.id + '.png';
+        if (savedMask.get(l.id) !== l.maskSeq) {
+          try {
+            const mb64 = l.maskImage.split(',')[1] || '';
+            writes.push({
+              file: path.join(dir, copy.maskImageFile),
+              buffer: Buffer.from(mb64, 'base64'),
+              done: () => { savedMask.set(l.id, l.maskSeq); }
+            });
+          } catch (e) { /* ignore */ }
+        }
       }
       delete copy.maskImage;
       return copy;
@@ -920,13 +961,42 @@ class RoomStore {
         ? { id: m.id, userId: m.userId, name: m.name, color: m.color, ts: m.ts, text: m.text || '［表情］' }
         : m)
     };
-    const tmp = path.join(dir, 'room.json.tmp');
-    fs.writeFileSync(tmp, JSON.stringify(payload), 'utf8');
-    fs.renameSync(tmp, path.join(dir, 'room.json'));
+    return { payload: payload, writes: writes, dir: dir };
+  }
+
+  /** 同步存盘（退出时兜底用；平时走 saveAsync，别堵事件循环） */
+  save(room) {
+    if (!room.dirty || room.dropped || !this.rooms.has(room.id)) return;
+    const built = this.buildSave(room);
+    fs.mkdirSync(built.dir, { recursive: true });
+    for (const w of built.writes) {
+      try { fs.writeFileSync(w.file, w.buffer); w.done(); } catch (e) { /* ignore */ }
+    }
+    // tmp 名带随机尾巴：退出时 saveAll 与在途的 saveAsync 并发写也不至于互踩同一文件
+    const tmp = path.join(built.dir, 'room.json.' + process.pid + '.tmp');
+    fs.writeFileSync(tmp, JSON.stringify(built.payload), 'utf8');
+    fs.renameSync(tmp, path.join(built.dir, 'room.json'));
+    room.dirty = false;
+  }
+
+  /** 异步存盘：磁盘 IO 交给线程池，主进程只做一次内存内的 payload 拼装 */
+  async saveAsync(room) {
+    if (!room.dirty || room.dropped || !this.rooms.has(room.id)) return;
+    const built = this.buildSave(room);
+    await fsp.mkdir(built.dir, { recursive: true });
+    for (const w of built.writes) {
+      try { await fsp.writeFile(w.file, w.buffer); w.done(); } catch (e) { /* ignore */ }
+    }
+    const tmp = path.join(built.dir, 'room.json.' + process.pid + '.' + Date.now().toString(36) + '.tmp');
+    await fsp.writeFile(tmp, JSON.stringify(built.payload), 'utf8');
+    await fsp.rename(tmp, path.join(built.dir, 'room.json'));
     room.dirty = false;
   }
 
   saveAll() {
+    // 先收掉在途的防抖计时器，别让 saveAsync 和这里的同步写在退出时赛跑
+    for (const t of this.saveTimers.values()) clearTimeout(t);
+    this.saveTimers.clear();
     for (const room of this.rooms.values()) {
       try { this.save(room); } catch (e) { /* ignore */ }
     }
