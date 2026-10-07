@@ -22,8 +22,10 @@ const shim = require('../client/renderer/android-shim.js');
 const RENDERER = path.join(__dirname, '..', 'client', 'renderer');
 const WS = require(path.join(__dirname, '..', 'server', 'node_modules', 'ws'));
 // 隧道宿主用的是全局 WebSocket（WebView 里有）；Node 20 没有 —— 用 ws 包顶上，
-// 它实现同一套 onopen/onmessage/onclose 接口
-if (typeof global.WebSocket !== 'function') global.WebSocket = WS;
+// 它实现同一套 onopen/onmessage/onclose 接口。
+// ⚠ Node 22+ 自带的 undici WebSocket 虽然存在但没有 .on()（本测试大量使用），
+//   所以这里无条件换成 ws 包，别用版本探测。
+global.WebSocket = WS;
 
 let pass = 0, fail = 0;
 function ok(name, cond, extra) {

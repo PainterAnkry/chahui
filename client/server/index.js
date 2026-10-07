@@ -107,7 +107,9 @@ function serveStatic(req, res) {
         "img-src 'self' data: blob:",
         "media-src 'self' data: blob:",
         "style-src 'self' 'unsafe-inline'",
-        "script-src 'self'",
+        // CHAHU_ALLOW_EVAL=1：网页端「离线模式 / P2P 房主」要在浏览器里加载 local-core
+        //（模块加载器走字符串求值），托管者愿意开就开 —— 默认关，别白白放宽 CSP。
+        "script-src 'self'" + (process.env.CHAHU_ALLOW_EVAL === '1' ? " 'unsafe-eval'" : ''),
         "connect-src 'self' http: https: ws: wss:"
       ].join('; ');
     }

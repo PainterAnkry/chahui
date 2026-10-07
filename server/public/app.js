@@ -624,7 +624,10 @@
     var vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
     var w = sec.offsetWidth || 240, h = sec.offsetHeight || 200;
     x = Math.max(4, Math.min(x, vw - Math.min(w, vw - 8) - 4));
-    y = Math.max(4, Math.min(y, vh - Math.min(h, vh - 8) - 4));
+    // 卡片比屏幕矮 → 整卡夹进视口；比屏幕高（色板/笔刷库这种）→ 只保证标题栏
+    // 一直在屏内可拖。老写法把 y 夹进 vh-h-4（负数带），高卡片被钉死在顶上一动不动。
+    if (h >= vh - 8) y = Math.max(4, Math.min(y, vh - 52));
+    else y = Math.max(4, Math.min(y, vh - h - 4));
     sec.style.left = Math.round(x) + 'px';
     sec.style.top = Math.round(y) + 'px';
   }
@@ -635,6 +638,23 @@
     document.body.appendChild(sec);
     sec.classList.add('section-floating');
     sec.style.width = Math.max(220, Math.round(w)) + 'px';
+    // 浮窗标题栏加 ✕（收回面板）：窄屏下抽屉是藏着的，没有这个按钮就永远关不掉
+    var h4 = sec.querySelector('h4');
+    if (h4 && !h4.querySelector('.float-close')) {
+      var b = document.createElement('button');
+      b.className = 'float-close';
+      b.type = 'button';
+      b.textContent = '✕';
+      b.title = '收回面板';
+      b.addEventListener('pointerdown', function (e) { e.stopPropagation(); });
+      b.addEventListener('click', function (e) {
+        e.stopPropagation();
+        dockBack(sec);
+        savePanelOrder();
+        syncHudRailActive();
+      });
+      h4.appendChild(b);
+    }
     placeFloat(sec, x, y);
     persistFloatPanels();
     updateRightScroll();
@@ -644,6 +664,7 @@
   function unfloatSection(sec) {
     if (!sec.classList.contains('section-floating')) return;
     sec.classList.remove('section-floating');
+    sec.classList.remove('hud-card');
     sec.style.left = '';
     sec.style.top = '';
     sec.style.width = '';
@@ -655,6 +676,8 @@
   function persistFloatPanels() {
     var m = {};
     Array.prototype.forEach.call(document.querySelectorAll('.section-floating[data-section]'), function (sec) {
+      // HUD 卡片（窄屏锚定卡片）位置由 HUD 管，不进浮窗持久化
+      if (sec.classList.contains('hud-card')) return;
       m[sec.getAttribute('data-section')] = {
         x: parseInt(sec.style.left, 10) || 0,
         y: parseInt(sec.style.top, 10) || 0,
@@ -666,6 +689,10 @@
 
   /** 开机恢复上次的浮窗（在 applyPanelOrder 之后调） */
   function restoreFloatPanels() {
+    // 窄屏不恢复：窄屏没有可见的抽屉/栏容器，浮出来的卡片收不回去
+    //（用户踩过：色板卡片盖在大厅上关不掉）。窄屏的小节走 HUD 卡片按需弹出。
+    // ⚠ 这里跑在 applyLayoutMode 之前，S.narrow 还没赋值 —— 直接问媒体查询。
+    if (NARROW_MQ.matches) return;
     var m = loadFloatMap();
     Object.keys(m).forEach(function (id) {
       var sec = document.querySelector('[data-section="' + id + '"]');
@@ -887,6 +914,156 @@
     document.addEventListener('pointerup', finish);
     document.addEventListener('pointercancel', finish);
     window.addEventListener('blur', function () { if (dragging) finish(null); });
+  }
+
+  /* ============================================================ 窄屏 HUD（画世界 Pro 式）
+   * 手机/窄窗口：菜单栏 + 顶栏 + 两侧抽屉全部退场（CSS 里 display:none），
+   * 换成一块悬浮顶栏（关/房名/撤销/重做/图层/菜单）+ 左侧工具轨。
+   * 点轨上的图标，把对应小节以「锚定卡片」弹到画布上（复用浮窗机制 + hud-card 类）；
+   * 同一时间只开一张，点画布空白处收起 —— 对照画世界 Pro 的交互。 */
+
+  /** 当前开着的 HUD 卡片（最多一张） */
+  function hudOpenCard() {
+    return document.querySelector('.section-floating.hud-card');
+  }
+
+  /** 小节收回面板：浮窗/HUD 卡片都挂在 body 上，收起前必须先塞回栏容器，
+   *  否则它就是 body 底下的孤儿节点（样式全丢，还会撑出一条空页面）。 */
+  function dockBack(sec) {
+    sec.classList.remove('hud-card');
+    var box = $('#leftPanelScroll') || panelContainers()[0];
+    if (box && sec.parentElement !== box) box.appendChild(sec);
+    unfloatSection(sec);
+  }
+
+  function closeHudCards() {
+    Array.prototype.forEach.call(document.querySelectorAll('.section-floating.hud-card'), function (sec) {
+      dockBack(sec);
+    });
+    savePanelOrder();
+    syncHudRailActive();
+  }
+
+  function syncHudRailActive() {
+    var open = hudOpenCard();
+    var id = open ? open.getAttribute('data-section') : '';
+    ['#railBrushes', '#railBrush', '#railColor', '#railTools', '#railLayers'].forEach(function (sel) {
+      var b = $(sel);
+      if (b) b.classList.toggle('active', !!open && b.getAttribute('data-card') === id);
+    });
+    var le = $('#railEraser');
+    if (le) le.classList.toggle('active', !open && S.tool === 'eraser');
+  }
+
+  /** 打开/关闭一张锚定卡片：卡片贴着工具轨右侧、顶栏下方 */
+  function toggleHudCard(id) {
+    var sec = document.querySelector('[data-section="' + id + '"]');
+    if (!sec) return;
+    if (sec.classList.contains('hud-card')) { closeHudCards(); return; }
+    closeHudCards();
+    var vw = document.documentElement.clientWidth;
+    if (!sec.classList.contains('section-floating')) {
+      floatSection(sec, 64, 104);
+      savePanelOrder();          // 小节从抽屉里搬走了，顺序记一笔（unfloat 时能回对地方）
+    }
+    sec.classList.add('hud-card');
+    sec.style.width = Math.round(Math.min(330, Math.max(240, vw * 0.74))) + 'px';
+    placeFloat(sec, 64, 104);
+    syncHudRailActive();
+  }
+
+  /** 顶栏 ≡ 菜单：把宽屏顶栏那排动作收进来（复用既有按钮的 onclick） */
+  function buildHudMenu() {
+    var pop = $('#hudMenuPop');
+    if (!pop || pop.dataset.built) return;
+    pop.dataset.built = '1';
+    var items = [
+      ['房间列表', function () { var b = $('#btnRooms'); if (b) b.click(); }],
+      ['你画我猜', function () { var b = $('#btnGame'); if (b) b.click(); }],
+      ['画布设置', function () { var b = $('#btnCanvas'); if (b) b.click(); }],
+      ['变换', function () { var b = $('#btnTransform'); if (b) b.click(); }],
+      ['回放', function () { var b = $('#btnReplay'); if (b) b.click(); }],
+      ['录制', function () { var b = $('#btnRecord'); if (b) b.click(); }],
+      ['导出', function () { var b = $('#btnExport'); if (b) b.click(); }],
+      ['固化底图', function () { var b = $('#btnBake'); if (b) b.click(); }],
+      ['分享链接', function () { var b = $('#btnShare'); if (b) b.click(); }],
+      ['导航器', function () { toggleHudCard('nav'); }],
+      ['设置', function () { openSettings(); }],
+      ['全屏', function () { toggleFullscreen(); }]
+    ];
+    items.forEach(function (it) {
+      var b = document.createElement('button');
+      b.className = 'hud-menu-item';
+      b.type = 'button';
+      b.textContent = it[0];
+      b.addEventListener('click', function () {
+        pop.classList.add('hidden');
+        it[1]();
+      });
+      pop.appendChild(b);
+    });
+  }
+
+  function bindTouchHud() {
+    var top = $('#hudTop'), rail = $('#hudRail');
+    if (!top || !rail || top.dataset.bound) return;
+    top.dataset.bound = '1';
+
+    function on(sel, fn) {
+      var b = $(sel);
+      if (b) b.addEventListener('click', fn);
+    }
+    on('#hudClose', function () { leaveRoom(); });
+    on('#hudRoomBtn', function () { var b = $('#roomChip'); if (b) b.click(); });
+    on('#hudUndo', function () { undo(); });
+    on('#hudRedo', function () { redo(); });
+    on('#hudLayers', function () { toggleHudCard('layers'); });
+    on('#hudMenu', function () {
+      buildHudMenu();
+      var pop = $('#hudMenuPop');
+      if (pop) pop.classList.toggle('hidden');
+    });
+    on('#railBrushes', function () { toggleHudCard('brushes'); });
+    on('#railBrush', function () { toggleHudCard('brush'); });
+    on('#railColor', function () { toggleHudCard('color'); });
+    on('#railTools', function () { toggleHudCard('tools'); });
+    // 橡皮不是卡片：直接切到橡皮（再点一次切回画笔，对照画世界的两态切换）
+    on('#railEraser', function () {
+      if (S.tool === 'eraser') loadBrush(S.lastOfFamily && S.lastOfFamily.brush ? S.lastOfFamily.brush : 'brush');
+      else loadBrush('eraser');
+    });
+
+    // 点画布空白处（HUD、卡片、菜单之外）收起卡片 —— 画世界习惯：笔一想落下，面板就让位
+    document.addEventListener('pointerdown', function (e) {
+      if (!S.narrow) return;
+      var t = e.target;
+      var inHud = t.closest && (t.closest('#hudTop') || t.closest('#hudRail') ||
+        t.closest('#hudMenuPop') || t.closest('.section-floating'));
+      var pop = $('#hudMenuPop');
+      if (pop && !pop.classList.contains('hidden') && !(t.closest && t.closest('#hudMenu'))) {
+        pop.classList.add('hidden');
+      }
+      if (!inHud && hudOpenCard()) closeHudCards();
+    }, true);
+
+    syncHudRailActive();
+  }
+
+  /** HUD 顶栏房名：跟着 renderRoomChip 一起刷 */
+  function syncHudRoom() {
+    var el = $('#hudRoomName');
+    if (el) el.textContent = S.room ? S.room.name : '未加入';
+    syncHudRailActive();
+  }
+
+  /** HUD 显隐：窄屏 + 已进房间（大厅时 entryMask 全屏盖着，HUD 藏着免得穿透误触） */
+  function updateHudVisible() {
+    var show = !!(S.narrow && S.joined);
+    var top = $('#hudTop'), rail = $('#hudRail'), pop = $('#hudMenuPop');
+    if (top) top.classList.toggle('hidden', !show);
+    if (rail) rail.classList.toggle('hidden', !show);
+    if (!show && pop) pop.classList.add('hidden');
+    if (!show) closeHudCards();
   }
 
   function visibleItems() {
@@ -2454,6 +2631,10 @@
     var sw = $('#tdSwatch');
     if (!sw) return;
     sw.style.background = S.color;
+    // HUD 工具轨上的颜色圆点 + 橡皮激活态同步刷（窄屏 HUD 与 dock 是一套状态）
+    var dot = $('#railColorDot');
+    if (dot) dot.style.background = S.color;
+    syncHudRailActive();
     // 最近用色（最多 5 个；没有就用默认色板顶上几个顶着，别空荡荡）
     var rb = $('#tdRecent');
     rb.innerHTML = '';
@@ -2517,6 +2698,8 @@
   function renderRoomChip() {
     var r = S.room;
     $('#roomTitle').textContent = r ? r.name : '未加入房间';
+    syncHudRoom();
+    updateHudVisible();
     if (!r) { $('#roomMeta').textContent = '—'; $('#canvasSize').textContent = '—'; return; }
     $('#roomMeta').textContent = r.width + '×' + r.height + ' · 在线 ' + (r.online || 0) + ' 人';
     $('#canvasSize').textContent = r.width + ' × ' + r.height + ' · ' + engine.strokes.length + ' 笔';
@@ -6686,11 +6869,15 @@
   function shareBase() {
     // 公网隧道优先：外网朋友也能打开，局域网地址只对同一 WiFi 的人有效
     if (S.publicUrl) {
-      // 安卓隧道：publicUrl 是「访客 ws 端点」，分享链接用中继的 http 地址
-      //（?server= 参数由 roomShareLink 补上）
-      var m = /^(wss?):\/\/([^\/]+)/i.exec(S.publicUrl);
-      if (m) return (m[1] === 'wss' ? 'https://' : 'http://') + m[2];
-      return S.publicUrl;
+      // webrtc:// 入口没有 http 站点可言 —— 页面从哪打开就回落到哪（页面托管与联机解耦），
+      // 访客端点通过 roomShareLink 的 ?server= 参数带上
+      if (!/^webrtc:\/\//i.test(S.publicUrl)) {
+        // 安卓中继：publicUrl 是「访客 ws 端点」，分享链接用中继的 http 地址
+        //（?server= 参数由 roomShareLink 补上）
+        var m = /^(wss?):\/\/([^\/]+)/i.exec(S.publicUrl);
+        if (m) return (m[1] === 'wss' ? 'https://' : 'http://') + m[2];
+        return S.publicUrl;
+      }
     }
     var lan = Cfg.lanBase ? Cfg.lanBase() : '';
     if (lan) return lan;
@@ -6705,7 +6892,8 @@
   function roomShareLink(base, roomId) {
     if (!base) return roomId || '';
     var link = base + '/?room=' + roomId;
-    if (S.tunnel && S.tunnel.phase === 'on' && /^wss?:\/\//i.test(S.publicUrl || '')) {
+    if (S.tunnel && S.tunnel.phase === 'on' && S.publicUrl &&
+        /^(wss?|webrtc):\/\//i.test(S.publicUrl)) {
       link += '&server=' + encodeURIComponent(S.publicUrl);
     }
     return link;
@@ -6822,11 +7010,12 @@
     if (S.tunnel && S.tunnel.phase !== 'off') return;      // 正在下 / 正在起，别重复点
     S.tunnel = { phase: 'starting', url: '', error: '', percent: 0 };
     refreshTunnelUi();
-    // 安卓走中继方案（不下载组件）；桌面端第一次要下 cloudflared
+    // 安卓主路径是 WebRTC P2P（零服务器依赖，见 webrtc-host.js）；失败自动回落中继。
+    // 桌面端第一次要下 cloudflared。
     if (!(global.chahuDesktop && global.chahuDesktop.isAndroid)) {
       toast('正在准备公网入口……第一次会先下载一个几十兆的组件', 'ok', 3600);
     } else {
-      toast('正在向中继服务器申请公网入口……', 'ok', 3000);
+      toast('正在建立 P2P 直连房间……（数据不经任何服务器）', 'ok', 3000);
     }
     // 中继地址：安卓缺省用配置里的默认服务器（任何 2.1.1+ 服务端都能当中继）
     d.startTunnel(global.chahuDesktop && global.chahuDesktop.isAndroid ? '' : undefined).then(function (r) {
@@ -6871,19 +7060,20 @@
     var st = $('#tunnelState');
     var t = S.tunnel || { phase: 'off' };
     // 安卓的隧道服务的是**本机房间**（WebView 里的离线状态机）——
-    // 在线连着别的服务器时，当前房间不在本机，开隧道只会分享出一个空链接。
+    // 在线连着别的服务器时，当前房间不在本机。连的本来就是公网服务器的话，
+    // 房间天生就在公网上，直接分享链接即可 —— 把这点说清楚，别让人以为按钮坏了。
     if (d.isAndroid && !net.isLocal() && t.phase !== 'on') {
       btn.disabled = true;
-      btn.textContent = '开启公网联机';
+      btn.textContent = '无需开启';
       st.className = 'srv-state off';
-      st.textContent = '先切到离线模式（房间里开隧道，别人才能进来）';
+      st.textContent = '当前连的是公网服务器，房间本来就在公网上 —— 直接点「分享」发房间链接就能进。要在本机开房（手机当服务器）请先切到离线模式';
       return;
     }
     btn.disabled = false;
     if (S.publicUrl || t.phase === 'on') {
       btn.textContent = '关闭公网联机';
       st.className = 'srv-state on';
-      st.textContent = '已开启' + (S.publicUrl ? ' · ' + S.publicUrl : '');
+      st.textContent = '已开启' + (S.publicUrl ? ' · ' + (/^webrtc:\/\//i.test(S.publicUrl) ? 'P2P 直连' : S.publicUrl) : '');
     } else if (t.phase === 'downloading' || t.phase === 'starting') {
       btn.disabled = true;
       btn.textContent = '请稍候…';
@@ -7545,6 +7735,7 @@
     $('#strokeCount').textContent = '0';
     $('#roomTitle').textContent = '未加入房间';
     $('#roomMeta').textContent = '—';
+    updateHudVisible();
     $('#stageEmpty').classList.remove('hidden');
     $('#infoMask').classList.add('hidden');
     renderLayers();
@@ -13532,6 +13723,8 @@
       renderServerToggle();
       renderServerHint();
       refreshMenuChecks();
+      // 换档也影响「公网联机」按钮（安卓只有离线档才有本机房间可分享）
+      refreshTunnelUi();
     });
     net.on('open', function () {
       // 重连后服务端那边绝不可能有「正画到一半的这笔」（断线时它的 BEGIN/POINTS/END
@@ -13545,6 +13738,8 @@
       }
       // 每次连上（含重连）都问一次：隧道可能是中途才开的
       probePublicUrl();
+      // 离线 ↔ 在线切换会改变「公网联机」按钮的可用性（安卓离线才有本机房间可分享）
+      refreshTunnelUi();
     });
     net.on('message', handleMessage);
     net.on('retry', function (e) { setStatus('连接中断，' + Math.round(e.delay / 1000) + 's 后重试…'); });
@@ -14299,6 +14494,18 @@
     if (!force && narrow === S.narrow) return;
     S.narrow = narrow;
     document.body.classList.toggle('layout-narrow', narrow);
+    // 窄屏 HUD（画世界式顶栏 + 工具轨）只在窄屏出现；回宽屏时收掉卡片再藏
+    var top = $('#hudTop'), rail = $('#hudRail'), pop = $('#hudMenuPop');
+    if (narrow) {
+      bindTouchHud();
+      updateHudVisible();
+      syncHudRoom();
+    } else {
+      closeHudCards();
+      if (pop) pop.classList.add('hidden');
+      if (top) top.classList.add('hidden');
+      if (rail) rail.classList.add('hidden');
+    }
     if (narrow) {
       setLeftCollapsed(true, { persist: false });
       setSideCollapsed(true, { persist: false });

@@ -6,12 +6,12 @@
 window.CHAHU_CONFIG = {
   // 公网服务端地址（部署后填写；本地开发留空即可）
   // 已部署到腾讯云 Lighthouse 轻量服务器（2 核 2G / 广州），24 小时在线。
-  publicServer: 'ws://139.199.90.209/ws',
+  publicServer: 'ws://139.199.90.209:8437/ws',
   localServer: 'ws://localhost:8437/ws',
   defaultName: '',
   appName: '茶绘',
   // 版本号：关于页显示 + 和 GitHub 的最新 release 比对
-  appVersion: '2.1.1',
+  appVersion: '2.1.3',
   // 开源仓库（更新检测用）
   repo: 'PainterAnkry/chahui'
 };
@@ -21,6 +21,14 @@ window.CHAHU = window.CHAHU || {};
 (function () {
   'use strict';
   var CFG = window.CHAHU_CONFIG;
+
+  // ?signal=ws://host:port —— P2P 信令服务器（自建信令时随分享链接带上；
+  // 不带则用 PeerJS 免费信令云）。必须在配置加载时读取，联机发生在页面初始化后。
+  try {
+    var qSig = new URLSearchParams(location.search || '').get('signal');
+    if (qSig) CFG.signalServer = String(qSig).trim();
+  } catch (e) { /* ignore */ }
+
   var LS_SERVER = 'chahu.server';
   var LS_NAME = 'chahu.name';
   var LS_AVATAR = 'chahu.avatar';
@@ -32,6 +40,8 @@ window.CHAHU = window.CHAHU || {};
     // 离线模式用一个**假地址**占位。它不是网络地址，绝不能被拼成 ws://local:///ws ——
     // 网络层看到它就会改走「主进程里那份服务端」，不占端口也不出网。
     if (/^local:\/\//i.test(url)) return 'local://';
+    // P2P 直连入口（webrtc://<房主peerId>）：原样交给网络层（见 net.js connectWebRTC）
+    if (/^webrtc:\/\//i.test(url)) return url.replace(/\/+$/, '');
     if (/^wss?:\/\//i.test(url)) return url;
     if (/^https:\/\//i.test(url)) return 'wss://' + url.slice(8).replace(/\/+$/, '') + '/ws';
     if (/^http:\/\//i.test(url)) return 'ws://' + url.slice(7).replace(/\/+$/, '') + '/ws';

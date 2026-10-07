@@ -562,6 +562,11 @@
     var tunnel = null;            // { ws, relayWsUrl, tunnelId, guests, phase }
     var tunnelState = { phase: 'off', url: '', error: '' };
     var tunnelSink = null;        // 渲染层 onTunnelState 登记的回调
+    // 断线自动重连：手机息屏 / 切后台回来，WebView 会把挂着的 WS 杀掉 ——
+    // 直接报「失败」体验很差（用户眼里就是「中继器老是失败」）。这里悄悄重连，
+    // 最多 12 次 × 3s（≈半分钟），期间 UI 显示「正在重连」；成功后续用同一逻辑。
+    var wantOn = false;           // 用户开过隧道且没手动关 → 断了就该重连
+    var retryTimer = null, retryCount = 0, lastRelayAddr = '';
 
     function pushTunnelState(s) {
       tunnelState = {
@@ -596,11 +601,34 @@
       });
     }
 
-    function startTunnelHost(relayAddr) {
+    /** 断线后的静默重连（wantOn 才生效；relay-full 是服务端明确拒绝，重试没有意义） */
+    function scheduleRetry() {
+      if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+      if (!wantOn) return;
+      if (retryCount >= 12) {
+        retryCount = 0;
+        pushTunnelState({ phase: 'off', url: '', error: '中继多次重连失败，已停止 —— 点「开启公网联机」可再试' });
+        return;
+      }
+      retryCount++;
+      pushTunnelState({ phase: 'starting', url: '' });
+      retryTimer = setTimeout(function () {
+        retryTimer = null;
+        startTunnelHost(lastRelayAddr, true).then(function (r) {
+          if (r && r.ok) { retryCount = 0; return; }
+          if (r && r.error && /relay-full|满/.test(r.error)) { wantOn = false; pushTunnelState({ phase: 'off', url: '', error: r.error }); return; }
+          scheduleRetry();
+        }, function () { scheduleRetry(); });
+      }, 3000);
+    }
+
+    function startTunnelHost(relayAddr, isRetry) {
       var cfgAddr = (typeof CHAHU_CONFIG_REF === 'function') ? CHAHU_CONFIG_REF() : '';
       var relayWs = relayHostUrl(relayAddr || cfgAddr || '');
       if (!relayWs) return Promise.resolve({ ok: false, error: '没有可用的中继服务器地址' });
       if (tunnel && tunnel.ws && tunnel.ws.readyState === 1) return Promise.resolve({ ok: true, reused: true });
+      if (!isRetry) { wantOn = true; retryCount = 0; if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; } }
+      lastRelayAddr = relayAddr || '';
       // 房间状态机先热好：访客一进来就要走 onClient
       return core.boot().then(function () {
         return new Promise(function (resolve) {
@@ -630,6 +658,7 @@
             if (m.t === 'TUNNEL_OPENED') {
               clearTimeout(timer);
               settled = true;
+              retryCount = 0;
               tunnel = { ws: ws, relayWsUrl: relayWs, tunnelId: m.id, guests: {}, phase: 'on' };
               var origin = relayWs.replace(/\/tunnel-host$/, '');
               pushTunnelState({ phase: 'on', url: origin + '/tunnel/' + m.id });
@@ -677,17 +706,28 @@
               if (tunnel) delete tunnel.guests[m.g | 0];
               return;
             }
-            if (m.t === 'TUNNEL_CLOSED') teardownTunnel(m.reason || 'relay-closed');
+            if (m.t === 'TUNNEL_CLOSED') {
+              // 服务端主动关（relay-stop / open-timeout / relay-full）：不是网络抖动。
+              // 用户没关 → 除「满员」外都值得重试一次；满了重试也没用，如实报错。
+              tunnel = null;
+              if (wantOn && m.reason !== 'relay-full' && m.reason !== 'stop') { scheduleRetry(); return; }
+              teardownTunnel(m.reason || 'relay-closed');
+              return;
+            }
           };
           ws.onclose = function () {
             clearTimeout(timer);
+            tunnel = null;
             if (!settled) {
               settled = true;
+              if (wantOn && isRetry) { scheduleRetry(); resolve({ ok: false, error: '重连失败' }); return; }
               pushTunnelState({ phase: 'off', error: '连不上中继服务器' });
               resolve({ ok: false, error: '连不上中继服务器' });
               return;
             }
-            teardownTunnel('relay-disconnect');
+            // 挂着的隧道断了（息屏 / 网络切换 / 中继重启）：用户开过就静默重连
+            if (wantOn) { scheduleRetry(); return; }
+            pushTunnelState({ phase: 'off', error: '' });
           };
           ws.onerror = function () { /* onclose 会跟着来 */ };
           tunnel = { ws: ws, relayWsUrl: relayWs, tunnelId: null, guests: {}, phase: 'starting' };
@@ -696,7 +736,11 @@
     }
 
     function stopTunnelHost() {
+      wantOn = false;
+      retryCount = 0;
+      if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
       if (tunnel) teardownTunnel('stop');
+      else pushTunnelState({ phase: 'off', url: '', error: '' });
       return Promise.resolve({ ok: true });
     }
 
@@ -745,6 +789,11 @@
     });
 
     var tunnelHost = createTunnelHost(core, LocalWs);
+    // WebRTC P2P 房主端（零服务器依赖）：安卓「公网联机」的主路径。
+    // 信令只走 PeerJS 免费云握手一次，数据直达访客 —— 中继（任何 2.1.1+ 服务端）作为回落。
+    var webrtcHost = (global.ChaWebRTC && global.ChaWebRTC.createHost)
+      ? global.ChaWebRTC.createHost({ boot: function () { return core.boot(); }, LocalWs: LocalWs })
+      : null;
     CHAHU_CONFIG_REF = function () { return (global.CHAHU_CONFIG && global.CHAHU_CONFIG.publicServer) || ''; };
 
     /* ---------- 离线会话（与桌面端 client/main.js 的 localSession 同构） */
@@ -847,17 +896,38 @@
         return function () { localSink = null; };
       },
 
-      /* ---- 公网隧道（中继方案，职责对照桌面端 tunnel.js；见 createTunnelHost 头注）----
-       * startTunnel(relayAddr)：relayAddr 缺省时用 CHAHU_CONFIG.publicServer。
-       * 渲染层拿到 onTunnelState({phase:'on', url:'ws://中继/tunnel/<id>'}) 后，
-       * 分享链接拼成 http://<中继>/?room=<房间号>&server=<url 编码的访客端点>。 */
-      startTunnel: function (relayAddr) { return tunnelHost.start(relayAddr); },
-      stopTunnel: function () { return tunnelHost.stop(); },
-      getTunnelStatus: function () { return Promise.resolve(tunnelHost.getStatus()); },
+      /* ---- 公网隧道（职责对照桌面端 tunnel.js；见 createTunnelHost 头注）----
+       * startTunnel(relayAddr)：
+       *   · 显式给了中继地址 → 直接走中继（老行为，完全兼容）；
+       *   · 没给（缺省）    → WebRTC P2P 优先（零服务器依赖），失败自动回落默认中继。
+       * 渲染层拿到 onTunnelState({phase:'on', url}) 后，
+       * 分享链接拼成 页面地址/?room=<房间号>&server=<url 编码的访客端点>。 */
+      startTunnel: function (relayAddr) {
+        if (relayAddr) return tunnelHost.start(relayAddr);
+        if (webrtcHost) {
+          return webrtcHost.start().then(function (r) {
+            if (r && r.ok) return r;
+            // P2P 不成（对称 NAT / 信令不通）→ 回落默认中继（8437 直连端口）
+            return tunnelHost.start('');
+          });
+        }
+        return tunnelHost.start('');
+      },
+      stopTunnel: function () {
+        var p1 = tunnelHost.stop();
+        var p2 = webrtcHost ? webrtcHost.stop() : Promise.resolve({ ok: true });
+        return Promise.all([p1, p2]).then(function () { return { ok: true }; });
+      },
+      getTunnelStatus: function () {
+        var a = webrtcHost ? webrtcHost.getStatus() : { phase: 'off' };
+        if (a.phase !== 'off') return Promise.resolve(a);
+        return Promise.resolve(tunnelHost.getStatus());
+      },
       onTunnelState: function (cb) {
         tunnelHost.onState(cb);
+        if (webrtcHost) webrtcHost.onState(cb);
         // 登记完立刻把现状推一遍（桌面端 onTunnelState 只推增量，这里补一次全量）
-        try { cb(tunnelHost.getStatus()); } catch (e) { /* ignore */ }
+        try { cb(webrtcHost && webrtcHost.getStatus().phase !== 'off' ? webrtcHost.getStatus() : tunnelHost.getStatus()); } catch (e) { /* ignore */ }
         return Promise.resolve({ ok: true });
       }
     };

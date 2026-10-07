@@ -4811,30 +4811,41 @@ body.left-rail-mode .panel.left .tool-grid .tool svg { width: 22px; height: 22px
   border: 1px solid var(--line, #d5d8de);
   border-radius: 10px;
   box-shadow: 0 10px 32px rgba(0, 0, 0, .18);
-  max-height: min(72vh, 640px);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
+  max-height: min(76vh, 640px);
+  display: block;
+  overflow-y: auto;            /* 高卡片（色板/笔刷库）整卡内滚，不再被夹死在屏幕顶 */
+  overscroll-behavior: contain;
 }
-.section-floating > h4 { cursor: grab; }
-.section-floating > h4:active { cursor: grabbing; }
-.section-floating > .sec-body,
-.section-floating > .sec-content { overflow-y: auto; }
-/* 浮窗里的小节内部滚动：整个 section 自己裁切，内容区撑开 */
-.section-floating { overflow-y: auto; }
-.section-floating::before {
-  /* 顶部一条细提手提示「这里能拖」 */
-  content: "";
+.section-floating > h4 {
+  cursor: grab;
   position: sticky;
   top: 0;
-  display: block;
-  height: 3px;
-  margin: 0 auto;
-  width: 42px;
-  border-radius: 0 0 3px 3px;
-  background: var(--line, #d5d8de);
-  flex: none;
+  z-index: 2;
+  background: var(--panel, #fff);
+  border-bottom: 1px solid var(--line, #d5d8de);
+  border-radius: 10px 10px 0 0;
 }
+.section-floating > h4:active { cursor: grabbing; }
+/* 浮窗标题栏上的 ✕：窄屏抽屉是藏着的，没有它浮窗就永远关不掉 */
+.section-floating .float-close {
+  position: absolute;
+  right: 7px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text, #333);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.section-floating .float-close:active { background: var(--line, #ddd); }
 body.panel-dragging { user-select: none; -webkit-user-select: none; cursor: grabbing; }
 body.panel-dragging * { cursor: grabbing !important; }
 
@@ -4907,3 +4918,136 @@ body.layout-narrow .touch-dock { display: flex; }
   100% { box-shadow: 0 0 0 0 transparent; }
 }
 .section-flash { animation: section-flash-kf .9s ease-out 1; }
+
+/* ============================================================
+   窄屏 HUD（画世界 Pro 式）：≤1080px 时菜单栏 / 顶栏 / 两侧抽屉
+   全部退场，换成一排悬浮顶栏 + 左侧工具轨；小节以锚定卡片弹出。
+   深色玻璃质感（画世界同款），明暗主题下都压得住画面。
+   ============================================================ */
+body.layout-narrow .menu-bar,
+body.layout-narrow .topbar,
+body.layout-narrow .workspace > .panel.left,
+body.layout-narrow .workspace > .panel.right,
+body.layout-narrow .side-rail,
+body.layout-narrow .drawer-back { display: none !important; }
+
+.hud {
+  display: none;
+  position: fixed;
+  z-index: 60;                 /* 高于画布与触控 dock(30)，低于浮窗卡片(70)与弹窗(200) */
+  align-items: center;
+  gap: 2px;
+  background: rgba(24, 27, 32, .92);
+  color: #e8eaed;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, .28);
+}
+body.layout-narrow #hudTop {
+  display: flex;
+  top: 0; left: 0; right: 0;
+  height: 48px;
+  padding: 5px 6px;
+  padding-left: max(6px, env(safe-area-inset-left));
+  padding-right: max(6px, env(safe-area-inset-right));
+  border-radius: 0;
+}
+body.layout-narrow #hudRail {
+  display: flex;
+  flex-direction: column;
+  left: 6px;
+  top: 58px;
+  padding: 5px 4px;
+  gap: 4px;
+  border-radius: 14px;
+}
+.hud-btn {
+  min-width: 38px;
+  height: 38px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: #e8eaed;
+  font-size: 17px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 6px;
+}
+.hud-btn:active { background: rgba(255, 255, 255, .14); }
+.hud-btn svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.hud-btn.hud-room {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 34vw;
+  justify-content: flex-start;
+  overflow: hidden;
+}
+.hud-btn.hud-room b {
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hud-flex { flex: 1; }
+.hud-rail-btn {
+  width: 42px;
+  height: 42px;
+  border: none;
+  border-radius: 11px;
+  background: transparent;
+  color: #e8eaed;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+.hud-rail-btn svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.hud-rail-btn:active { background: rgba(255, 255, 255, .14); }
+.hud-rail-btn.active { background: rgba(64, 132, 244, .28); box-shadow: inset 0 0 0 1.5px #6ea3f0; }
+.hud-rail-btn.hud-color { padding: 4px; }
+.hud-rail-btn.hud-color i {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, .75);
+  background: #2b2b2b;
+}
+/* HUD ≡ 菜单弹出列表 */
+.hud-menu {
+  position: fixed;
+  z-index: 65;
+  top: 52px;
+  right: 6px;
+  min-width: 148px;
+  max-height: 70vh;
+  overflow-y: auto;
+  background: rgba(24, 27, 32, .96);
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .35);
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+}
+.hud-menu.hidden { display: none; }
+.hud-menu-item {
+  border: none;
+  background: transparent;
+  color: #e8eaed;
+  text-align: left;
+  font-size: 14.5px;
+  padding: 11px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.hud-menu-item:active { background: rgba(255, 255, 255, .13); }
+/* 触屏加一档命中区 */
+@media (pointer: coarse) {
+  .hud-btn { min-width: 42px; height: 42px; }
+  .hud-rail-btn { width: 46px; height: 46px; }
+  .hud-menu-item { padding: 12px 14px; }
+}

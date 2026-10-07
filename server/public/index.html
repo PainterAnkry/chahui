@@ -51,6 +51,43 @@
   <!-- 窄屏下左右栏变成浮在画布上的抽屉，点这块暗色区域把抽屉关掉 -->
   <div class="drawer-back hidden" id="drawerBack"></div>
 
+  <!-- ============ 窄屏 HUD（画世界 Pro 式）============
+       手机/窄窗口时替代菜单栏 + 顶栏 + 两侧抽屉：
+       顶栏 = 关闭 / 房名 / 撤销 / 重做 / 菜单；左侧轨 = 笔刷库 / 画笔 / 橡皮 / 颜色 / 工具。
+       点轨上的图标把对应小节以卡片弹到画布上，点画布空白处收起。 -->
+  <div class="hud hidden" id="hudTop">
+    <button class="hud-btn hud-close" id="hudClose" title="退出房间">✕</button>
+    <button class="hud-btn hud-room" id="hudRoomBtn" title="房间信息"><b id="hudRoomName">未加入</b></button>
+    <span class="hud-flex"></span>
+    <button class="hud-btn" id="hudUndo" title="撤销">
+      <svg viewBox="0 0 24 24"><path d="M8.5 5 4 9.5 8.5 14"/><path d="M4 9.5h9.2a5.8 5.8 0 1 1 0 11.6H9"/></svg>
+    </button>
+    <button class="hud-btn" id="hudRedo" title="重做">
+      <svg viewBox="0 0 24 24"><path d="M15.5 5 20 9.5 15.5 14"/><path d="M20 9.5h-9.2a5.8 5.8 0 1 0 0 11.6H15"/></svg>
+    </button>
+    <button class="hud-btn" id="hudLayers" title="图层">
+      <svg viewBox="0 0 24 24"><path d="M12 3 3.5 7.8 12 12.6l8.5-4.8L12 3z"/><path d="m3.5 13.4 8.5 4.8 8.5-4.8"/><path d="m3.5 17.6 8.5 4.8 8.5-4.8" opacity=".45"/></svg>
+    </button>
+    <button class="hud-btn" id="hudMenu" title="菜单">≡</button>
+  </div>
+  <div class="hud hidden" id="hudRail">
+    <button class="hud-rail-btn" id="railBrushes" data-card="brushes" title="笔刷库">
+      <svg viewBox="0 0 24 24"><path d="M6.5 19.5c0-2 .8-3.6 2.2-5l7-7 3.3 3.3-7 7c-1.4 1.4-3 2.2-5 2.2z"/><path d="M15 6.5l3.3 3.3"/></svg>
+    </button>
+    <button class="hud-rail-btn" id="railBrush" data-card="brush" title="画笔参数">
+      <svg viewBox="0 0 24 24"><path d="M5 7h14M5 12h14M5 17h14"/><circle cx="9" cy="7" r="2" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="2" fill="currentColor" stroke="none"/><circle cx="7.5" cy="17" r="2" fill="currentColor" stroke="none"/></svg>
+    </button>
+    <button class="hud-rail-btn" id="railEraser" title="橡皮擦（再点一次切回画笔）">
+      <svg viewBox="0 0 24 24"><path d="M15.5 3.5 5.6 13.4a2 2 0 0 0 0 2.8l2.2 2.2a2 2 0 0 0 2.8 0l9.9-9.9a2 2 0 0 0 0-2.8l-2.2-2.2a2 2 0 0 0-2.8 0z"/><path d="M11 8l5 5"/><path d="M8 20h10"/></svg>
+    </button>
+    <button class="hud-rail-btn hud-color" id="railColor" data-card="color" title="颜色面板"><i id="railColorDot"></i></button>
+    <button class="hud-rail-btn" id="railTools" data-card="tools" title="工具">
+      <svg viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1.2"/><rect x="13" y="4" width="7" height="7" rx="1.2"/><rect x="4" y="13" width="7" height="7" rx="1.2"/><rect x="13" y="13" width="7" height="7" rx="1.2"/></svg>
+    </button>
+  </div>
+  <!-- HUD ≡ 菜单的弹出列表（条目由 app.js 构建） -->
+  <div class="hud-menu hidden" id="hudMenuPop"></div>
+
   <!-- 操作面板收起之后留一条窄条，点一下再拉出来（和 Tab 一个效果） -->
   <button class="side-rail left-rail hidden" id="leftRail" title="拉出操作面板（Tab）">»</button>
 
@@ -1025,7 +1062,7 @@
             <span class="srv-state" id="tunnelState">—</span>
           </div>
         </div>
-        <span class="hint" id="tunnelHint">开启后生成一个外网链接，跨网的朋友点链接就能进；关闭即切回本地。手机上房间跑在本机、经中继服务器转发（任何 2.1.1+ 的茶绘服务端都能当中继）；桌面端走 cloudflared 隧道。</span>
+        <span class="hint" id="tunnelHint">开启后生成一个公网直连入口，跨网的朋友点链接就能进；关闭即切回本地。手机上房间跑在本机，走 P2P 直连（数据不经任何服务器，失败自动换中继通道）；桌面端走 cloudflared 隧道。</span>
       </div>
 
       <div class="split">
@@ -1839,6 +1876,8 @@
 <script src="transform.js"></script>
 <!-- ★ 安卓 shim：只在 Capacitor 原生环境激活（提供 chahuDesktop 桥 + WebView 内嵌
      离线状态机），网页版 / 桌面端加载了也不做任何事。必须在 net.js 之前。 -->
+<script src="vendor/peerjs.min.js"></script>
+<script src="webrtc-host.js"></script>
 <script src="android-shim.js"></script>
 <script src="net.js"></script>
 <script src="sfx.js"></script>

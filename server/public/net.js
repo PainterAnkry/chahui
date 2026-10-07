@@ -2,12 +2,13 @@
  * 茶绘 · 网络层
  * WebSocket 封装：自动重连、发送队列、心跳、断线状态上报
  *
- * **两条通道，同一套消息**：
- *   · `ws://…`  —— 正常的 WebSocket（网页版、连别人的服务器、连公网）
- *   · `local://` —— 桌面端的「离线模式」：主进程里挂一个不走 socket 的客户端，
- *                  消息还是这些消息，只是不经过网络（见 client/local-host.js）
+ * **三条通道，同一套消息**：
+ *   · `ws://…`     —— 正常的 WebSocket（网页版、连别人的服务器、连公网）
+ *   · `local://`   —— 离线模式：不走 socket 的客户端，消息还是这些消息（见 client/local-host.js）
+ *   · `webrtc://…` —— P2P 直连（安卓 / 网页房主）：DataChannel 管道，接口对齐 WebSocket，
+ *                     信令走 PeerJS 免费云，数据不经任何服务器（见 webrtc-host.js）
  *
- * 两条通道共用同一个收包出口 `_recv()`，所以「离线时某些消息没处理」这种
+ * 三条通道共用同一个收包出口 `_recv()`，所以「离线时某些消息没处理」这种
  * 只在真机上才发现的毛病，从结构上就不会出现。
  */
 (function (global) {
@@ -17,6 +18,45 @@
   var LOCAL_URL = 'local://';
 
   function isLocalUrl(u) { return /^local:\/\//i.test(String(u || '')); }
+  function isWebRtcUrl(u) { return /^webrtc:\/\//i.test(String(u || '')); }
+
+  /**
+   * WebRTC DataChannel 的 WebSocket 外衣：net 层其余代码（readyState 判断、
+   * send/close、onopen/onmessage/onclose）感知不到它不是真 WebSocket。
+   * serialization 用 json（与房主侧约定一致），收发的都是原始协议 JSON 字符串。
+   */
+  function RtcTransport(conn, peer) {
+    var self = this;
+    this.readyState = 0;
+    this.OPEN = 1;
+    this.CLOSED = 3;
+    this._conn = conn;
+    this._peer = peer;
+    this.onopen = this.onmessage = this.onclose = this.onerror = null;
+    conn.on('open', function () {
+      self.readyState = 1;
+      if (self.onopen) self.onopen({});
+    });
+    conn.on('data', function (d) {
+      if (self.onmessage) self.onmessage({ data: (typeof d === 'string') ? d : JSON.stringify(d) });
+    });
+    conn.on('close', function () {
+      self.readyState = 3;
+      if (self.onclose) self.onclose({});
+    });
+    conn.on('error', function (e) {
+      if (self.onerror) self.onerror(e || {});
+    });
+  }
+  RtcTransport.prototype.send = function (raw) {
+    if (this.readyState !== 1) return;
+    try { this._conn.send(String(raw)); } catch (e) { /* 通道正在死 */ }
+  };
+  RtcTransport.prototype.close = function () {
+    this.readyState = 3;
+    try { this._conn.close(); } catch (e) { /* ignore */ }
+    try { this._peer.destroy(); } catch (e) { /* ignore */ }
+  };
 
   function Net() {
     this.ws = null;
@@ -73,6 +113,7 @@
     if (url) this.url = url;
     if (!this.url) return;
     if (isLocalUrl(this.url)) return this.connectLocal();
+    if (isWebRtcUrl(this.url)) return this.connectWebRTC();
     var wasLocal = this.local;
     this.local = false;
     this.localReady = false;
@@ -135,24 +176,11 @@
 
   /* ------------------------------------------------------------ WebSocket 通道 */
 
-  Net.prototype.connectWs = function () {
-    var self = this;
-    this.manualClose = false;
-    if (this.ws && (this.ws.readyState === 0 || this.ws.readyState === 1)) {
-      try { this.ws.close(); } catch (e) { /* ignore */ }
-    }
-    clearTimeout(this.retryTimer);
-    this.setStatus('connecting');
-
-    var ws;
-    try { ws = new WebSocket(this.url); } catch (e) {
-      this.setStatus('offline', { message: '地址无效：' + this.url });
-      return this.scheduleRetry();
-    }
-    this.ws = ws;
-
-    ws.onopen = function () {
-      if (self.ws !== ws) return;   // 已经被换掉了（换通道 / 重连），别把状态改回来
+  /** 给传输对象（真 WebSocket 或 RtcTransport）接上统一的开/收/断处理。
+   *  连接成功后的状态推进、心跳、flush 在两条通道上必须完全一致 —— 抽出来。 */
+  function wireTransport(self, t, closeMsg) {
+    t.onopen = function () {
+      if (self.ws !== t) return;   // 已经被换掉了（换通道 / 重连），别把状态改回来
       self.retry = 0;
       self.lastPong = Date.now();
       self.setStatus('online');
@@ -162,30 +190,126 @@
       self.emit('open', {});
     };
 
-    ws.onmessage = function (ev) {
-      if (self.ws !== ws) return;
+    t.onmessage = function (ev) {
+      if (self.ws !== t) return;
       self._recv(ev.data);
     };
 
-    ws.onerror = function () {
-      if (self.ws !== ws) return;
+    t.onerror = function () {
+      if (self.ws !== t) return;
       self.emit('neterror', { url: self.url });
     };
 
-    ws.onclose = function (ev) {
+    t.onclose = function (ev) {
       // **这条 socket 还是「当前那条」吗？**
       // 换通道（在线 ↔ 离线）时我们会先 close() 掉旧的再建新的，而 close 事件是
       // 下一个 tick 才派发的 —— 那时候 manualClose 早被新通道重置成 false 了。
       // 不认 socket 只看 manualClose，旧连接的收尾就会把状态改回「已断开」并排一个重试，
       // 于是刚切到离线模式、状态栏却写着「连接中断，1s 后重试…」。
-      if (self.ws !== ws) return;
+      if (self.ws !== t) return;
       clearInterval(self.pingTimer);
       self.ws = null;
+      if (self._rtc) { try { self._rtc.destroy(); } catch (e) { /* ignore */ } self._rtc = null; }
       self.emit('close', ev);
       if (self.manualClose) { self.setStatus('idle'); return; }
-      self.setStatus('offline', { message: '与服务器的连接已断开' });
+      self.setStatus('offline', { message: closeMsg || '与服务器的连接已断开' });
       self.scheduleRetry();
     };
+  }
+
+  Net.prototype.connectWs = function () {
+    var self = this;
+    this.manualClose = false;
+    if (this.ws && (this.ws.readyState === 0 || this.ws.readyState === 1)) {
+      try { this.ws.close(); } catch (e) { /* ignore */ }
+    }
+    if (this._rtc) { try { this._rtc.destroy(); } catch (e) { /* ignore */ } this._rtc = null; }
+    clearTimeout(this.retryTimer);
+    this.setStatus('connecting');
+
+    var ws;
+    try { ws = new WebSocket(this.url); } catch (e) {
+      this.setStatus('offline', { message: '地址无效：' + this.url });
+      return this.scheduleRetry();
+    }
+    this.ws = ws;
+    wireTransport(self, ws);
+  };
+
+  /* ------------------------------------------------------------ WebRTC P2P 通道 */
+
+  /**
+   * P2P 直连（访客侧）：webrtc://<房主peerId>。
+   * 信令走 PeerJS 免费云（只交换握手信息），数据走 DataChannel 直达房主手机 ——
+   * 中间没有任何人的服务器。打洞失败 / 房主不在线 → 明确报错 + 走重连节奏。
+   */
+  Net.prototype.connectWebRTC = function () {
+    var self = this;
+    this.manualClose = false;
+    if (this.ws && (this.ws.readyState === 0 || this.ws.readyState === 1)) {
+      try { this.ws.close(); } catch (e) { /* ignore */ }
+      this.ws = null;
+    }
+    if (this._rtc) { try { this._rtc.destroy(); } catch (e) { /* ignore */ } this._rtc = null; }
+    clearTimeout(this.retryTimer);
+    if (!global.Peer) {
+      this.setStatus('offline', { message: '缺少 WebRTC 组件（vendor/peerjs.min.js 没加载）' });
+      return;
+    }
+    this.setStatus('connecting');
+
+    var hostId = this.url.replace(/^webrtc:\/\//i, '').replace(/\/+$/, '');
+    var peer;
+    try {
+      // 信令与 ICE 配置与房主侧同源（ChaWebRTC.signalOpts；信令云可被 CHAHU_CONFIG.signalServer 覆盖）
+      var popts = (global.ChaWebRTC && global.ChaWebRTC.signalOpts)
+        ? global.ChaWebRTC.signalOpts()
+        : { config: { iceServers: [] } };
+      peer = new global.Peer(popts);
+    } catch (e) {
+      this.setStatus('offline', { message: 'WebRTC 初始化失败：' + e.message });
+      return this.scheduleRetry();
+    }
+    this._rtc = peer;
+
+    var settled = false;
+    var timer = setTimeout(function () {
+      if (settled) return;
+      settled = true;
+      self.setStatus('offline', { message: 'P2P 连接超时 —— 房主可能不在线，或双方网络无法直连' });
+      self.scheduleRetry();
+    }, 25000);
+
+    peer.on('open', function () {
+      if (self._rtc !== peer) return;
+      var conn = peer.connect(hostId, (global.ChaWebRTC && global.ChaWebRTC.connectOpts) || { reliable: true });
+      var t = new RtcTransport(conn, peer);
+      self.ws = t;
+      wireTransport(self, t, '与房主的 P2P 连接已断开');
+    });
+
+    peer.on('error', function (err) {
+      var type = (err && err.type) || '';
+      if (type === 'peer-unavailable') {
+        // 房主不在线 / id 无效：重试也没用。先把 manualClose 顶上，让紧跟着的
+        // close 事件走「静默收尾」，再用真实原因覆盖状态文案。
+        settled = true;
+        clearTimeout(timer);
+        self.manualClose = true;
+        if (self.ws) { try { self.ws.close(); } catch (e) { /* ignore */ } }
+        self.ws = null;
+        if (self._rtc) { try { self._rtc.destroy(); } catch (e) { /* ignore */ } self._rtc = null; }
+        clearInterval(self.pingTimer);
+        self.setStatus('offline', { message: '房主不在线或入口已失效（P2P）' });
+        return;
+      }
+      self.emit('neterror', { url: self.url, error: type });
+    });
+
+    peer.on('disconnected', function () {
+      // 信令断了不影响已建立的管道；恢复信令让重连机制还有效
+      try { peer.reconnect(); } catch (e) { /* ignore */ }
+    });
   };
 
   Net.prototype.scheduleRetry = function () {
@@ -213,6 +337,7 @@
     }
     if (this.ws) { try { this.ws.close(); } catch (e) { /* ignore */ } }
     this.ws = null;
+    if (this._rtc) { try { this._rtc.destroy(); } catch (e) { /* ignore */ } this._rtc = null; }
     this.setStatus('idle');
   };
 
