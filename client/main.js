@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard, nativeTheme } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const https = require('https');
@@ -106,6 +106,22 @@ ipcMain.handle('chahu:get-info', () => ({
 }));
 
 ipcMain.handle('chahu:set-server', (e, url) => writeConfig({ server: String(url || '') }));
+
+/** 界面主题（'system' | 'light' | 'dark'）：nativeTheme.themeSource 一设，
+ *  Windows / macOS 的原生标题栏就会跟着变深变浅，渲染进程的
+ *  prefers-color-scheme 也会被它带动（两边永远一致，不会出现里深外浅）。 */
+ipcMain.handle('chahu:set-theme', (e, mode) => {
+  if (mode !== 'light' && mode !== 'dark' && mode !== 'system') mode = 'system';
+  try {
+    nativeTheme.themeSource = mode;
+    // 窗口底色跟着走：深色下那圈“Loading 白边”就不会闪出来
+    if (win && !win.isDestroyed()) {
+      win.setBackgroundColor(mode === 'dark' || (mode === 'system' && nativeTheme.shouldUseDarkColors)
+        ? '#23262b' : '#f4f5f7');
+    }
+  } catch (err) { /* 旧系统不支持就忽略 */ }
+  return nativeTheme.themeSource;
+});
 
 /** 开关内置服务器（下次启动生效） */
 ipcMain.handle('chahu:set-embedded', (e, on) => writeConfig({ embeddedServer: !!on }));

@@ -1280,6 +1280,17 @@ body { -webkit-touch-callout: none; }
   position: absolute; left: 0; top: 0;
   display: block;
   touch-action: none;
+  /* iPad Safari：双击 / 长按画布会弹出系统的「拷贝｜查询｜翻译」选择菜单
+     （用户反馈：画两下就选中画布）。这三条把画布上的文字选择、长按呼出、
+     拖拽全关掉；再配 app.js 里 touchstart/touchend 的 preventDefault 才彻底。 */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+.stage, .canvas-wrap {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 #view { background: transparent; }
 #overlay { pointer-events: none; }
@@ -4788,3 +4799,111 @@ body.left-rail-mode .panel.left .tool-grid .tool svg { width: 22px; height: 22px
 /* 缩放工具（PS 放大镜）的系统光标：默认放大，按住 Alt / 缩小工具为缩小 */
 .stage.zoom-tool { cursor: zoom-in; }
 .stage.zoom-tool.zoom-out { cursor: zoom-out; }
+
+/* ============================================================
+   自由浮窗小节：从侧栏拖出来的模块（工具栏 / 导航器 / 图层…）。
+   挂在 body 上、跟随视口定位；标题栏照旧可拖，拖回任一栏即停靠。
+   ============================================================ */
+.section-floating {
+  position: fixed;
+  z-index: 70;                 /* 盖过画布和抽屉(≈55)，低于弹窗(200) */
+  background: var(--panel, #fff);
+  border: 1px solid var(--line, #d5d8de);
+  border-radius: 10px;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, .18);
+  max-height: min(72vh, 640px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.section-floating > h4 { cursor: grab; }
+.section-floating > h4:active { cursor: grabbing; }
+.section-floating > .sec-body,
+.section-floating > .sec-content { overflow-y: auto; }
+/* 浮窗里的小节内部滚动：整个 section 自己裁切，内容区撑开 */
+.section-floating { overflow-y: auto; }
+.section-floating::before {
+  /* 顶部一条细提手提示「这里能拖」 */
+  content: "";
+  position: sticky;
+  top: 0;
+  display: block;
+  height: 3px;
+  margin: 0 auto;
+  width: 42px;
+  border-radius: 0 0 3px 3px;
+  background: var(--line, #d5d8de);
+  flex: none;
+}
+body.panel-dragging { user-select: none; -webkit-user-select: none; cursor: grabbing; }
+body.panel-dragging * { cursor: grabbing !important; }
+
+/* ============================================================
+   窄屏底部快捷条：当前色 + 最近用色 + 最近用笔。
+   只在 layout-narrow（≤1080px）出现，把最高频的「换色 / 换笔」
+   钉在拇指边上，不用每次都拉抽屉。
+   ============================================================ */
+.touch-dock {
+  display: none;
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  z-index: 30;                 /* 抽屉(≈55)和弹窗之下，画布之上 */
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid var(--line);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .16);
+  max-width: calc(100% - 24px);
+}
+body.layout-narrow .touch-dock { display: flex; }
+.touch-dock .td-color {
+  width: 34px; height: 34px;
+  border-radius: 50%;
+  border: 2px solid var(--line);
+  padding: 2px;
+  background: transparent;
+  cursor: pointer;
+  flex: none;
+}
+.touch-dock .td-color i { display: block; width: 100%; height: 100%; border-radius: 50%; }
+.touch-dock .td-recent, .touch-dock .td-brushes {
+  display: flex; align-items: center; gap: 4px;
+  overflow-x: auto; scrollbar-width: none;
+}
+.touch-dock .td-recent::-webkit-scrollbar, .touch-dock .td-brushes::-webkit-scrollbar { display: none; }
+.touch-dock .td-chip {
+  width: 26px; height: 26px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  flex: none;
+  cursor: pointer;
+  padding: 0;
+}
+.touch-dock .td-chip.td-brush {
+  background: var(--panel-2, var(--panel));
+  color: var(--text);
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.touch-dock .td-chip.td-brush svg { width: 17px; height: 17px; }
+.touch-dock .td-chip.td-brush.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.touch-dock .td-sep { width: 1px; height: 22px; background: var(--line); flex: none; }
+/* 触屏再放大一档，保证命中 */
+@media (pointer: coarse) {
+  .touch-dock .td-color { width: 40px; height: 40px; }
+  .touch-dock .td-chip { width: 32px; height: 32px; }
+  .touch-dock .td-chip.td-brush svg { width: 20px; height: 20px; }
+}
+/* openColorSection 的「在这呢」闪烁提示（抽屉跳转 / 浮窗定位后用） */
+@keyframes section-flash-kf {
+  0% { box-shadow: 0 0 0 0 transparent; }
+  25% { box-shadow: 0 0 0 3px var(--accent); }
+  70% { box-shadow: 0 0 0 3px var(--accent); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+.section-flash { animation: section-flash-kf .9s ease-out 1; }

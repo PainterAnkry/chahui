@@ -36,6 +36,8 @@ contextBridge.exposeInMainWorld('chahuDesktop', {
   setServer: (url) => ipcRenderer.invoke('chahu:set-server', url),
   setEmbeddedServer: (on) => ipcRenderer.invoke('chahu:set-embedded', on),
   getServerInfo: () => ipcRenderer.invoke('chahu:server-info'),
+  // 界面主题同步到主进程：原生标题栏跟渲染端一起变深 / 变浅
+  setUiTheme: (mode) => ipcRenderer.invoke('chahu:set-theme', mode),
 
   /* ★ 2.0.10：房间链接（chahui://）——
      装茶绘时注册了这个协议，别人点分享出来的应用链接就直接拉起客户端。

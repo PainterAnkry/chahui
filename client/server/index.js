@@ -1632,7 +1632,25 @@ function handle(ws, msg) {
       if (!room || !canDraw(room, member)) return;
       const layer = room.getLayer(msg.layerId) || room.layers[room.layers.length - 1];
       if (!member) return;
-      if (ws._activeStroke) return;
+      // 上一笔没等到 END 就来了新一笔？**自动替它收尾**，绝不能 return ——
+      // 以前直接 return，后果是断线重连 / 端上 pointer 事件被系统抢走（iPad 长按呼出
+      // 选择菜单就会 pointercancel）之后，_activeStroke 卡死在旧笔上，之后每一笔的
+      // BEGIN 都被忽略、POINTS 因 id 不匹配被丢弃 —— 用户看到的就是「约四笔吞一笔」。
+      // 自愈动作：有点就当成隐式 END 提交（一笔都不丢），没点就广播 CANCEL。
+      if (ws._activeStroke) {
+        const stale = ws._activeStroke;
+        ws._activeStroke = null;
+        if (member) member.drawing = false;
+        if (stale.points.length) {
+          stale.te = Date.now();
+          room.addStroke(stale);
+          store.markDirty(room);
+          strokeBroadcast(room, P.S2C.STROKE_END, { id: stale.id, seq: stale.seq }, ws._connId);
+          send(ws, P.S2C.STROKE_END, { id: stale.id, seq: stale.seq });
+        } else {
+          strokeBroadcast(room, P.S2C.STROKE_CANCEL, { id: stale.id }, ws._connId);
+        }
+      }
       const stroke = buildStroke(msg, member, layer);
       if (!stroke.id) return;
       ws._activeStroke = stroke;

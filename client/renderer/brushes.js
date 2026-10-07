@@ -275,10 +275,10 @@
     // 抓手：不改画面，只挪视图。鼠标上等价于「空格 + 左键 / 中键拖动」；
     // 手机 / 平板网页版上就是「单指拖画布」——以前只能靠双指，很多人根本不知道。
     { id: 'hand', name: '抓手', tool: 'hand', icon: 'hand', type: 'util', tip: '拖动画布（鼠标：空格 + 左键 / 中键；触屏：单指拖）', params: params({ brush: 'hand' }) },
-    // 缩放工具（PS 的放大镜）：点画布以点击处为中心放大 / 缩小，Alt 反向。
-    // 和抓手一样是「视图类」工具：不改画面、不参与笔刷参数。
-    { id: 'zoomIn', name: '放大', tool: 'zoomIn', icon: 'zoomIn', type: 'util', tip: '点画布放大视图，按住 Alt 变为缩小（快捷键 +）', params: params({ brush: 'hand' }) },
-    { id: 'zoomOut', name: '缩小', tool: 'zoomOut', icon: 'zoomOut', type: 'util', tip: '点画布缩小视图，按住 Alt 变为放大（快捷键 -）', params: params({ brush: 'hand' }) }
+    // 缩放工具（PS 的放大镜，两个合成一个）：点画布以点击处为中心放大；
+    // 按住往右拖 = 连续放大、往左拖 = 连续缩小（以按下点为中心）；
+    // 按住 Alt / 右键整体反向。和抓手一样是「视图类」工具：不改画面、不参与笔刷参数。
+    { id: 'zoom', name: '缩放', tool: 'zoom', icon: 'zoomIn', type: 'util', tip: '点画布放大；按住左右拖动连续缩放；Alt/右键反向（快捷键 +）', params: params({ brush: 'hand' }) }
   ];
 
   var BY_ID = {};
@@ -352,7 +352,7 @@
     fill: '油漆桶', gradient: '渐变', select: '选区笔', selectErase: '选区擦',
     marquee: '框选', lasso: '套索', wand: '魔棒',
     line: '直线', rect: '矩形', ellipse: '椭圆', picker: '吸管', text: '文字', liquify: '液化',
-    hand: '抓手', zoomIn: '放大', zoomOut: '缩小'
+    hand: '抓手', zoom: '缩放'
   };
 
   // 纸张质感（颗粒 / 纸纹）

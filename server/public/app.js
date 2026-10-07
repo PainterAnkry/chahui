@@ -151,6 +151,7 @@
     narrow: false,            // 当前是不是窄屏布局（左右栏变抽屉，见 applyLayoutMode）
     pinch: null,              // 触屏双指手势的上一帧状态（{ midX, midY, dist }）
     touchPts: null,           // 触屏按下的指针集合（pointerId -> 坐标）
+    zoomDrag: null,           // 缩放工具的按住拖动状态（{ x0, sp, scale0, dir, moved }）
     gridOn: false,
     uiScale: 1,
     importPending: null,      // 导入对话框里待确认的笔刷
@@ -354,6 +355,9 @@
     setToolButtons();
     updateBrushLabel();
     drawBrushPreview();
+    // 窄屏快捷条：记录 + 高亮刷新（函数声明提升，此处可见）
+    pushRecentBrush(item.id);
+    renderTouchDock();
     // 窄屏里左栏是盖在画布上的抽屉：选完这一笔就把抽屉收掉，别挡着刚腾出来的画布
     autoCloseLeftDrawer();
   }
@@ -495,6 +499,12 @@
       var meta = document.querySelector('meta[name="color-scheme"]');
       if (meta) meta.setAttribute('content', want);
     } catch (e) { /* ignore */ }
+    // 同步给主进程：原生标题栏（Windows 深色模式下默认还是白条）跟渲染端一起切换。
+    // 传原始档位（system/light/dark），「跟随系统」就继续跟着系统走。
+    try {
+      var desk = global.chahuDesktop;
+      if (desk && desk.setUiTheme) desk.setUiTheme(S.uiTheme);
+    } catch (e) { /* 网页端没有这个桥，忽略 */ }
   }
 
   function setUiTheme(mode) {
@@ -597,6 +607,78 @@
     updateRightScroll();
   }
 
+  /* ---------------------------------------------------- 小节自由浮窗
+   * 拖出侧栏的小节脱离两个栏容器，变成挂在 body 上的浮窗：
+   * 标题栏照旧可拖（bindPanelDnD），拖回任一栏容器里就重新停靠。
+   * 位置 / 宽度记在 localStorage，重开还在。
+   */
+  var FLOAT_KEY = 'chahu.floatPanels';
+
+  function loadFloatMap() {
+    try { var m = JSON.parse(lsGet(FLOAT_KEY, 'null')); return m && typeof m === 'object' ? m : {}; }
+    catch (e) { return {}; }
+  }
+
+  /** 把浮窗摆到 (x, y)，夹在视口里 */
+  function placeFloat(sec, x, y) {
+    var vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
+    var w = sec.offsetWidth || 240, h = sec.offsetHeight || 200;
+    x = Math.max(4, Math.min(x, vw - Math.min(w, vw - 8) - 4));
+    y = Math.max(4, Math.min(y, vh - Math.min(h, vh - 8) - 4));
+    sec.style.left = Math.round(x) + 'px';
+    sec.style.top = Math.round(y) + 'px';
+  }
+
+  /** 栏内小节 → 浮窗（x/y 为视口坐标） */
+  function floatSection(sec, x, y) {
+    var w = sec.getBoundingClientRect().width;
+    document.body.appendChild(sec);
+    sec.classList.add('section-floating');
+    sec.style.width = Math.max(220, Math.round(w)) + 'px';
+    placeFloat(sec, x, y);
+    persistFloatPanels();
+    updateRightScroll();
+  }
+
+  /** 浮窗 → 栏内（停靠时清掉浮窗痕迹与记录） */
+  function unfloatSection(sec) {
+    if (!sec.classList.contains('section-floating')) return;
+    sec.classList.remove('section-floating');
+    sec.style.left = '';
+    sec.style.top = '';
+    sec.style.width = '';
+    var m = loadFloatMap();
+    delete m[sec.getAttribute('data-section')];
+    lsSet(FLOAT_KEY, JSON.stringify(m));
+  }
+
+  function persistFloatPanels() {
+    var m = {};
+    Array.prototype.forEach.call(document.querySelectorAll('.section-floating[data-section]'), function (sec) {
+      m[sec.getAttribute('data-section')] = {
+        x: parseInt(sec.style.left, 10) || 0,
+        y: parseInt(sec.style.top, 10) || 0,
+        w: parseInt(sec.style.width, 10) || 0
+      };
+    });
+    lsSet(FLOAT_KEY, JSON.stringify(m));
+  }
+
+  /** 开机恢复上次的浮窗（在 applyPanelOrder 之后调） */
+  function restoreFloatPanels() {
+    var m = loadFloatMap();
+    Object.keys(m).forEach(function (id) {
+      var sec = document.querySelector('[data-section="' + id + '"]');
+      if (!sec || sec.classList.contains('section-floating')) return;
+      var f = m[id];
+      document.body.appendChild(sec);
+      sec.classList.add('section-floating');
+      if (f.w) sec.style.width = Math.max(220, f.w) + 'px';
+      placeFloat(sec, f.x, f.y);
+    });
+    updateRightScroll();
+  }
+
   function savePanelOrder() {
     var left = $('#leftPanelScroll');
     var right = $('#rightPanelScroll');
@@ -631,6 +713,7 @@
     if (resetBtn) resetBtn.onclick = function () { resetPanels(); };
 
     var dragging = null, pointerId = null, autoTimer = null, autoDir = 0, dropBox = null;
+    var grabDX = 0, grabDY = 0;   // 按下点相对小节左上角的偏移（拖出浮窗时用）
 
     function clearMarks() {
       panelContainers().forEach(function (box) {
@@ -662,8 +745,17 @@
       return null;
     }
     function hitTest(x, y) {
-      var el = document.elementFromPoint(x, y);
-      var sec = nearestSection(el);
+      // 用 elementsFromPoint 穿透：正在拖的小节（浮窗时盖在落点上）不参与命中，
+      // 不然浮窗拖到栏容器上时，下面的停靠目标永远探不到
+      var list = document.elementsFromPoint ? document.elementsFromPoint(x, y) : [document.elementFromPoint(x, y)];
+      var el = null;
+      for (var i = 0; i < list.length; i++) {
+        var c = list[i];
+        if (dragging && (c === dragging || dragging.contains(c))) continue;
+        el = c;
+        break;
+      }
+      var sec = el ? nearestSection(el) : null;
       return { section: sec, box: sec ? containerOf(sec) : containerOf(el) };
     }
     function runAuto() {
@@ -682,7 +774,8 @@
       if (dir) autoTimer = setInterval(runAuto, 16);
     }
 
-    // 整个小节标题栏都是把手；标题里的按钮照常可点
+    // 整个小节标题栏都是把手；标题里的按钮照常可点。
+    // 监听挂在 document 上：浮窗状态的小节已经不在两个栏容器里了，也得能起手。
     function onDown(e) {
       if (e.button !== 0) return;
       var t = e.target;
@@ -692,7 +785,13 @@
       if (!h4 && !grip) return;
       var sec = (grip || h4).closest('[data-section]');
       if (!sec) return;
+      // 只有「栏容器里的小节」和「已经是浮窗的小节」可以拖
+      var floating = sec.classList.contains('section-floating');
+      if (!floating && !containerOf(sec)) return;
       e.preventDefault();
+      var r = sec.getBoundingClientRect();
+      grabDX = e.clientX - r.left;
+      grabDY = e.clientY - r.top;
       dragging = sec;
       pointerId = e.pointerId;
       sec.classList.add('section-dragging');
@@ -730,6 +829,8 @@
 
     function finish(e) {
       if (!dragging || (e && e.pointerId != null && e.pointerId !== pointerId)) return;
+      var sec = dragging;
+      var wasFloating = sec.classList.contains('section-floating');
       var hit = e ? hitTest(e.clientX, e.clientY) : null;
       var moved = false;
       if (hit && hit.section && hit.section !== dragging) {
@@ -747,6 +848,8 @@
         moved = true;
       }
       if (moved) {
+        // 拖回了某个栏容器 → 停靠回去（浮窗态在此转正）
+        unfloatSection(sec);
         var toRight = containerOf(dragging) === $('#rightPanelScroll');
         savePanelOrder();
         renderToolGrid && renderToolGrid();
@@ -754,6 +857,18 @@
         var name = { nav: '导航器', tools: '工具栏', brushes: '笔刷栏', brush: '画笔', fx: '效果', color: '颜色', layers: '图层' };
         var id = dragging.getAttribute('data-section');
         toast('「' + (name[id] || id) + '」已移到' + (toRight ? '右侧栏' : '左栏'));
+      } else if (e && (!hit || !hit.box) &&
+                 !sec.classList.contains('section-floating')) {
+        // 丢在了两个栏容器之外 → 脱离侧栏，变成自由浮窗（按住的位置就地放下）
+        floatSection(sec, e.clientX - grabDX, e.clientY - grabDY);
+        savePanelOrder();
+        engine.resize();
+      } else if (e && wasFloating && (!hit || !hit.box || hit.section === sec)) {
+        // 浮窗拖了一圈还落在栏外（或落回自己身上）→ 就地摆到松手的位置
+        placeFloat(sec, e.clientX - grabDX, e.clientY - grabDY);
+        persistFloatPanels();
+      } else if (!moved && wasFloating && hit && hit.box) {
+        // 浮窗拖到栏容器上但没触发停靠（比如落点在自己身上又在容器外沿）→ 不动
       }
       dragging.classList.remove('section-dragging');
       clearMarks();
@@ -762,10 +877,12 @@
       document.body.classList.remove('panel-dragging');
     }
 
-    // 两个容器都要能起手（右栏里的小节也要能再拖回去）
+    // 两个容器都要能起手（右栏里的小节也要能再拖回去）；
+    // document 级的监听管浮窗小节的拖动（onDown 里有过滤，不会误伤别处）
     panelContainers().forEach(function (box) {
       box.addEventListener('pointerdown', onDown);
     });
+    document.addEventListener('pointerdown', onDown);
     document.addEventListener('pointermove', onMove);
     document.addEventListener('pointerup', finish);
     document.addEventListener('pointercancel', finish);
@@ -878,7 +995,7 @@
     // H 已经给了「视图 → 左右翻转视图」，不必再抢一个字母键。
     hand: 'Space',
     // 缩放工具不占键：+ / - 已经是全局的缩放快捷键（见 bindKeys），别在这里撞车
-    zoomIn: '', zoomOut: ''
+    zoom: ''
   };
   var ITEM_KEYS = null;
   var ITEM_KEYS_STORE = 'chahu.itemKeys';
@@ -972,7 +1089,12 @@
 
   function renderToolGrid() {
     var all = visibleItems();
-    var tools = all.filter(function (it) { return !isBrushItem(it); });
+    // 工具栏里也放「画笔 / 橡皮擦」两个入口（PS 工具条的习惯）：
+    // 笔刷栏里的那些笔（铅笔 / 水彩…）不重复，只挑这两个最常用的。
+    // 和笔刷栏是同一份 item（同一个 id），选中态 / 快捷键角标自动一致。
+    var tools = all.filter(function (it) {
+      return !isBrushItem(it) || it.id === 'brush' || it.id === 'eraser';
+    });
     var brushes = all.filter(isBrushItem);
     var toolBox = $('#toolGrid');
     var brushBox = $('#brushGrid');
@@ -1338,7 +1460,7 @@
   var STROKE_TOOLS = ['brush', 'eraser', 'blur', 'smudge', 'line', 'rect', 'ellipse', 'select', 'selectErase', 'gradient'];
 
   /** 视图类工具：不改画面，不该出现「笔刷环」光标（抓手 / 吸管 / 缩放） */
-  function isViewTool(t) { return t === 'picker' || t === 'hand' || t === 'zoomIn' || t === 'zoomOut'; }
+  function isViewTool(t) { return t === 'picker' || t === 'hand' || t === 'zoom'; }
 
   var PARAM_TOOLS = {
     sizeRange: ['brush', 'eraser', 'blur', 'smudge', 'line', 'rect', 'ellipse', 'select', 'selectErase'],
@@ -2301,6 +2423,93 @@
     if (S.recent.length > 12) S.recent.length = 12;
     lsSet(RECENT_KEY, JSON.stringify(S.recent));
     renderRecent();
+    renderTouchDock();   // 窄屏快捷条上的最近色同步刷新
+  }
+
+  /* ---------------- 窄屏底部快捷条（快捷换色 / 换笔） ----------------
+   * 窄屏下两栏都是抽屉，换一次色 / 换一支笔都要先拉抽屉 —— 高频操作被埋了。
+   * 这条 dock 钉在画布底部：当前色（点了去颜色面板）+ 最近用色 + 最近用笔。
+   * 桌面宽屏不显示（body.layout-narrow 才有）。 */
+  var RECENT_BRUSH_KEY = 'chahu.recentBrushes';
+
+  function loadRecentBrushes() {
+    try {
+      var a = JSON.parse(lsGet(RECENT_BRUSH_KEY, 'null'));
+      if (!Array.isArray(a)) return [];
+      return a.filter(function (id) { return !!Brushes.get(id); }).slice(0, 8);
+    } catch (e) { return []; }
+  }
+
+  function pushRecentBrush(id) {
+    if (!Brushes.get(id)) return;
+    var a = loadRecentBrushes().filter(function (x) { return x !== id; });
+    a.unshift(id);
+    if (a.length > 8) a.length = 8;
+    lsSet(RECENT_BRUSH_KEY, JSON.stringify(a));
+  }
+
+  var dockBound = false;
+
+  function renderTouchDock() {
+    var sw = $('#tdSwatch');
+    if (!sw) return;
+    sw.style.background = S.color;
+    // 最近用色（最多 5 个；没有就用默认色板顶上几个顶着，别空荡荡）
+    var rb = $('#tdRecent');
+    rb.innerHTML = '';
+    var colors = S.recent.slice(0, 5);
+    if (!colors.length) colors = ['#000000', '#ffffff', '#e53935', '#1e88e5', '#43a047'];
+    colors.forEach(function (c) {
+      var b = document.createElement('button');
+      b.className = 'td-chip';
+      b.style.background = c;
+      b.title = c + '（点一下就用它）';
+      b.onclick = function () { setColor(c); };
+      rb.appendChild(b);
+    });
+    // 最近用笔（最多 4 个；记录不满就用默认几支补齐，别空荡荡）
+    var bb = $('#tdBrushes');
+    bb.innerHTML = '';
+    var ids = loadRecentBrushes();
+    ['brush', 'eraser', 'pencil', 'airbrush', 'marker'].forEach(function (id) {
+      if (ids.length >= 4) return;
+      if (Brushes.get(id) && ids.indexOf(id) < 0) ids.push(id);
+    });
+    ids = ids.filter(function (id) { return !!Brushes.get(id); }).slice(0, 4);
+    ids.forEach(function (id) {
+      var it = Brushes.get(id);
+      var b = document.createElement('button');
+      b.className = 'td-chip td-brush' + (id === S.brushId ? ' active' : '');
+      b.innerHTML = Brushes.iconSvg(it.icon || it.id);
+      b.title = it.name + '（点一下就换）';
+      b.onclick = function () { loadBrush(id); };
+      bb.appendChild(b);
+    });
+    if (!dockBound) {
+      dockBound = true;
+      $('#tdColor').addEventListener('click', openColorSection);
+    }
+  }
+
+  /** 快捷条上点当前色：把装着颜色面板的抽屉拉开并跳到那一节
+   *  （颜色节被拖成浮窗时就地闪一下提醒位置） */
+  function openColorSection() {
+    var sec = document.querySelector('[data-section="color"]');
+    if (!sec) return;
+    if (sec.classList.contains('section-floating')) {
+      sec.classList.remove('section-flash');
+      void sec.offsetWidth;                       // 重启动画
+      sec.classList.add('section-flash');
+      return;
+    }
+    if (S.narrow) {
+      if (sec.closest('#leftPanelScroll')) setLeftCollapsed(false, { persist: false });
+      else setSideCollapsed(false, { persist: false });
+    }
+    try { sec.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } catch (e) { /* ignore */ }
+    sec.classList.remove('section-flash');
+    void sec.offsetWidth;
+    sec.classList.add('section-flash');
   }
 
   /* ============================================================ 顶栏 */
@@ -4311,14 +4520,14 @@
     // 抓手 / 缩放工具也不显示：不是「笔」，圈一个笔刷大小的环只会让人误会。
     // 但按住 Alt 时例外 —— 那时真的会取色，光标必须跟着变成吸管（见 altPicking）。
     var handTool = S.tool === 'hand';
-    var viewTool = handTool || S.tool === 'zoomIn' || S.tool === 'zoomOut';
+    var viewTool = handTool || S.tool === 'zoom';
     var hide = !S.pointer.inside || !!S.pan || !S.joined || !!engine.transform ||
       (viewTool && !altPicking());
     // 抓手态把系统光标换成张开的手（拖动中由 .stage.panning 换成抓紧的手）
     $('#stage').classList.toggle('hand-tool', handTool);
     // 缩放工具给个放大镜光标（方向随 Alt 翻转）
-    var zoomOutNow = S.tool === 'zoomOut' ? !S.altDown : (S.tool === 'zoomIn' && S.altDown);
-    $('#stage').classList.toggle('zoom-tool', S.tool === 'zoomIn' || S.tool === 'zoomOut');
+    var zoomOutNow = S.tool === 'zoom' && S.altDown;
+    $('#stage').classList.toggle('zoom-tool', S.tool === 'zoom');
     $('#stage').classList.toggle('zoom-out', zoomOutNow);
     var drop = !hide && altPicking();
     el.classList.toggle('hidden', hide);
@@ -4617,6 +4826,9 @@
     if (!stroke) return;
     S.session = {
       id: id, last: [px, py], pending: [], tool: S.tool, local: isSelectToolId(S.tool),
+      // t0 / npts：给「双指轻点误触起笔」的静默取消用（见 bindTouchGestures）——
+      // 刚落笔不到一瞬、点数寥寥的一笔，多半是手势的第一根手指，该取消而不是提交
+      t0: Date.now(), npts: 1,
       // Chrome 的起笔占位压力**恰好就是 0.5**，数值上没法和「真按到一半」区分。
       // 保守起见：起笔压力正好落在 0.5 就当作可疑，等第一个真实移动压力到了再回改。
       // （若用户真的一直半压，回改后的值也还是 0.5，没有副作用。）
@@ -4709,6 +4921,7 @@
     S.session.last = [p[0], p[1]];
     engine.addPoints(S.session.id, [p]);
     S.session.pending.push(p);
+    S.session.npts = (S.session.npts || 1) + 1;
     flushPoints(false);
   }
 
@@ -4721,6 +4934,18 @@
     var pts = S.session.pending;
     S.session.pending = [];
     net.send(P.C2S.STROKE_POINTS, { id: S.session.id, pts: pts });
+  }
+
+  /** 静默取消当前笔画：不发 END、不进撤销栈、别人看到的是「这一笔没发生过」。
+   *  给双指轻点 / 手势误触用的 —— 轻点不该留下一笔，更不该占掉一次撤销。 */
+  function cancelLocalStroke() {
+    if (!S.session) return;
+    var id = S.session.id;
+    S.session = null;
+    S.lineAnchor = null;
+    engine.clearOverlay();
+    net.send(P.C2S.STROKE_CANCEL, { id: id });
+    engine.cancelStroke(id);
   }
 
   function endLocal() {
@@ -4896,15 +5121,17 @@
         return;
       }
 
-      // 缩放工具（PS 的放大镜）：点哪缩哪 —— 以点击处为中心放大 / 缩小。
-      // 按住 Alt 反向（放大工具变缩小、反之亦然）；右键同样反向（PS 习惯）。
-      if (S.tool === 'zoomIn' || S.tool === 'zoomOut') {
+      // 缩放工具（PS 的放大镜，两个合成一个）：
+      //  · 单击 —— 以点击处为中心放进一步（Alt / 右键 = 缩小）；
+      //  · 按住左右拖 —— 连续缩放：往右拖放大、往左拖缩小（PS 的拖拽缩放手感），
+      //    拖动 300px = 缩放翻倍，中心固定在按下那一点，方向随 Alt / 右键翻转。
+      if (S.tool === 'zoom') {
         e.preventDefault();
         var zsp = stagePoint(e);
-        var zoomDir = ((S.tool === 'zoomIn') !== (!!e.altKey || e.button === 2)) ? 1.25 : 1 / 1.25;
-        engine.setZoom(engine.scale * zoomDir, zsp.x, zsp.y);
-        S.pointer.sx = zsp.x; S.pointer.sy = zsp.y;
-        updateBrushCursor();
+        var zdir = (e.altKey || e.button === 2) ? -1 : 1;
+        if (e.buttons & 2) e.preventDefault();      // 右键拖：别让浏览器菜单钻出来
+        S.zoomDrag = { x0: e.clientX, sp: zsp, scale0: engine.scale, dir: zdir, moved: false };
+        view.setPointerCapture(e.pointerId);
         return;
       }
 
@@ -4928,10 +5155,33 @@
       S.lineAnchor = (e.shiftKey && !isSelectToolId(S.tool) && !isTwoPointTool(S.tool) &&
         S.tool !== 'fill' && S.tool !== 'wand' && S.tool !== 'picker')
         ? { x: dp.x, y: dp.y } : null;
+      // 触屏起笔先「挂起」一拍（90ms）：双指轻点撤销 / 双指手势的第一根手指
+      // 不该真的落笔 —— 不然每次轻点都会先画出一个点，还把它压进撤销栈，
+      // 轻点撤销撤掉的是这个点而不是上一笔（iPad 用户反馈的「撤销没反应」就是这么来的）。
+      // 手指一动超过阈值立即转正（画画零延迟），安安静静点到 90ms 也转正（点一小笔）。
+      if (e.pointerType === 'touch') {
+        S.touchPending = { x: dp.x, y: dp.y, pressure: e.pressure, pt: e.pointerType, pid: e.pointerId };
+        clearTimeout(S.touchStartTimer);
+        S.touchStartTimer = setTimeout(function () {
+          var t = S.touchPending;
+          S.touchPending = null;
+          if (t && !S.session && S.touchPts && S.touchPts.size === 1) beginLocal(t.x, t.y, t.pressure, t.pt);
+        }, 90);
+        return;
+      }
       beginLocal(dp.x, dp.y, e.pressure, e.pointerType);
     });
 
     view.addEventListener('pointerenter', function () { setPointerCursor(true); });
+
+    // iOS Safari 的「拷贝｜查询｜翻译」选择菜单：pointer 事件的 preventDefault 拦不住
+    // 它的文字选择引擎，必须在 touch 事件上 preventDefault（且 passive: false）。
+    // 只挂在画布上 —— 侧栏 / 弹窗里的输入框、滑块不受影响。
+    // touchstart：掐掉长按放大镜与选择起点；touchend：掐掉双击选中。
+    function touchGuard(e) { e.preventDefault(); }
+    view.addEventListener('touchstart', touchGuard, { passive: false });
+    view.addEventListener('touchend', touchGuard, { passive: false });
+    view.addEventListener('touchcancel', touchGuard, { passive: false });
 
     view.addEventListener('pointermove', function (e) {
       var sp = stagePoint(e);
@@ -4939,6 +5189,31 @@
       S.pointer.sy = sp.y;
       S.pointer.inside = true;
       notePointerSample(e);            // 攒样本：判断「报成 mouse 的是不是数位板」
+      // 缩放工具的按住拖动：往右放大、往左缩小，中心固定在按下那一点
+      if (S.zoomDrag && e.pointerId != null) {
+        if (!(e.buttons & 1) && !(e.buttons & 2)) { S.zoomDrag = null; }
+        else {
+          var zdx = e.clientX - S.zoomDrag.x0;
+          if (Math.abs(zdx) > 3) S.zoomDrag.moved = true;
+          var zf = Math.pow(2, (zdx / 300) * S.zoomDrag.dir);
+          var zt = Math.max(0.05, Math.min(64, S.zoomDrag.scale0 * zf));
+          engine.setZoom(zt, S.zoomDrag.sp.x, S.zoomDrag.sp.y);
+          S.pointer.sx = S.zoomDrag.sp.x; S.pointer.sy = S.zoomDrag.sp.y;
+          updateBrushCursor();
+          return;
+        }
+      }
+      // 挂起中的触屏起笔：手指真的在画（挪动超过阈值）→ 立即转正起笔，不等计时器
+      if (S.touchPending && e.pointerId === S.touchPending.pid && !S.session) {
+        var tp0 = engine.screenToDoc(sp.x, sp.y);
+        var tol0 = 10 / Math.max(engine.scale, 0.05);
+        if (Math.hypot(tp0.x - S.touchPending.x, tp0.y - S.touchPending.y) > tol0) {
+          var pend = S.touchPending;
+          clearTimeout(S.touchStartTimer);
+          S.touchPending = null;
+          beginLocal(pend.x, pend.y, pend.pressure, pend.pt);
+        }
+      }
       // Alt 状态以指针事件为准（离屏 / 焦点丢失时 keyup 是收不到的）
       S.altDown = !!e.altKey;
       // 尺子把手悬停反馈：能抓的地方换成 move / crosshair，不然不知道哪儿能拖
@@ -5019,6 +5294,17 @@
     });
 
     function up() {
+      // 缩放工具收尾：基本没挪动 = 一次单击 → 放大 / 缩小一档（PS 手感）
+      if (S.zoomDrag) {
+        var zd = S.zoomDrag;
+        S.zoomDrag = null;
+        if (!zd.moved) {
+          engine.setZoom(engine.scale * (zd.dir > 0 ? 1.25 : 1 / 1.25), zd.sp.x, zd.sp.y);
+          S.pointer.sx = zd.sp.x; S.pointer.sy = zd.sp.y;
+          updateBrushCursor();
+        }
+        return;
+      }
       // 尺子把手拖动收尾：尺子留在摆到的位置
       if (S.rulerManip) {
         S.rulerManip = null;
@@ -5049,6 +5335,8 @@
         $('#stage').classList.remove('panning');
         updateBrushCursor();
       }
+      // 挂起中的触屏起笔：手指已经抬起来了 → 作废（单指轻点不落笔，和 Procreate 一致）
+      if (S.touchPending) { clearTimeout(S.touchStartTimer); S.touchPending = null; }
       if (S.session) endLocal();
     }
     view.addEventListener('pointerup', up);
@@ -5117,7 +5405,16 @@
       if (pts.size < 2) return;          // 第一根手指照常画画（不拦）
       e.preventDefault();
       e.stopPropagation();               // 第二根手指不落笔
-      if (S.session) endLocal();
+      // 第一根手指还挂起着（触屏起笔延迟那 90ms）→ 直接作废，双指轻点不留点
+      if (S.touchPending) { clearTimeout(S.touchStartTimer); S.touchPending = null; }
+      // 第一根手指已经真落笔、但明显只是手势的前奏（时间极短 + 没画几个点）→
+      // 静默取消：不发 END、不进撤销栈。之前这里走 endLocal()，会把这点
+      // 压进撤销栈，之后的双指轻点 undo 撤掉的是这个点，看起来就是「撤销没反应」。
+      if (S.session && (Date.now() - (S.session.t0 || 0) < 400) && (S.session.npts || 1) <= 4) {
+        cancelLocalStroke();
+      } else if (S.session) {
+        endLocal();
+      }
       S.pan = null;
       S.pinch = snapshot();
       stage.classList.add('gesturing');
@@ -13158,6 +13455,8 @@
     applyPanelOrder();
     // 折叠状态要在 applyPanelOrder 之后落 —— 小节可能被拖到右栏，得先搬完再定折叠
     applySectionStates();
+    // 浮窗小节最后恢复：applyPanelOrder 只管两个栏容器，浮在外的得单独归位
+    restoreFloatPanels();
     bindUI();
     bindKeys();
     bindPaste();
@@ -13216,6 +13515,7 @@
     setBgColor(S.bgColor);
     S.recent = loadRecent();
     renderRecent();
+    renderTouchDock();     // 窄屏底部快捷条（换色 / 换笔）
     setColor(S.color || '#2b2b2b', false);
     $('#symSelect').value = S.sym;
     $('#cursorStyle').value = S.cursorStyle;
@@ -13234,6 +13534,10 @@
       refreshMenuChecks();
     });
     net.on('open', function () {
+      // 重连后服务端那边绝不可能有「正画到一半的这笔」（断线时它的 BEGIN/POINTS/END
+      // 有一半根本没送到）—— 本地留着只会变成幽灵笔画，等 resync 一冲就乱了。
+      // 静默取消它：损失的是断线打断的那一笔，不会连累后面的笔。
+      if (S.session) cancelLocalStroke();
       if (S.room && S.room.id && S.me.name) {
         setStatus('已重连，正在回到「' + S.room.name + '」…');
         // 带密码的房间重连也要带密码 —— 本地记着上次输对的那个
@@ -13549,6 +13853,8 @@
       localStorage.removeItem(SECTION_KEY);
       localStorage.removeItem('chahu.panelOrder');
       localStorage.removeItem('chahu.panelSides');
+      // 浮出去的小节也一并收回
+      localStorage.removeItem(FLOAT_KEY);
       // 栏宽也一并还原 —— 以前不清，点了「恢复默认」栏宽还是歪的
       localStorage.removeItem('chahu.colW');
     } catch (e) { /* ignore */ }
@@ -13559,6 +13865,13 @@
     var left = $('#leftPanelScroll');
     if (left) {
       document.querySelectorAll('#rightPanelScroll [data-section]').forEach(function (s) {
+        s.classList.remove('hidden');
+        left.appendChild(s);
+      });
+      // 浮窗小节：摘掉浮窗样式搬回左栏
+      document.querySelectorAll('.section-floating[data-section]').forEach(function (s) {
+        s.classList.remove('section-floating');
+        s.style.left = ''; s.style.top = ''; s.style.width = '';
         s.classList.remove('hidden');
         left.appendChild(s);
       });

@@ -573,6 +573,16 @@
     </div>
   </div>
 
+  <!-- 窄屏（手机 / 平板竖屏）底部快捷条：当前色 + 最近用色 + 常用笔。
+       两栏在窄屏下都收成了抽屉，换色 / 换笔每次都要拉抽屉太折腾，
+       这条把最高频的两个操作钉在拇指边上。只在 layout-narrow 显示。 -->
+  <div class="touch-dock" id="touchDock">
+    <button class="td-color" id="tdColor" title="当前颜色（点一下跳到颜色面板）"><i id="tdSwatch"></i></button>
+    <div class="td-recent" id="tdRecent" title="最近用过的颜色"></div>
+    <span class="td-sep"></span>
+    <div class="td-brushes" id="tdBrushes" title="最近用过的笔"></div>
+  </div>
+
     <!-- 你画我猜 / 接龙 / 画皮：画布上沿的状态条。不在游戏模式时整条隐藏。
          接龙（写词 / 作画 / 猜词 / 回放）走 #stage.chain-strip 那一套 CSS：
          整条铺满画布上沿、高 ≤ 40px、半透明，只显示「阶段 · 倒计时 · 第 X/Y 手 · 已完成」，
