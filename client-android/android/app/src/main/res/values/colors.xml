@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- 跟随应用浅色主题（styles.css :root 的 --chrome）：系统栏不再是黑一块 -->
+    <!-- 跟随应用浅色主题（styles.css 里的 chrome 令牌）：系统栏不再是黑一块 -->
     <color name="chahui_chrome">#F8F9FB</color>
     <color name="chahui_chrome_dark">#1A1E26</color>
 </resources>
