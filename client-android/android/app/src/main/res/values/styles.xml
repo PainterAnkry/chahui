@@ -13,6 +13,14 @@
         <item name="windowActionBar">false</item>
         <item name="windowNoTitle">true</item>
         <item name="android:background">@null</item>
+        <!-- ★ 让出系统状态栏 / 导航栏（targetSdk 35 起默认 edge-to-edge，会顶掉一片画布）。
+             显式退出 edge-to-edge：WebView 回到系统栏下方，状态栏 / 导航栏显示浅色 chrome。 -->
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
+        <item name="android:statusBarColor">@color/chahui_chrome</item>
+        <item name="android:navigationBarColor">@color/chahui_chrome</item>
+        <!-- 浅色系统栏 + 深色前景图标（API 27+ 生效，旧系统自动忽略） -->
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
     </style>
 
 

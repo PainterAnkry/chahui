@@ -34,7 +34,11 @@ const MAX_GUESTS = 16;                  // 每条隧道的访客上限（手机�
 const MAX_SESSIONS = 64;                // 整台中继的会话上限
 const OPEN_TIMEOUT = 15000;             // 宿主连上后多久没发 TUNNEL_OPEN 就踢
 const RATE_WINDOW = 10000;              // 速率闸窗口
-const RATE_MAX = 400;                   // 窗口内最大帧数（绘画突发 ~25/秒，余量很大）
+const RATE_MAX = 400;                   // 窗口内最大帧数（单访客绘画突发 ~25/秒，余量很大）
+// ⚠ 宿主连接上没有独立闸——它把**所有访客**的帧聚合成一条流转发。仍按 400/10s 算的话
+//   2-3 个人同时画就触顶丢帧（真机踩过：表现为画面莫名缺笔、频繁「中继失败」）。
+//   宿主是被信任端（能开隧道就能打满带宽），闸只是兜底防脚本，放宽一个量级。
+const RATE_MAX_HOST = 4000;             // 宿主连接：窗口内最大帧数（≈8-10 人同时画）
 
 /** 随机会话 id：小写字母数字、无易混字符，8 位（62^8 对盗用足够） */
 function newId() {
@@ -93,7 +97,7 @@ function createRelay({ log } = {}) {
         const s = { id, host: ws, guests: new Map(), nextG: 1, openedAt: Date.now() };
         sessions.set(id, s);
         ws._sessionId = id;
-        ws._rateOk = rateGate();
+        ws._rateOk = rateGate(RATE_MAX_HOST);
         safeSend(ws, { t: 'TUNNEL_OPENED', id, guests: 0 });
         log_('隧道开启', id);
         return;
@@ -157,14 +161,15 @@ function createRelay({ log } = {}) {
     ws.on('error', () => { /* close 会跟着来 */ });
   }
 
-  /** 每连接一个的轻量速率闸：窗口内超量直接丢帧 */
-  function rateGate() {
+  /** 每连接一个的轻量速率闸：窗口内超量直接丢帧（max 可调：宿主聚合连接用更大的额度） */
+  function rateGate(max) {
+    const cap = max || RATE_MAX;
     let n = 0;
     let winStart = Date.now();
     return function () {
       const now = Date.now();
       if (now - winStart >= RATE_WINDOW) { winStart = now; n = 0; }
-      return ++n <= RATE_MAX;
+      return ++n <= cap;
     };
   }
 

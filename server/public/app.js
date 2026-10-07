@@ -149,6 +149,7 @@
     leftPanelOpen: true,      // 左侧整列面板是否显示
     sideCollapsed: lsGet('chahu.side', '1') === '0',   // 右侧聊天 / 成员 / 笔迹栏是否收起
     narrow: false,            // 当前是不是窄屏布局（左右栏变抽屉，见 applyLayoutMode）
+    erase: false,             // 擦除模式：当前笔刷当橡皮用（笔刷本身不变）
     pinch: null,              // 触屏双指手势的上一帧状态（{ midX, midY, dist }）
     touchPts: null,           // 触屏按下的指针集合（pointerId -> 坐标）
     zoomDrag: null,           // 缩放工具的按住拖动状态（{ x0, sp, scale0, dir, moved }）
@@ -347,6 +348,9 @@
     S.brushId = item.id;
     S.brush = Brushes.resolveParams(item, S.overrides);
     S.brush.sym = S.sym;
+    // 擦除模式选笔：笔刷照常换，笔还是当橡皮用；但选到油漆桶 / 渐变 / 吸管这类
+    // 非落笔工具时擦除没有意义，自动退出擦除模式。
+    if (S.erase && isSpecialToolId(item.tool)) S.erase = false;
     S.tool = item.tool;
     S.lastOfFamily[item.tool] = item.id;
     renderToolGrid();
@@ -479,8 +483,12 @@
   var DARK_MQ = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
 
   function loadThemePref() {
-    var v = lsGet(THEME_KEY, 'system');
-    S.uiTheme = THEME_MODES.some(function (m) { return m.id === v; }) ? v : 'system';
+    // 安卓端默认浅色：手机系统普遍开了深色模式，跟随系统会让界面白一块黑一块
+    // （WebView 深色 + 系统栏浅色混在一起）。没存过偏好的安卓壳里直接给浅色。
+    var def = (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform())
+      ? 'light' : 'system';
+    var v = lsGet(THEME_KEY, def);
+    S.uiTheme = THEME_MODES.some(function (m) { return m.id === v; }) ? v : def;
   }
 
   /** 当前**实际**生效的是哪套（把 system 解析成 light / dark） */
@@ -649,9 +657,12 @@
       b.addEventListener('pointerdown', function (e) { e.stopPropagation(); });
       b.addEventListener('click', function (e) {
         e.stopPropagation();
-        dockBack(sec);
+        // 收回左栏（浮窗都是从栏里拖出来的，✕ 统一送回左栏抽屉）
+        sec.classList.remove('hud-card');
+        var box = $('#leftPanelScroll') || panelContainers()[0];
+        if (box && sec.parentElement !== box) box.appendChild(sec);
+        unfloatSection(sec);
         savePanelOrder();
-        syncHudRailActive();
       });
       h4.appendChild(b);
     }
@@ -914,156 +925,6 @@
     document.addEventListener('pointerup', finish);
     document.addEventListener('pointercancel', finish);
     window.addEventListener('blur', function () { if (dragging) finish(null); });
-  }
-
-  /* ============================================================ 窄屏 HUD（画世界 Pro 式）
-   * 手机/窄窗口：菜单栏 + 顶栏 + 两侧抽屉全部退场（CSS 里 display:none），
-   * 换成一块悬浮顶栏（关/房名/撤销/重做/图层/菜单）+ 左侧工具轨。
-   * 点轨上的图标，把对应小节以「锚定卡片」弹到画布上（复用浮窗机制 + hud-card 类）；
-   * 同一时间只开一张，点画布空白处收起 —— 对照画世界 Pro 的交互。 */
-
-  /** 当前开着的 HUD 卡片（最多一张） */
-  function hudOpenCard() {
-    return document.querySelector('.section-floating.hud-card');
-  }
-
-  /** 小节收回面板：浮窗/HUD 卡片都挂在 body 上，收起前必须先塞回栏容器，
-   *  否则它就是 body 底下的孤儿节点（样式全丢，还会撑出一条空页面）。 */
-  function dockBack(sec) {
-    sec.classList.remove('hud-card');
-    var box = $('#leftPanelScroll') || panelContainers()[0];
-    if (box && sec.parentElement !== box) box.appendChild(sec);
-    unfloatSection(sec);
-  }
-
-  function closeHudCards() {
-    Array.prototype.forEach.call(document.querySelectorAll('.section-floating.hud-card'), function (sec) {
-      dockBack(sec);
-    });
-    savePanelOrder();
-    syncHudRailActive();
-  }
-
-  function syncHudRailActive() {
-    var open = hudOpenCard();
-    var id = open ? open.getAttribute('data-section') : '';
-    ['#railBrushes', '#railBrush', '#railColor', '#railTools', '#railLayers'].forEach(function (sel) {
-      var b = $(sel);
-      if (b) b.classList.toggle('active', !!open && b.getAttribute('data-card') === id);
-    });
-    var le = $('#railEraser');
-    if (le) le.classList.toggle('active', !open && S.tool === 'eraser');
-  }
-
-  /** 打开/关闭一张锚定卡片：卡片贴着工具轨右侧、顶栏下方 */
-  function toggleHudCard(id) {
-    var sec = document.querySelector('[data-section="' + id + '"]');
-    if (!sec) return;
-    if (sec.classList.contains('hud-card')) { closeHudCards(); return; }
-    closeHudCards();
-    var vw = document.documentElement.clientWidth;
-    if (!sec.classList.contains('section-floating')) {
-      floatSection(sec, 64, 104);
-      savePanelOrder();          // 小节从抽屉里搬走了，顺序记一笔（unfloat 时能回对地方）
-    }
-    sec.classList.add('hud-card');
-    sec.style.width = Math.round(Math.min(330, Math.max(240, vw * 0.74))) + 'px';
-    placeFloat(sec, 64, 104);
-    syncHudRailActive();
-  }
-
-  /** 顶栏 ≡ 菜单：把宽屏顶栏那排动作收进来（复用既有按钮的 onclick） */
-  function buildHudMenu() {
-    var pop = $('#hudMenuPop');
-    if (!pop || pop.dataset.built) return;
-    pop.dataset.built = '1';
-    var items = [
-      ['房间列表', function () { var b = $('#btnRooms'); if (b) b.click(); }],
-      ['你画我猜', function () { var b = $('#btnGame'); if (b) b.click(); }],
-      ['画布设置', function () { var b = $('#btnCanvas'); if (b) b.click(); }],
-      ['变换', function () { var b = $('#btnTransform'); if (b) b.click(); }],
-      ['回放', function () { var b = $('#btnReplay'); if (b) b.click(); }],
-      ['录制', function () { var b = $('#btnRecord'); if (b) b.click(); }],
-      ['导出', function () { var b = $('#btnExport'); if (b) b.click(); }],
-      ['固化底图', function () { var b = $('#btnBake'); if (b) b.click(); }],
-      ['分享链接', function () { var b = $('#btnShare'); if (b) b.click(); }],
-      ['导航器', function () { toggleHudCard('nav'); }],
-      ['设置', function () { openSettings(); }],
-      ['全屏', function () { toggleFullscreen(); }]
-    ];
-    items.forEach(function (it) {
-      var b = document.createElement('button');
-      b.className = 'hud-menu-item';
-      b.type = 'button';
-      b.textContent = it[0];
-      b.addEventListener('click', function () {
-        pop.classList.add('hidden');
-        it[1]();
-      });
-      pop.appendChild(b);
-    });
-  }
-
-  function bindTouchHud() {
-    var top = $('#hudTop'), rail = $('#hudRail');
-    if (!top || !rail || top.dataset.bound) return;
-    top.dataset.bound = '1';
-
-    function on(sel, fn) {
-      var b = $(sel);
-      if (b) b.addEventListener('click', fn);
-    }
-    on('#hudClose', function () { leaveRoom(); });
-    on('#hudRoomBtn', function () { var b = $('#roomChip'); if (b) b.click(); });
-    on('#hudUndo', function () { undo(); });
-    on('#hudRedo', function () { redo(); });
-    on('#hudLayers', function () { toggleHudCard('layers'); });
-    on('#hudMenu', function () {
-      buildHudMenu();
-      var pop = $('#hudMenuPop');
-      if (pop) pop.classList.toggle('hidden');
-    });
-    on('#railBrushes', function () { toggleHudCard('brushes'); });
-    on('#railBrush', function () { toggleHudCard('brush'); });
-    on('#railColor', function () { toggleHudCard('color'); });
-    on('#railTools', function () { toggleHudCard('tools'); });
-    // 橡皮不是卡片：直接切到橡皮（再点一次切回画笔，对照画世界的两态切换）
-    on('#railEraser', function () {
-      if (S.tool === 'eraser') loadBrush(S.lastOfFamily && S.lastOfFamily.brush ? S.lastOfFamily.brush : 'brush');
-      else loadBrush('eraser');
-    });
-
-    // 点画布空白处（HUD、卡片、菜单之外）收起卡片 —— 画世界习惯：笔一想落下，面板就让位
-    document.addEventListener('pointerdown', function (e) {
-      if (!S.narrow) return;
-      var t = e.target;
-      var inHud = t.closest && (t.closest('#hudTop') || t.closest('#hudRail') ||
-        t.closest('#hudMenuPop') || t.closest('.section-floating'));
-      var pop = $('#hudMenuPop');
-      if (pop && !pop.classList.contains('hidden') && !(t.closest && t.closest('#hudMenu'))) {
-        pop.classList.add('hidden');
-      }
-      if (!inHud && hudOpenCard()) closeHudCards();
-    }, true);
-
-    syncHudRailActive();
-  }
-
-  /** HUD 顶栏房名：跟着 renderRoomChip 一起刷 */
-  function syncHudRoom() {
-    var el = $('#hudRoomName');
-    if (el) el.textContent = S.room ? S.room.name : '未加入';
-    syncHudRailActive();
-  }
-
-  /** HUD 显隐：窄屏 + 已进房间（大厅时 entryMask 全屏盖着，HUD 藏着免得穿透误触） */
-  function updateHudVisible() {
-    var show = !!(S.narrow && S.joined);
-    var top = $('#hudTop'), rail = $('#hudRail'), pop = $('#hudMenuPop');
-    if (top) top.classList.toggle('hidden', !show);
-    if (rail) rail.classList.toggle('hidden', !show);
-    if (!show && pop) pop.classList.add('hidden');
-    if (!show) closeHudCards();
   }
 
   function visibleItems() {
@@ -1466,7 +1327,10 @@
   function updateBrushLabel() {
     var cur = Brushes.get(S.brushId);
     var t = toolName(S.tool);
-    $('#brushNow').textContent = (cur ? cur.name : t) + ' · ' + S.brush.size + 'px · ' +
+    var name = cur ? cur.name : t;
+    // 擦除模式：笔还是那支笔，只是拿来擦 —— 标签说清楚，免得用户以为笔丢了
+    if (eraseOn() && !(cur && cur.tool === 'eraser')) name = '橡皮擦 · ' + name;
+    $('#brushNow').textContent = name + ' · ' + S.brush.size + 'px · ' +
       Math.round(S.brush.opacity * 100) + '%';
   }
 
@@ -1489,7 +1353,7 @@
     var maxR = Math.min(h / 2 - 5, 16);
     var r = clamp(b.size / 2, 1.2, maxR);
     var steps = 34;
-    var base = S.tool === 'eraser' ? '#c9ced8' : S.color;
+    var base = (eraseOn() || S.tool === 'eraser') ? '#c9ced8' : S.color;
     var blur = b.hardness < 0.995 ? Math.min(6, b.size * (1 - b.hardness) * 0.5) : 0;
     var pts = [];
     for (var i = 0; i <= steps; i++) {
@@ -1638,6 +1502,12 @@
 
   /** 视图类工具：不改画面，不该出现「笔刷环」光标（抓手 / 吸管 / 缩放） */
   function isViewTool(t) { return t === 'picker' || t === 'hand' || t === 'zoom'; }
+
+  /** 触屏（粗指针）设备：变换把手这类精细操作按手指优化命中区 */
+  function COARSE() {
+    try { return global.matchMedia && global.matchMedia('(pointer: coarse)').matches; }
+    catch (e) { return false; }
+  }
 
   var PARAM_TOOLS = {
     sizeRange: ['brush', 'eraser', 'blur', 'smudge', 'line', 'rect', 'ellipse', 'select', 'selectErase'],
@@ -2631,10 +2501,6 @@
     var sw = $('#tdSwatch');
     if (!sw) return;
     sw.style.background = S.color;
-    // HUD 工具轨上的颜色圆点 + 橡皮激活态同步刷（窄屏 HUD 与 dock 是一套状态）
-    var dot = $('#railColorDot');
-    if (dot) dot.style.background = S.color;
-    syncHudRailActive();
     // 最近用色（最多 5 个；没有就用默认色板顶上几个顶着，别空荡荡）
     var rb = $('#tdRecent');
     rb.innerHTML = '';
@@ -2666,9 +2532,24 @@
       b.onclick = function () { loadBrush(id); };
       bb.appendChild(b);
     });
+    // 取色 / 擦除两个模式钮：图标固定，激活态跟着工具走
+    var pk = $('#tdPick'), er = $('#tdErase');
+    if (pk) {
+      pk.innerHTML = Brushes.iconSvg('picker');
+      pk.classList.toggle('active', S.tool === 'picker');
+    }
+    if (er) {
+      er.innerHTML = Brushes.iconSvg('eraser');
+      er.classList.toggle('active', eraseOn());
+    }
     if (!dockBound) {
       dockBound = true;
       $('#tdColor').addEventListener('click', openColorSection);
+      if (pk) pk.addEventListener('click', function () {
+        setErase(false);
+        setTool('picker');
+      });
+      if (er) er.addEventListener('click', function () { toggleErase(); });
     }
   }
 
@@ -2693,17 +2574,137 @@
     sec.classList.add('section-flash');
   }
 
+  /* ============================================================ 擦除模式（笔刷当橡皮用）
+   * 橡皮不再是「另一支笔」：S.erase 打开后，**当前笔刷**的形状 / 大小 / 参数原样保留，
+   * 只是落笔变成擦除（stroke.tool='eraser' → 引擎走 destination-out）。
+   * 随便哪支笔（铅笔 / 水彩 / 导入的笔刷…）都能当橡皮，参数浮窗也和画画时同一套。 */
+
+  function eraseOn() { return !!S.erase && !isViewTool(S.tool) && !isSpecialToolId(S.tool); }
+
+  function isSpecialToolId(t) {
+    return t === 'fill' || t === 'gradient' || t === 'picker' || t === 'hand' ||
+      t === 'zoom' || isSelectToolId(t);
+  }
+
+  function setErase(on) {
+    S.erase = !!on;
+    renderTouchDock();
+    setToolButtons();
+    updateBrushLabel();
+    updateBrushCursor();
+  }
+
+  function toggleErase() {
+    setErase(!S.erase);
+    if (S.erase) {
+      // 开擦除时把笔刷栏送到手边（和点笔刷一样的入口），顺便说一声现在是什么状态
+      var cur = Brushes.get(S.brushId);
+      toast('擦除模式：' + (cur ? cur.name : '当前笔刷') + ' 当橡皮用');
+      flashBrushesSection();
+    }
+  }
+
+  /** 把笔刷栏亮给用户看（窄屏拉抽屉，宽屏就地闪烁） */
+  function flashBrushesSection() {
+    var sec = document.querySelector('[data-section="brushes"]');
+    if (!sec) return;
+    if (sec.classList.contains('section-floating')) {
+      sec.classList.remove('section-flash');
+      void sec.offsetWidth;
+      sec.classList.add('section-flash');
+      return;
+    }
+    if (S.narrow) {
+      if (sec.closest('#leftPanelScroll')) setLeftCollapsed(false, { persist: false });
+      else setSideCollapsed(false, { persist: false });
+    }
+    try { sec.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } catch (e) { /* ignore */ }
+    sec.classList.remove('section-flash');
+    void sec.offsetWidth;
+    sec.classList.add('section-flash');
+  }
+
+  /* ============================================================ 窄屏聊天气泡
+   * 右栏（聊天 / 成员 / 笔迹）在窄屏收成抽屉后，聊天入口收进右下角一个小圆钮；
+   * 抽屉关着时收到新消息 → 红点 + 计数；点气泡拉出抽屉并清掉未读。 */
+
+  var chatUnread = 0;
+
+  function syncChatBubble() {
+    var el = $('#chatBubble');
+    if (!el) return;
+    // 抽屉开着（sideCollapsed=false）时气泡躲开 —— 不然浮在抽屉上面挡操作
+    var show = !!(S.narrow && S.joined && S.sideCollapsed);
+    el.classList.toggle('hidden', !show);
+    var dot = $('#chatBubbleDot');
+    if (dot) {
+      dot.classList.toggle('hidden', chatUnread <= 0);
+      dot.textContent = chatUnread > 9 ? '9+' : String(chatUnread);
+    }
+  }
+
+  function hideChatBubble() {
+    var el = $('#chatBubble');
+    if (el) el.classList.add('hidden');
+  }
+
+  /** 收到聊天消息时调：抽屉关着就记未读、亮红点 */
+  function bumpChatUnread() {
+    if (!S.narrow || !S.joined) return;
+    if (!S.sideCollapsed) return;             // 右侧抽屉开着 = 用户正看着聊天
+    chatUnread++;
+    syncChatBubble();
+  }
+
+  function bindChatBubble() {
+    var el = $('#chatBubble');
+    if (!el || el.dataset.bound) return;
+    el.dataset.bound = '1';
+    el.addEventListener('click', function () {
+      chatUnread = 0;
+      syncChatBubble();
+      // 拉出右侧抽屉并切到聊天 tab
+      setSideCollapsed(false, { persist: false });
+      var tab = document.querySelector('#sidePanel .tab[data-tab="chat"]');
+      if (tab) tab.click();
+      try { var list = $('#chatList'); if (list) list.scrollTop = list.scrollHeight; } catch (e) { /* ignore */ }
+    });
+  }
+
+  /* ============================================================ 侧栏「＋」：添加工具
+   * 把「自定义工具栏」的编辑态 + 隐藏工具池亮出来，用户从里面把工具放回工具栏。
+   * 图标栏（收纳态）下先展开面板再操作。 */
+  function openToolAdd() {
+    if (S.leftRailMode) setLeftRailMode(false);
+    if (S.narrow && S.leftPanelOpen === false) setLeftCollapsed(false, { persist: false });
+    var sec = document.querySelector('[data-section="tools"]');
+    if (!sec) return;
+    if (sec.closest('#rightPanelScroll')) {
+      $('#leftPanelScroll').appendChild(sec);
+      savePanelOrder();
+    }
+    // 进入工具栏编辑态（和「编辑」按钮同一个状态机）：编辑条 + 隐藏工具池由 renderToolGrid 统一刷
+    if (!S.toolEdit) {
+      S.toolEdit = true;
+      $$('#btnToolEdit, #btnBrushEdit').forEach(function (b) { b.classList.add('active'); });
+    }
+    try { sec.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } catch (e) { /* ignore */ }
+    sec.classList.remove('section-flash');
+    void sec.offsetWidth;
+    sec.classList.add('section-flash');
+    renderToolGrid();
+  }
+
   /* ============================================================ 顶栏 */
 
   function renderRoomChip() {
     var r = S.room;
     $('#roomTitle').textContent = r ? r.name : '未加入房间';
-    syncHudRoom();
-    updateHudVisible();
     if (!r) { $('#roomMeta').textContent = '—'; $('#canvasSize').textContent = '—'; return; }
     $('#roomMeta').textContent = r.width + '×' + r.height + ' · 在线 ' + (r.online || 0) + ' 人';
     $('#canvasSize').textContent = r.width + ' × ' + r.height + ' · ' + engine.strokes.length + ' 笔';
     $('#stageEmpty').classList.toggle('hidden', S.joined);
+    syncChatBubble();
   }
 
   function renderConn(status) {
@@ -4618,34 +4619,6 @@
     }
   }
 
-  /**
-   * 手机侧边滑条（Procreate / 画世界Pro 习惯：大小、不透明度常驻画布边上手边）。
-   * 拖它 = 拖面板里的 #sizeRange / #opacityRange —— dispatch 同一条 input 链路，
-   * 预览、快捷栏数字、引擎参数的既有联动原样生效；反向（面板里改动）也镜像回来。
-   * 只在「窄屏 + 粗指针」由 CSS 显示，桌面端永远不出现。
-   */
-  function initSideSliders() {
-    var ss = $('#ssSize'), so = $('#ssOpacity');
-    var pr = $('#sizeRange'), po = $('#opacityRange');
-    if (!ss || !so || !pr || !po) return;
-    function mirror() { ss.value = pr.value; so.value = po.value; }
-    ss.addEventListener('input', function () {
-      if (String(pr.value) !== String(this.value)) {
-        pr.value = this.value;
-        pr.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-    });
-    so.addEventListener('input', function () {
-      if (String(po.value) !== String(this.value)) {
-        po.value = this.value;
-        po.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-    });
-    pr.addEventListener('input', mirror);
-    po.addEventListener('input', mirror);
-    mirror();
-  }
-
   /* ============================================================ 指针绘制 */
 
   function stagePoint(e) {
@@ -4756,7 +4729,7 @@
     el.style.left = x + 'px';
     el.style.top = y + 'px';
     el.classList.toggle('cross', cross);
-    el.classList.toggle('erase', S.tool === 'eraser');
+    el.classList.toggle('erase', eraseOn() || S.tool === 'eraser');
     el.classList.toggle('smudge', S.tool === 'smudge' || S.tool === 'blur');
     el.classList.toggle('select', isSelectToolId(S.tool));
   }
@@ -4771,8 +4744,10 @@
       // 服务端与别人按 target 分流，所以两边看到的是同一件事。
       target: (S.maskEdit && S.maskEdit === layer.id) ? 'mask' : 'layer',
       userId: S.me.userId,
-      tool: S.tool,
-      color: (S.tool === 'eraser' || S.tool === 'blur') ? '#000000' : S.color,
+      // 擦除模式下笔刷不变、只换工具语义：本地与远端都按 tool='eraser' 走 destination-out，
+      // 形状 / 大小 / 纹理等参数原样随 stroke 走（见下面 tip / brush 字段），所以任何笔都能当橡皮。
+      tool: eraseOn() ? 'eraser' : S.tool,
+      color: (eraseOn() || S.tool === 'eraser' || S.tool === 'blur') ? '#000000' : S.color,
       size: b.size,
       opacity: b.opacity,
       hardness: b.hardness,
@@ -5253,7 +5228,8 @@
         var tsp = stagePoint(e);
         var tdp = engine.screenToDoc(tsp.x, tsp.y);
         global.__softMeshDrag = !!e.altKey;
-      var hit = engine.transform.hitTest(tdp, 10);
+        // 触屏（粗指针）下把手命中放大到 26px —— 手指点得准（Procreate 手感）；鼠标保持 10px 精细
+        var hit = engine.transform.hitTest(tdp, COARSE() ? 26 : 10);
         if (!hit) return;
         view.setPointerCapture(e.pointerId);
         engine.transform.dragStart(hit, tdp);
@@ -6093,7 +6069,11 @@
       }
 
       case P.S2C.CHAT:
-        if (msg.system || (msg.userId && msg.userId !== 'system')) renderChatMsg(msg);
+        if (msg.system || (msg.userId && msg.userId !== 'system')) {
+          renderChatMsg(msg);
+          // 自己发的消息不算未读；窄屏抽屉关着时亮气泡红点
+          if (!msg.system && msg.userId !== S.me.userId) bumpChatUnread();
+        }
         break;
 
       case P.S2C.CURSOR:
@@ -7735,7 +7715,6 @@
     $('#strokeCount').textContent = '0';
     $('#roomTitle').textContent = '未加入房间';
     $('#roomMeta').textContent = '—';
-    updateHudVisible();
     $('#stageEmpty').classList.remove('hidden');
     $('#infoMask').classList.add('hidden');
     renderLayers();
@@ -13658,7 +13637,6 @@
     bindPanelDnD();
     bindColumnResizers();
     bindQuickBar();
-    initSideSliders();      // 手机侧边滑条（大小 / 不透明度，镜像面板滑条）
     bindLayoutSettings();
     bindRefWindow();
     loadDimPrefs();
@@ -13672,6 +13650,8 @@
     // 左栏同理：顶部 « 收起、左边窄条拉回（菜单项和 Tab 键也走这里）
     var blc = $('#btnLeftCollapse'); if (blc) blc.addEventListener('click', function () { setLeftCollapsed(true); });
     var brm = $('#btnLeftRailMode'); if (brm) brm.addEventListener('click', function () { setLeftRailMode(!S.leftRailMode); });
+    var bta = $('#btnToolAdd'); if (bta) bta.addEventListener('click', openToolAdd);
+    bindChatBubble();
     var lr = $('#leftRail'); if (lr) lr.addEventListener('click', function () { setLeftCollapsed(false); });
     // 窄屏抽屉：点暗色遮罩把抽屉都关掉
     var db = $('#drawerBack');
@@ -14488,35 +14468,25 @@
     if (S.narrow && S.leftPanelOpen) setLeftCollapsed(true, { persist: false });
   }
 
-  /** 窄屏 = 左右栏变成抽屉：进出都自动切一下，用户的桌面偏好留着不被污染 */
+  /** 窄屏 = 同一套 UI 的自适应：左右栏变成浮在画布上的抽屉（不再另起一套 HUD）。
+   *  进出窄屏只切换「抽屉化 + 收纳」，用户的桌面偏好（图标栏等）留着不被污染。 */
   function applyLayoutMode(force) {
     var narrow = NARROW_MQ.matches;
     if (!force && narrow === S.narrow) return;
     S.narrow = narrow;
     document.body.classList.toggle('layout-narrow', narrow);
-    // 窄屏 HUD（画世界式顶栏 + 工具轨）只在窄屏出现；回宽屏时收掉卡片再藏
-    var top = $('#hudTop'), rail = $('#hudRail'), pop = $('#hudMenuPop');
-    if (narrow) {
-      bindTouchHud();
-      updateHudVisible();
-      syncHudRoom();
-    } else {
-      closeHudCards();
-      if (pop) pop.classList.add('hidden');
-      if (top) top.classList.add('hidden');
-      if (rail) rail.classList.add('hidden');
-    }
     if (narrow) {
       setLeftCollapsed(true, { persist: false });
       setSideCollapsed(true, { persist: false });
       setQuickBarCollapsed(true, false);
-      // 图标栏是宽屏玩法（对照 PS 的桌面布局），窄屏抽屉里没有意义
-      setLeftRailMode(false, { persist: false });
+      syncChatBubble();
     } else {
       setLeftCollapsed(lsGet('chahu.leftOpen', '1') === '0', { persist: false });
       setSideCollapsed(lsGet('chahu.side', '1') === '0', { persist: false });
-      setLeftRailMode(lsGet('chahu.leftRailMode', '0') === '1', { persist: false });
+      hideChatBubble();
     }
+    // 图标栏（收纳）两种布局都保留 —— 窄屏抽屉里也能收成一列工具图标
+    setLeftRailMode(lsGet('chahu.leftRailMode', '0') === '1', { persist: false });
     syncDrawerBack();
     engine.resize();
   }
@@ -15903,6 +15873,7 @@
       try { localStorage.setItem('chahu.side', on ? '0' : '1'); } catch (e) { /* ignore */ }
     }
     syncDrawerBack();
+    syncChatBubble();          // 抽屉开了 → 气泡收起来；关了 → 气泡回来
     engine.resize();
   }
 

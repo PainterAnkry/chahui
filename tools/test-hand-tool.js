@@ -204,8 +204,8 @@ async function mouseDrag(page, from, dx, dy) {
   await M.goto(BASE + '/');
   await enterRoom(M, '手机抓手');
 
-  // 窄屏 HUD 工具轨：点「工具」弹出锚定卡片，点抓手（再点一次收卡片，不挡画布）
-  await M.tap('#railTools');
+  // 窄屏左栏是抽屉：先拉开，点抓手（loadBrush 会自己把抽屉收掉）
+  await M.tap('#leftRail');
   await sleep(500);
   const tileVisible = await M.evaluate(() => {
     const b = document.querySelector('#toolGrid .tool[data-item="hand"]');
@@ -213,18 +213,16 @@ async function mouseDrag(page, from, dx, dy) {
     const r = b.getBoundingClientRect();
     return { w: Math.round(r.width), h: Math.round(r.height) };
   });
-  ok('手机 HUD 里能摸到「抓手」这一格', !!tileVisible && tileVisible.w > 20 && tileVisible.h > 20, tileVisible);
+  ok('手机抽屉里能摸到「抓手」这一格', !!tileVisible && tileVisible.w > 20 && tileVisible.h > 20, tileVisible);
   await M.tap('#toolGrid .tool[data-item="hand"]');
-  await sleep(400);
-  await M.tap('#railTools');   // 收起卡片
-  await sleep(400);
+  await sleep(500);
   const mPicked = await M.evaluate(() => ({
     tool: window.ChaApp.state.tool,
     handClass: document.querySelector('#stage').classList.contains('hand-tool'),
-    cardOpen: !!document.querySelector('.section-floating.hud-card')
+    leftOpen: window.ChaApp.state.leftPanelOpen
   }));
-  ok('手机上选中抓手（选完收起卡片，不挡画布）',
-    mPicked.tool === 'hand' && mPicked.handClass && !mPicked.cardOpen, mPicked);
+  ok('手机上选中抓手（选完自动收起抽屉，不挡画布）',
+    mPicked.tool === 'hand' && mPicked.handClass && !mPicked.leftOpen, mPicked);
 
   const cdp = await mctx.newCDPSession(M);
   const touch = (type, points) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: points });
@@ -246,12 +244,10 @@ async function mouseDrag(page, from, dx, dy) {
   ok('手机上抓手拖动同样**不落笔**', mAfter.undo === mBefore.undo, mBefore.undo + ' → ' + mAfter.undo);
 
   // 换回画笔：手机上单指照旧能画
-  await M.tap('#railBrushes');
+  await M.tap('#leftRail');
   await sleep(450);
   await M.tap('#brushGrid .tool[data-item="pencil"]');
   await sleep(450);
-  await M.tap('#railBrushes');   // 收起卡片
-  await sleep(400);
   await fitView(M);
   const pBefore = await viewState(M);
   await touch('touchStart', [{ x: 200, y: 420 }]);

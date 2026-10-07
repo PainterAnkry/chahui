@@ -51,42 +51,6 @@
   <!-- 窄屏下左右栏变成浮在画布上的抽屉，点这块暗色区域把抽屉关掉 -->
   <div class="drawer-back hidden" id="drawerBack"></div>
 
-  <!-- ============ 窄屏 HUD（画世界 Pro 式）============
-       手机/窄窗口时替代菜单栏 + 顶栏 + 两侧抽屉：
-       顶栏 = 关闭 / 房名 / 撤销 / 重做 / 菜单；左侧轨 = 笔刷库 / 画笔 / 橡皮 / 颜色 / 工具。
-       点轨上的图标把对应小节以卡片弹到画布上，点画布空白处收起。 -->
-  <div class="hud hidden" id="hudTop">
-    <button class="hud-btn hud-close" id="hudClose" title="退出房间">✕</button>
-    <button class="hud-btn hud-room" id="hudRoomBtn" title="房间信息"><b id="hudRoomName">未加入</b></button>
-    <span class="hud-flex"></span>
-    <button class="hud-btn" id="hudUndo" title="撤销">
-      <svg viewBox="0 0 24 24"><path d="M8.5 5 4 9.5 8.5 14"/><path d="M4 9.5h9.2a5.8 5.8 0 1 1 0 11.6H9"/></svg>
-    </button>
-    <button class="hud-btn" id="hudRedo" title="重做">
-      <svg viewBox="0 0 24 24"><path d="M15.5 5 20 9.5 15.5 14"/><path d="M20 9.5h-9.2a5.8 5.8 0 1 0 0 11.6H15"/></svg>
-    </button>
-    <button class="hud-btn" id="hudLayers" title="图层">
-      <svg viewBox="0 0 24 24"><path d="M12 3 3.5 7.8 12 12.6l8.5-4.8L12 3z"/><path d="m3.5 13.4 8.5 4.8 8.5-4.8"/><path d="m3.5 17.6 8.5 4.8 8.5-4.8" opacity=".45"/></svg>
-    </button>
-    <button class="hud-btn" id="hudMenu" title="菜单">≡</button>
-  </div>
-  <div class="hud hidden" id="hudRail">
-    <button class="hud-rail-btn" id="railBrushes" data-card="brushes" title="笔刷库">
-      <svg viewBox="0 0 24 24"><path d="M6.5 19.5c0-2 .8-3.6 2.2-5l7-7 3.3 3.3-7 7c-1.4 1.4-3 2.2-5 2.2z"/><path d="M15 6.5l3.3 3.3"/></svg>
-    </button>
-    <button class="hud-rail-btn" id="railBrush" data-card="brush" title="画笔参数">
-      <svg viewBox="0 0 24 24"><path d="M5 7h14M5 12h14M5 17h14"/><circle cx="9" cy="7" r="2" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="2" fill="currentColor" stroke="none"/><circle cx="7.5" cy="17" r="2" fill="currentColor" stroke="none"/></svg>
-    </button>
-    <button class="hud-rail-btn" id="railEraser" title="橡皮擦（再点一次切回画笔）">
-      <svg viewBox="0 0 24 24"><path d="M15.5 3.5 5.6 13.4a2 2 0 0 0 0 2.8l2.2 2.2a2 2 0 0 0 2.8 0l9.9-9.9a2 2 0 0 0 0-2.8l-2.2-2.2a2 2 0 0 0-2.8 0z"/><path d="M11 8l5 5"/><path d="M8 20h10"/></svg>
-    </button>
-    <button class="hud-rail-btn hud-color" id="railColor" data-card="color" title="颜色面板"><i id="railColorDot"></i></button>
-    <button class="hud-rail-btn" id="railTools" data-card="tools" title="工具">
-      <svg viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1.2"/><rect x="13" y="4" width="7" height="7" rx="1.2"/><rect x="4" y="13" width="7" height="7" rx="1.2"/><rect x="13" y="13" width="7" height="7" rx="1.2"/></svg>
-    </button>
-  </div>
-  <!-- HUD ≡ 菜单的弹出列表（条目由 app.js 构建） -->
-  <div class="hud-menu hidden" id="hudMenuPop"></div>
 
   <!-- 操作面板收起之后留一条窄条，点一下再拉出来（和 Tab 一个效果） -->
   <button class="side-rail left-rail hidden" id="leftRail" title="拉出操作面板（Tab）">»</button>
@@ -96,6 +60,7 @@
     <div class="col-resizer" id="leftResizer" title="拖动调整左栏宽度"></div>
     <div class="panel-head-bar">
       <span class="phb-label">操作面板</span>
+      <button class="icon-btn side-collapse" id="btnToolAdd" title="添加工具：把隐藏的工具放回工具栏">＋</button>
       <button class="icon-btn side-collapse" id="btnLeftRailMode" title="收纳成图标栏（只留一列工具小图标）">❯</button>
       <button class="icon-btn side-collapse" id="btnLeftCollapse" title="收起操作面板（Tab）">«</button>
     </div>
@@ -618,7 +583,17 @@
     <div class="td-recent" id="tdRecent" title="最近用过的颜色"></div>
     <span class="td-sep"></span>
     <div class="td-brushes" id="tdBrushes" title="最近用过的笔"></div>
+    <span class="td-sep"></span>
+    <button class="td-chip td-brush td-mode" id="tdPick" title="取色（吸管：点画布取颜色）"></button>
+    <button class="td-chip td-brush td-mode" id="tdErase" title="擦除模式：当前笔刷当橡皮用（再点一次画回来）"></button>
   </div>
+
+  <!-- 窄屏聊天气泡：右栏（聊天 / 成员 / 笔迹）收成抽屉后，聊天入口收进这里。
+       默认收纳成一个小圆钮，有新消息时亮红点；点一下拉出右侧抽屉。 -->
+  <button class="chat-bubble hidden" id="chatBubble" title="聊天">
+    <svg viewBox="0 0 24 24"><path d="M4.5 5.5h15a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5H12l-4.2 3.6a.6.6 0 0 1-1-.46V16.5H4.5A1.5 1.5 0 0 1 3 15V7a1.5 1.5 0 0 1 1.5-1.5z"/></svg>
+    <i class="cb-dot hidden" id="chatBubbleDot"></i>
+  </button>
 
     <!-- 你画我猜 / 接龙 / 画皮：画布上沿的状态条。不在游戏模式时整条隐藏。
          接龙（写词 / 作画 / 猜词 / 回放）走 #stage.chain-strip 那一套 CSS：
@@ -841,13 +816,7 @@
       </div>
     </div>
 
-    <!-- 手机（窄屏 + 粗指针）专用的 Procreate 式侧边滑条：画笔大小 / 不透明度。
-         默认 display:none，CSS 媒体查询放行；#stageEmpty 没收起来之前用兄弟选择器压住，
-         拖动直接驱动面板里的 #sizeRange / #opacityRange（dispatch 同一条 input 链路）。 -->
-    <div class="side-sliders" id="sideSliders">
-      <div class="ss-group"><input type="range" id="ssSize" min="1" max="300" value="6" aria-label="画笔大小" /></div>
-      <div class="ss-group"><input type="range" id="ssOpacity" min="2" max="100" value="100" aria-label="不透明度" /></div>
-    </div>
+    <!-- （旧的 Procreate 式侧边滑条已删除：会被侧栏挡住，参数调节统一走「画笔」面板与底部快捷条） -->
 
     <!-- 变换面板（对照 SAI2 的「变换」小窗） -->
     <div class="transform-panel hidden" id="transformPanel">

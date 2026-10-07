@@ -2772,49 +2772,6 @@ body.panel-dragging * { cursor: grabbing !important; }
   text-decoration: underline;
 }
 
-/* ---- 手机侧边滑条（Procreate 式）：默认没有，窄屏 + 粗指针才出现 ---- */
-.side-sliders { display: none; }
-@media (max-width: 660px) and (pointer: coarse) {
-  .side-sliders {
-    display: flex;
-    position: absolute;
-    left: 10px;
-    top: 64px;
-    z-index: 13;                 /* 画布之上、抽屉(17/18)与快捷栏(40)之下 */
-    flex-direction: row;
-    gap: 12px;
-  }
-}
-/* 还没进房（空态开着）时不出现 —— sliders 紧跟在 #stageEmpty 后面，兄弟选择器压住 */
-.stage-empty:not(.hidden) ~ .side-sliders { display: none !important; }
-.ss-group {
-  position: relative;
-  width: 36px;
-  height: 172px;
-  border-radius: 999px;
-  background: var(--glass-sheen), var(--glass);
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
-  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
-  border: 1px solid var(--glass-border);
-  box-shadow: var(--glass-shadow), var(--glass-inset);
-  overflow: hidden;
-}
-/* 竖着的滑条 = 横条旋转 -90°（WebKit 对 vertical writing-mode 的 range 支持参差，旋转最稳） */
-.ss-group input[type=range] {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 148px;
-  height: 16px;
-  margin: 0;
-  transform: translate(-50%, -50%) rotate(-90deg);
-  touch-action: none;
-}
-.ss-group input[type=range]::-webkit-slider-thumb {
-  width: 17px;
-  height: 17px;
-  margin-top: -6px;
-}
 
 /* 入口页在手机上改单列：房间列表 / 创建表单不再挤成两条 180px 的细柱，
    行高加大到手指点得准（对照 Procreate / 画世界Pro 的全宽列表卡） */
@@ -4920,134 +4877,68 @@ body.layout-narrow .touch-dock { display: flex; }
 .section-flash { animation: section-flash-kf .9s ease-out 1; }
 
 /* ============================================================
-   窄屏 HUD（画世界 Pro 式）：≤1080px 时菜单栏 / 顶栏 / 两侧抽屉
-   全部退场，换成一排悬浮顶栏 + 左侧工具轨；小节以锚定卡片弹出。
-   深色玻璃质感（画世界同款），明暗主题下都压得住画面。
+   统一窄屏补充（v2.1.3 第二批）：
+   窄屏不再有独立 HUD，与桌面同一套 UI 自适应；这里只补三件新东西。
    ============================================================ */
-body.layout-narrow .menu-bar,
-body.layout-narrow .topbar,
-body.layout-narrow .workspace > .panel.left,
-body.layout-narrow .workspace > .panel.right,
-body.layout-narrow .side-rail,
-body.layout-narrow .drawer-back { display: none !important; }
 
-.hud {
-  display: none;
-  position: fixed;
-  z-index: 60;                 /* 高于画布与触控 dock(30)，低于浮窗卡片(70)与弹窗(200) */
-  align-items: center;
-  gap: 2px;
-  background: rgba(24, 27, 32, .92);
-  color: #e8eaed;
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  box-shadow: 0 4px 18px rgba(0, 0, 0, .28);
-}
-body.layout-narrow #hudTop {
-  display: flex;
-  top: 0; left: 0; right: 0;
-  height: 48px;
-  padding: 5px 6px;
-  padding-left: max(6px, env(safe-area-inset-left));
-  padding-right: max(6px, env(safe-area-inset-right));
-  border-radius: 0;
-}
-body.layout-narrow #hudRail {
-  display: flex;
-  flex-direction: column;
-  left: 6px;
-  top: 58px;
-  padding: 5px 4px;
-  gap: 4px;
-  border-radius: 14px;
-}
-.hud-btn {
-  min-width: 38px;
-  height: 38px;
-  border: none;
-  border-radius: 9px;
-  background: transparent;
-  color: #e8eaed;
-  font-size: 17px;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 6px;
-}
-.hud-btn:active { background: rgba(255, 255, 255, .14); }
-.hud-btn svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-.hud-btn.hud-room {
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: 34vw;
-  justify-content: flex-start;
-  overflow: hidden;
-}
-.hud-btn.hud-room b {
-  font-size: 14px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.hud-flex { flex: 1; }
-.hud-rail-btn {
-  width: 42px;
-  height: 42px;
-  border: none;
-  border-radius: 11px;
-  background: transparent;
-  color: #e8eaed;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  position: relative;
-}
-.hud-rail-btn svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-.hud-rail-btn:active { background: rgba(255, 255, 255, .14); }
-.hud-rail-btn.active { background: rgba(64, 132, 244, .28); box-shadow: inset 0 0 0 1.5px #6ea3f0; }
-.hud-rail-btn.hud-color { padding: 4px; }
-.hud-rail-btn.hud-color i {
-  display: block;
-  width: 100%;
-  height: 100%;
-  border-radius: 50%;
-  border: 2px solid rgba(255, 255, 255, .75);
-  background: #2b2b2b;
-}
-/* HUD ≡ 菜单弹出列表 */
-.hud-menu {
-  position: fixed;
-  z-index: 65;
-  top: 52px;
-  right: 6px;
-  min-width: 148px;
-  max-height: 70vh;
-  overflow-y: auto;
-  background: rgba(24, 27, 32, .96);
-  border-radius: 12px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, .35);
-  padding: 5px;
-  display: flex;
-  flex-direction: column;
-}
-.hud-menu.hidden { display: none; }
-.hud-menu-item {
-  border: none;
-  background: transparent;
-  color: #e8eaed;
-  text-align: left;
-  font-size: 14.5px;
-  padding: 11px 12px;
-  border-radius: 8px;
-  cursor: pointer;
-}
-.hud-menu-item:active { background: rgba(255, 255, 255, .13); }
-/* 触屏加一档命中区 */
+/* ---- 浮窗 ✕ 不再压住标题栏里的按钮（导入 / 编辑）：标题栏右侧留出固定席位 ---- */
+.section-floating > h4 { padding-right: 42px; }
+.section-floating > h4 .h4-btn:last-of-type { margin-right: 26px; }
+
+/* ---- 底部快捷条上的「取色 / 擦除」模式钮 ---- */
+.touch-dock .td-chip.td-mode { color: var(--text); }
+.touch-dock .td-chip.td-mode.active { border-color: var(--accent); box-shadow: 0 0 0 1.5px var(--accent); color: var(--accent); }
+.touch-dock .td-chip.td-mode.active svg { stroke: var(--accent); }
 @media (pointer: coarse) {
-  .hud-btn { min-width: 42px; height: 42px; }
-  .hud-rail-btn { width: 46px; height: 46px; }
-  .hud-menu-item { padding: 12px 14px; }
+  .touch-dock .td-chip.td-mode { width: 36px; height: 36px; }
+  .touch-dock .td-chip.td-mode svg { width: 21px; height: 21px; }
+}
+
+/* ---- 窄屏聊天气泡：右栏抽屉收起后的聊天入口 ---- */
+.chat-bubble {
+  display: none;
+  position: absolute;
+  right: 10px;
+  bottom: 80px;                /* 快捷条（bottom:14px，高 ~52px）上方，两者不打架 */
+  z-index: 29;                 /* 与 touch-dock(30) 一层，抽屉(17/18)与弹窗之下 */
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel) 90%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: var(--text);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .16);
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+body.layout-narrow .chat-bubble { display: inline-flex; }
+.chat-bubble svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.chat-bubble .cb-dot {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #e53935;
+  color: #fff;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .3);
+}
+.chat-bubble .cb-dot.hidden { display: none; }
+
+/* ---- 图标栏（收纳态）触屏：图标列加宽一点、命中抬到 40px ---- */
+@media (pointer: coarse) {
+  body.left-rail-mode .workspace > .panel.left { width: 64px !important; min-width: 64px !important; }
+  body.left-rail-mode .panel.left .panel-head-bar .icon-btn { width: 40px; height: 40px; font-size: 17px; }
+  body.left-rail-mode .panel.left [data-section="tools"] .tool { min-height: 44px; }
 }
