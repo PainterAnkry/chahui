@@ -65,6 +65,8 @@ const probe = (page) => page.evaluate(() => {
     quickbar: box('#quickBar'),
     qbCollapsed: document.querySelector('#quickBar').classList.contains('collapsed'),
     leftPref: localStorage.getItem('chahu.leftOpen'),
+    railPref: localStorage.getItem('chahu.leftRailMode'),
+    railMode: document.body.classList.contains('left-rail-mode'),
     sidePref: localStorage.getItem('chahu.side'),
     scale: window.ChaApp.engine.scale,
     tx: window.ChaApp.engine.tx,
@@ -105,44 +107,44 @@ const hitAt = (page, x, y) => page.evaluate(([px, py]) => {
   ok('底栏在视口内（不再被 30px 菜单栏挤出去）', p.status.bottom <= p.win[1] && p.status.bottom > p.win[1] - 40,
     'status.bottom=' + p.status.bottom + ' winH=' + p.win[1]);
   ok('页面没有纵向溢出', p.docW <= p.win[0], 'docW=' + p.docW);
-  ok('左栏顶部有「收起」入口', await D.evaluate(() => !!document.querySelector('#btnLeftCollapse')));
+  ok('左栏内缘中部有「收拉把手」', await D.evaluate(() => !!document.querySelector('#edgeLeft')));
 
-  await D.click('#btnLeftCollapse');
+  // 「收起」= 收成图标栏（Krita 式一列工具小图标），不再整个隐藏
+  await D.evaluate(() => document.querySelector('#edgeLeft').click());
   await sleep(350);
   p = await probe(D);
-  ok('点「收起」后左栏隐藏', p.left.hidden && p.leftOpen === false);
-  ok('收起后左边出现窄条', !p.leftRail.hidden && p.leftRail.w > 8 && p.leftRail.x === 0,
-    JSON.stringify(p.leftRail));
-  ok('收起状态写进 localStorage', p.leftPref === '0', 'chahu.leftOpen=' + p.leftPref);
-  ok('画布跟着变宽（左栏让出的位置被吃掉）', p.stage.x === p.leftRail.w && p.stage.w > 900,
-    'stage.x=' + p.stage.x + ' w=' + p.stage.w);
+  ok('点把手后收成图标栏（面板还在，缩成 56px）', !p.left.hidden && p.railMode && p.left.w <= 64,
+    JSON.stringify({ w: p.left.w, railMode: p.railMode }));
+  ok('图标栏偏好写进 localStorage', p.railPref === '1', 'chahu.leftRailMode=' + p.railPref);
+  ok('画布跟着变宽', p.stage.w > 900, 'stage.w=' + p.stage.w);
 
-  await D.click('#leftRail');
+  await D.evaluate(() => document.querySelector('#edgeLeft').click());
   await sleep(350);
   p = await probe(D);
-  ok('点左边窄条能拉回左栏', !p.left.hidden && p.leftOpen === true);
-  ok('拉回后状态也记住了', p.leftPref === '1');
+  ok('再点把手展开完整面板', !p.left.hidden && !p.railMode && p.left.w > 100);
+  ok('展开后偏好也记住了', p.railPref === '0');
 
-  // Tab 是菜单里「显示所有的操作面板」的快捷键
+  // Tab 是菜单里「收起 / 展开操作面板」的快捷键 —— 现在也是切图标栏
   await D.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
   await D.keyboard.press('Tab');
   await sleep(300);
   p = await probe(D);
-  ok('Tab 键收起左栏（菜单键位仍然有效）', p.left.hidden && p.leftOpen === false);
+  ok('Tab 键收成图标栏（菜单键位仍然有效）', p.railMode && !p.left.hidden);
   await D.keyboard.press('Tab');
   await sleep(300);
   p = await probe(D);
-  ok('再按 Tab 展开', !p.left.hidden && p.leftOpen === true);
+  ok('再按 Tab 展开面板', !p.railMode && p.left.w > 100);
 
-  await D.click('#btnLeftCollapse');
+  await D.evaluate(() => document.querySelector('#edgeLeft').click());
   await sleep(250);
   await D.reload();
   await D.waitForFunction(() => window.ChaApp && window.ChaApp.state, { timeout: 15000 });
   await sleep(600);
   await hideMask(D);
   p = await probe(D);
-  ok('刷新后记住「已收起」', p.left.hidden && p.leftPref === '0');
-  await D.click('#leftRail');
+  ok('刷新后记住「图标栏」状态', !p.left.hidden && p.railMode && p.left.w <= 64,
+    JSON.stringify({ w: p.left.w, railMode: p.railMode }));
+  await D.evaluate(() => document.querySelector('#edgeLeft').click());
   await sleep(300);
 
   /* ================= [2] 窗口拉窄 → 自动切抽屉 ================= */
@@ -152,13 +154,15 @@ const hitAt = (page, x, y) => page.evaluate(([px, py]) => {
   p = await probe(D);
   ok('进入窄屏布局', p.narrow === true && p.bodyClass.indexOf('layout-narrow') >= 0, p.bodyClass);
   ok('窄屏默认把左右栏都收起（给画布让路）', p.left.hidden && p.right.hidden);
-  ok('左右两条窄条都在', !p.leftRail.hidden && !p.rightRail.hidden);
-  ok('画布铺满整宽（只让开两条窄条）',
-    p.stage.w >= p.win[0] - (p.leftRail.w + p.rightRail.w) - 2,
-    'stage.w=' + p.stage.w + ' win=' + p.win[0]);
+  ok('Krita 工具箱常驻左缘（窄条退役）', await D.evaluate(() => {
+    const tb = document.querySelector('#toolBox');
+    return tb && !tb.classList.contains('hidden') && tb.querySelectorAll('.tb-btn').length >= 8;
+  }));
+  ok('画布几乎铺满整宽（工具箱浮在上面不占布局）',
+    p.stage.w >= p.win[0] - 4, 'stage.w=' + p.stage.w + ' win=' + p.win[0]);
   ok('底栏仍在视口内', p.status.bottom <= p.win[1]);
   ok('没有横向溢出', p.docW <= p.win[0]);
-  ok('自动切换不污染桌面偏好（chahu.leftOpen 仍是 1）', p.leftPref === '1', '=' + p.leftPref);
+  ok('自动切换不污染桌面偏好（chahu.leftRailMode 仍是 0）', p.railPref !== '1', '=' + p.railPref);
 
   await D.setViewportSize({ width: 1440, height: 900 });
   await sleep(500);
@@ -173,15 +177,14 @@ const hitAt = (page, x, y) => page.evaluate(([px, py]) => {
   await sleep(500);
   p = await probe(D);
   ok('700px 宽下没有横向溢出', p.docW <= p.win[0], 'docW=' + p.docW + ' win=' + p.win[0]);
-  const tb = await D.evaluate(() => {
-    const bar = document.querySelector('.topbar-actions');
-    bar.scrollLeft = bar.scrollWidth;
-    const b = document.querySelector('#btnShare').getBoundingClientRect();
-    const scrollable = bar.scrollWidth > bar.clientWidth;
-    bar.scrollLeft = 0;
-    return { right: Math.round(b.right), win: innerWidth, scrollable };
-  });
-  ok('700px 下最后一个顶栏按钮能滚进视野', tb.right <= tb.win + 1 && tb.right > 0, JSON.stringify(tb));
+  // Krita 式收纳：窄屏动作按钮整体藏进 ≡（不再横滑），顶栏只留房间名 + 笔刷 chip
+  const tb = await D.evaluate(() => ({
+    actionsHidden: getComputedStyle(document.querySelector('.topbar-actions')).display === 'none',
+    sheetBtn: !!document.querySelector('#btnAppSheet'),
+    chip: getComputedStyle(document.querySelector('#brushChip')).display !== 'none'
+  }));
+  ok('700px 下动作按钮收进 ≡、顶栏是 Krita 式（≡ + 笔刷 chip）',
+    tb.actionsHidden && tb.sheetBtn && tb.chip, JSON.stringify(tb));
   await dctx.close();
 
   /* ================= [3] 平板：抽屉交互 ================= */
@@ -197,10 +200,10 @@ const hitAt = (page, x, y) => page.evaluate(([px, py]) => {
   ok('平板也是抽屉布局', p.narrow === true && p.left.hidden && p.right.hidden);
   ok('遮罩默认不显示', p.back.hidden);
 
-  await T.tap('#leftRail');
+  await T.tap('#tbBrush');      // Krita 工具箱「当前笔刷」→ 拉出笔刷库抽屉
   await sleep(400);
   p = await probe(T);
-  ok('点左边窄条弹出左抽屉', !p.left.hidden && p.left.w > 200 && p.left.h >= p.stage.h - 2,
+  ok('工具箱入口能拉出左抽屉', !p.left.hidden && p.left.w > 200 && p.left.h >= p.stage.h - 2,
     JSON.stringify(p.left));
   ok('抽屉弹出时画布上有暗色遮罩', !p.back.hidden);
   ok('抽屉盖不住底栏（高度不超过工作区）', p.left.bottom <= p.status.y + 1, 'left.bottom=' + p.left.bottom);
@@ -211,7 +214,7 @@ const hitAt = (page, x, y) => page.evaluate(([px, py]) => {
   ok('点遮罩关闭左抽屉', p.left.hidden && p.back.hidden);
 
   // 抽屉开着时，右边的画布应该确实被暗色遮罩盖住（层级没被浮层压掉）
-  await T.tap('#leftRail');
+  await T.tap('#tbBrush');
   await sleep(400);
   const topAt = await T.evaluate(() => {
     const el = document.elementFromPoint(520, 300);
@@ -221,10 +224,10 @@ const hitAt = (page, x, y) => page.evaluate(([px, py]) => {
   await T.tap('#drawerBack', { position: { x: 780, y: 400 } });
   await sleep(400);
 
-  await T.tap('#sideRail');
+  await T.evaluate(() => window.ChaApp.toggleSide());   // 右抽屉（未加入房间，气泡不可见，走 API）
   await sleep(400);
   p = await probe(T);
-  ok('点右边窄条弹出右抽屉（聊天 / 成员 / 笔迹）', !p.right.hidden && p.right.w > 200);
+  ok('右抽屉能弹出（聊天 / 成员 / 笔迹）', !p.right.hidden && p.right.w > 200);
   ok('右抽屉贴着右边', p.right.right >= p.win[0] - 2, 'right.right=' + p.right.right);
   await T.tap('#drawerBack', { position: { x: 40, y: 400 } });
   await sleep(400);
@@ -232,7 +235,7 @@ const hitAt = (page, x, y) => page.evaluate(([px, py]) => {
   ok('点遮罩关闭右抽屉', p.right.hidden);
 
   // 选笔刷 → 左抽屉自动收起（不然选完笔还被面板挡着画布）
-  await T.tap('#leftRail');
+  await T.tap('#tbBrush');
   await sleep(400);
   ok('左抽屉已打开，能点到笔刷', await T.isVisible('#brushGrid .tool'), '');
   await T.tap('#brushGrid .tool');
@@ -274,18 +277,13 @@ const hitAt = (page, x, y) => page.evaluate(([px, py]) => {
   ok('没有横向溢出', p.docW <= p.win[0], 'docW=' + p.docW);
   ok('画布可用宽度占了大头', p.stage.w >= p.win[0] * 0.82, 'stage.w=' + p.stage.w);
 
-  // 顶栏动作按钮横向可滚：最后一个按钮要能滚到视野里
-  const shareReach = await M.evaluate(async () => {
-    const bar = document.querySelector('.topbar-actions');
-    bar.scrollLeft = bar.scrollWidth;
-    await new Promise(r => setTimeout(r, 150));
-    const b = document.querySelector('#btnShare').getBoundingClientRect();
-    return { x: Math.round(b.x), right: Math.round(b.right), win: innerWidth, scrollable: bar.scrollWidth > bar.clientWidth };
-  });
-  ok('顶栏动作按钮能横滑够到（分享按钮滚得出来）',
-    shareReach.right <= shareReach.win + 1 && shareReach.right > 0, JSON.stringify(shareReach));
-  ok('动作条确实发生了内部滚动', shareReach.scrollable);
-  await M.evaluate(() => { document.querySelector('.topbar-actions').scrollLeft = 0; });
+  // Krita 式顶栏：动作按钮在 ≡ 里（手机上不再横滑），画布上不被顶栏浮层挡住
+  const shareReach = await M.evaluate(() => ({
+    actionsHidden: getComputedStyle(document.querySelector('.topbar-actions')).display === 'none',
+    sheetBtnVisible: (() => { const b = document.querySelector('#btnAppSheet'); const r = b.getBoundingClientRect(); return r.width > 0 && r.right <= innerWidth; })()
+  }));
+  ok('手机顶栏动作按钮收进 ≡（入口可见）',
+    shareReach.actionsHidden && shareReach.sheetBtnVisible, JSON.stringify(shareReach));
 
   const mid = await midOf();
   ok('画布上这一点没被别的层盖住',
@@ -358,7 +356,7 @@ const hitAt = (page, x, y) => page.evaluate(([px, py]) => {
     zi.hud < zi.back && zi.score < zi.round + 999 && zi.score < zi.back,
     JSON.stringify(zi));
 
-  await M.tap('#leftRail');
+  await M.tap('#tbBrush');      // Krita 工具箱入口拉出左抽屉
   await sleep(450);
   const pierced = await M.evaluate(() => {
     const r = document.querySelector('aside.panel.left').getBoundingClientRect();

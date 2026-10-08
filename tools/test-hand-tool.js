@@ -204,9 +204,9 @@ async function mouseDrag(page, from, dx, dy) {
   await M.goto(BASE + '/');
   await enterRoom(M, '手机抓手');
 
-  // 窄屏左栏是抽屉：先拉开，点抓手（loadBrush 会自己把抽屉收掉）
-  await M.tap('#leftRail');
-  await sleep(500);
+  // 窄屏：Krita 工具箱常驻左缘，「抓手」一格直接可点（不用再拉抽屉）
+  await M.tap('#tbBrush');      // 顺带验证：笔刷 chip 仍能拉开抽屉找到工具栏
+  await sleep(600);
   const tileVisible = await M.evaluate(() => {
     const b = document.querySelector('#toolGrid .tool[data-item="hand"]');
     if (!b) return null;
@@ -214,14 +214,16 @@ async function mouseDrag(page, from, dx, dy) {
     return { w: Math.round(r.width), h: Math.round(r.height) };
   });
   ok('手机抽屉里能摸到「抓手」这一格', !!tileVisible && tileVisible.w > 20 && tileVisible.h > 20, tileVisible);
-  await M.tap('#toolGrid .tool[data-item="hand"]');
+  await M.tap('#drawerBack', { position: { x: 370, y: 400 } });   // 关抽屉（右侧露出画布的窄条），让工具箱露出来
+  await sleep(450);
+  await M.tap('#toolBox .tb-btn[data-tool="hand"]');
   await sleep(500);
   const mPicked = await M.evaluate(() => ({
     tool: window.ChaApp.state.tool,
     handClass: document.querySelector('#stage').classList.contains('hand-tool'),
     leftOpen: window.ChaApp.state.leftPanelOpen
   }));
-  ok('手机上选中抓手（选完自动收起抽屉，不挡画布）',
+  ok('手机上选中抓手（工具箱直达，抽屉不挡画布）',
     mPicked.tool === 'hand' && mPicked.handClass && !mPicked.leftOpen, mPicked);
 
   const cdp = await mctx.newCDPSession(M);
@@ -243,9 +245,9 @@ async function mouseDrag(page, from, dx, dy) {
     'd=(' + (mAfter.tx - mBefore.tx).toFixed(1) + ',' + (mAfter.ty - mBefore.ty).toFixed(1) + ')');
   ok('手机上抓手拖动同样**不落笔**', mAfter.undo === mBefore.undo, mBefore.undo + ' → ' + mAfter.undo);
 
-  // 换回画笔：手机上单指照旧能画
-  await M.tap('#leftRail');
-  await sleep(450);
+  // 换回画笔：手机上单指照旧能画（工具箱点「当前笔刷」拉出笔刷库再选铅笔）
+  await M.tap('#tbBrush');
+  await sleep(500);
   await M.tap('#brushGrid .tool[data-item="pencil"]');
   await sleep(450);
   await fitView(M);

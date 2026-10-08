@@ -4942,3 +4942,184 @@ body.layout-narrow .chat-bubble { display: inline-flex; }
   body.left-rail-mode .panel.left .panel-head-bar .icon-btn { width: 40px; height: 40px; font-size: 17px; }
   body.left-rail-mode .panel.left [data-section="tools"] .tool { min-height: 44px; }
 }
+
+/* ============================================================
+   侧栏内缘把手（收起按钮置于面板中部）+ 窄屏 Krita 式 UI
+   ============================================================ */
+
+/* ---- 内缘中部的收拉把手：贴在面板边上、垂直居中 ---- */
+.edge-handle {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 64px;
+  padding: 0;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 5;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(15, 22, 36, .12);
+}
+.edge-handle:hover { background: var(--hover); color: var(--text); }
+.edge-left { right: -17px; }
+.edge-right { left: -17px; }
+
+/* 窄屏专属元素（≡ 按钮 / 笔刷 chip）：宽屏一律不见 */
+.narrow-only { display: none !important; }
+
+/* ---- 收起后的窄条：不再通栏，改成垂直居中的小把手 ---- */
+.side-rail {
+  align-self: center;
+  height: 96px;
+  width: 20px;
+  border: 1px solid var(--line);
+  border-radius: 0 8px 8px 0;
+  margin: 0 2px;
+  box-shadow: 0 2px 8px rgba(15, 22, 36, .10);
+}
+.side-rail.left-rail { border-radius: 8px 0 0 8px; }
+
+/* ---- 窄屏（安卓）：Krita 式布局 ---- */
+@media (max-width: 1080px) {
+  /* 桌面那套收拉把手在窄屏没有意义：抽屉有自己的开关路径 */
+  .edge-handle { display: none; }
+  /* 窄条也不要了：左边有常驻工具箱，右边有聊天气泡 */
+  .side-rail { display: none !important; }
+
+  /* 菜单栏 / 动作按钮默认藏进 ≡；≡ 点开后原地变两块竖排面板（DOM 不动） */
+  body.layout-narrow .menu-bar,
+  body.layout-narrow .topbar-actions { display: none; }
+  body.layout-narrow.menu-sheet-open .menu-bar,
+  body.layout-narrow.menu-sheet-open .topbar-actions {
+    display: flex;
+    position: fixed;
+    top: 52px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 2px;
+    max-height: calc(100vh - 120px);
+    overflow-y: auto;
+    padding: 6px;
+    border: 1px solid var(--glass-border, var(--line));
+    border-radius: 12px;
+    background: var(--glass-sheen, none), var(--panel);
+    box-shadow: 0 10px 30px rgba(15, 22, 36, .25);
+  }
+  body.layout-narrow.menu-sheet-open .menu-bar { left: 8px; width: 148px; z-index: 26; }
+  body.layout-narrow.menu-sheet-open .topbar-actions { right: 8px; width: 132px; z-index: 26; }
+  body.layout-narrow.menu-sheet-open .topbar-actions .btn { text-align: left; }
+  /* ≡ 按钮只在窄屏出现（覆盖上面的默认隐藏） */
+  body.layout-narrow .narrow-only { display: inline-flex !important; }
+}
+
+/* ---- 窄屏顶栏的笔刷预设 chip（Krita 顶部工具栏同款） ---- */
+.brush-chip {
+  display: none;
+  align-items: center;
+  gap: 7px;
+  max-width: 44vw;
+  padding: 4px 10px 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+}
+body.layout-narrow .brush-chip { display: inline-flex; }
+.brush-chip i { display: inline-flex; width: 26px; height: 26px; align-items: center; justify-content: center; border-radius: 7px; background: var(--hover); flex: none; }
+.brush-chip i svg { width: 18px; height: 18px; }
+.brush-chip .bc-text { display: flex; flex-direction: column; align-items: flex-start; line-height: 1.15; min-width: 0; }
+.brush-chip .bc-text b { font-size: 12px; max-width: 30vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.brush-chip .bc-text em { font-style: normal; font-size: 10px; color: var(--text-dim); }
+
+/* ---- Krita 工具箱：常驻左缘竖条 ---- */
+.toolbox {
+  position: absolute;
+  left: 6px;
+  top: 56px;
+  z-index: 16;                  /* 抽屉(17/18)与遮罩之下：抽屉拉开时让位 */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 3px;
+  max-height: calc(100% - 150px);
+  overflow-y: auto;
+  scrollbar-width: none;
+  border: 1px solid var(--glass-border, var(--line));
+  border-radius: 12px;
+  background: var(--glass-sheen, none), var(--panel);
+  box-shadow: 0 6px 20px rgba(15, 22, 36, .16);
+}
+.toolbox.hidden { display: none; }
+.toolbox::-webkit-scrollbar { display: none; }
+.toolbox .tb-btn {
+  width: 38px;
+  height: 38px;
+  flex: none;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  padding: 0;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+}
+.toolbox .tb-btn:hover { background: var(--hover); }
+.toolbox .tb-btn.active { background: var(--accent-soft); color: var(--accent); box-shadow: inset 0 0 0 1.5px var(--accent); }
+.toolbox .tb-btn svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.toolbox .tb-btn em { font-style: normal; font-size: 8.5px; line-height: 1; max-width: 36px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); }
+.toolbox .tb-btn.active em { color: var(--accent); }
+.toolbox .tb-color i { display: block; width: 20px; height: 20px; border-radius: 50%; background: #333; border: 2px solid var(--panel); box-shadow: 0 0 0 1px var(--line); }
+.toolbox .tb-sep { width: 24px; height: 1px; flex: none; background: var(--line); margin: 3px 0; }
+@media (pointer: coarse) {
+  .toolbox { left: 4px; }
+  .toolbox .tb-btn { width: 44px; height: 44px; }
+  .toolbox .tb-btn svg { width: 22px; height: 22px; }
+}
+
+/* 工具箱顶部的收纳钮：只是个小箭头，别占用一格工具的视觉分量 */
+.toolbox #tbCollapse { color: var(--text-dim); font-size: 13px; }
+.toolbox #tbCollapse:hover { color: var(--text); }
+
+/* 工具箱收起后，左缘中部的小把手（只在窄屏出现） */
+.tb-restore {
+  display: none;
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 64px;
+  padding: 0;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-left: 0;
+  border-radius: 0 8px 8px 0;
+  background: var(--panel);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 16;
+  box-shadow: 0 2px 8px rgba(15, 22, 36, .12);
+}
+.tb-restore:hover { background: var(--hover); color: var(--text); }
+body.layout-narrow .tb-restore:not(.hidden) { display: inline-flex; }
+@media (pointer: coarse) {
+  .tb-restore { width: 22px; height: 72px; font-size: 13px; }
+}

@@ -38,6 +38,10 @@ const SIZES = [
     await page.evaluate(() => document.querySelector('#entryMask').classList.add('hidden'));
     await sleep(300);
 
+    // Krita 式收纳：窄屏菜单栏默认藏进 ≡，先点开菜单面板
+    await page.evaluate(() => { const b = document.querySelector('#btnAppSheet'); if (b) b.click(); });
+    await sleep(350);
+
     // 打开「文件」菜单
     const titleRect = await page.evaluate(() => {
       const t = document.querySelector('#menuBar .menu-title');
@@ -76,6 +80,9 @@ const SIZES = [
         anyModal: !!document.querySelector('.modal-mask:not(.hidden), #confirmMask:not(.hidden)')
       }));
       ok('点击后菜单收起（说明 click 真送达了）', !after.dropOpen);
+      // 「新建」会拉出入口弹窗（room-item 列表）—— 藏掉，别盖住后面两步的下拉
+      await page.evaluate(() => document.querySelector('#entryMask').classList.add('hidden'));
+      await sleep(200);
     }
 
     // 关键断言③：下拉不出屏（左右上下都在视口内）
@@ -93,11 +100,20 @@ const SIZES = [
       '[' + inView.left.toFixed(0) + ',' + inView.right.toFixed(0) + '] vs vw=' + inView.vw);
 
     // 关键断言④：子菜单可点（「另存为」这类有子项的）
-    await page.evaluate(() => document.body.click());
-    await sleep(100);
+    // 先真实点击空白处把上一步的下拉/面板都关掉（真实 pointerdown 才会走关闭逻辑），
+    // 再用真实点击重开 ≡ 面板和菜单 —— 与真人操作路径一致，避免残留浮层干扰。
+    await page.mouse.click(s.w - 20, Math.floor(s.h * 0.75));
+    await sleep(250);
+    await page.evaluate(() => { const b = document.querySelector('#btnAppSheet'); if (b && !document.body.classList.contains('menu-sheet-open')) b.click(); });
+    await sleep(300);
+    const firstTitle = await page.evaluate(() => {
+      const t = document.querySelector('#menuBar .menu-title');
+      const b = t.getBoundingClientRect();
+      return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+    });
+    await page.mouse.click(firstTitle.x, firstTitle.y);
+    await sleep(250);
     const subInfo = await page.evaluate(() => {
-      // 打开「文件」再找带子菜单的父项
-      document.querySelector('#menuBar .menu-title').click();
       const drop = document.querySelector('#menuBar .menu-item .menu-drop:not(.hidden)');
       const parent = drop.querySelector('.menu-row.has-sub');
       if (!parent) return { found: false };
@@ -111,14 +127,14 @@ const SIZES = [
         found: true,
         subPos: getComputedStyle(sub).position,
         subInView: sr.left >= 0 && sr.right <= window.innerWidth + 1,
-        rowHitInside: row.contains(hit),
+        subHitInside: sub.contains(hit),
         hit: hit ? (hit.className || hit.tagName) : null
       };
     });
     if (subInfo.found) {
       ok('子菜单是 fixed', subInfo.subPos === 'fixed', subInfo.subPos);
       ok('子菜单在视口内', subInfo.subInView);
-      ok('子菜单里的项可命中', !!subInfo.rowHitInside, '命中 ' + subInfo.hit);
+      ok('子菜单里的项可命中', !!subInfo.subHitInside, '命中 ' + subInfo.hit);
     } else {
       console.log('  (本档没找到带子菜单的项，跳过)');
     }

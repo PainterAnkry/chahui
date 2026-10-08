@@ -50,7 +50,7 @@ function ok(name, cond, extra) {
     'stage=' + lay.stageW + ' left=' + lay.leftW + ' right=' + lay.rightW);
 
   console.log('\n=== 侧栏收拉 ===');
-  await page.evaluate(() => document.querySelector('#btnSideCollapse').click());
+  await page.evaluate(() => document.querySelector('#edgeRight').click());
   await sleep(500);
   const col = await page.evaluate(() => ({
     hidden: document.querySelector('#sidePanel').classList.contains('hidden'),

@@ -17,6 +17,8 @@
 
 <!-- ============ 顶栏 ============ -->
 <header class="topbar">
+  <!-- 窄屏（安卓 / 竖窗口）：菜单栏和动作按钮都收进这个 ≡（Krita 式单按钮入口） -->
+  <button class="icon-btn narrow-only" id="btnAppSheet" title="菜单与常用功能">≡</button>
   <div class="brand">
     <div class="brand-mark">茶</div>
     <div class="brand-text">
@@ -31,6 +33,12 @@
     <span class="badge hidden" id="meRole" title="房主把你设成了只读观众">观众</span>
     <span class="sub" id="roomMeta">—</span>
   </div>
+
+  <!-- 窄屏：Krita 式笔刷预设钮 —— 当前笔刷的图标 + 名字 + 大小，点开笔刷库 -->
+  <button class="brush-chip narrow-only" id="brushChip" title="当前笔刷（点开笔刷库）">
+    <i id="brushChipIco"></i>
+    <span class="bc-text"><b id="brushChipName">—</b><em id="brushChipMeta"></em></span>
+  </button>
 
   <div class="topbar-actions">
     <button class="btn ghost" id="btnRooms" title="房间列表">房间</button>
@@ -51,6 +59,12 @@
   <!-- 窄屏下左右栏变成浮在画布上的抽屉，点这块暗色区域把抽屉关掉 -->
   <div class="drawer-back hidden" id="drawerBack"></div>
 
+  <!-- 窄屏：Krita 式左侧工具箱（常驻，不遮画布内容区）。
+       按钮由 app.js 渲染：当前笔刷 / 擦除 / 工具们 + 底部的颜色 / 图层。 -->
+  <div class="toolbox hidden" id="toolBox" role="toolbar" aria-label="工具箱"></div>
+
+  <!-- 工具箱收起后，左缘中部留一个小把手，点一下把工具箱拉回来 -->
+  <button class="tb-restore hidden" id="tbShow" title="展开工具箱">❯</button>
 
   <!-- 操作面板收起之后留一条窄条，点一下再拉出来（和 Tab 一个效果） -->
   <button class="side-rail left-rail hidden" id="leftRail" title="拉出操作面板（Tab）">»</button>
@@ -60,10 +74,10 @@
     <div class="col-resizer" id="leftResizer" title="拖动调整左栏宽度"></div>
     <div class="panel-head-bar">
       <span class="phb-label">操作面板</span>
-      <button class="icon-btn side-collapse" id="btnToolAdd" title="添加工具：把隐藏的工具放回工具栏">＋</button>
-      <button class="icon-btn side-collapse" id="btnLeftRailMode" title="收纳成图标栏（只留一列工具小图标）">❯</button>
-      <button class="icon-btn side-collapse" id="btnLeftCollapse" title="收起操作面板（Tab）">«</button>
+      <!-- 收起/展开按钮移到面板内缘中部（.edge-handle），头部不再放重复按钮 -->
     </div>
+    <!-- 内缘中部的收拉把手：展开态点击收成图标栏；图标栏态点击展开 -->
+    <button class="edge-handle edge-left" id="edgeLeft" title="收成图标栏">❮</button>
     <div class="panel-scroll" id="leftPanelScroll">
       <div class="panel-handle" id="panelHandle">
         <span class="panel-handle-grip">⋮⋮</span>
@@ -882,8 +896,9 @@
       <button class="tab active" data-tab="chat">聊天</button>
       <button class="tab" data-tab="members">成员 <b id="memberCount">0</b></button>
       <button class="tab" data-tab="history">笔迹 <b id="strokeCount">0</b></button>
-      <button class="icon-btn side-collapse" id="btnSideCollapse" title="收起侧栏（F4）">»</button>
     </div>
+    <!-- 内缘中部的收拉把手：点击收起侧栏（F4），收起后用屏幕右缘的窄条拉回 -->
+    <button class="edge-handle edge-right" id="edgeRight" title="收起侧栏（F4）">»</button>
 
     <div class="tab-body" data-body="chat">
       <div class="chat-list" id="chatList"></div>

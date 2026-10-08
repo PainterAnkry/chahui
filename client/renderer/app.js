@@ -1332,6 +1332,7 @@
     if (eraseOn() && !(cur && cur.tool === 'eraser')) name = '橡皮擦 · ' + name;
     $('#brushNow').textContent = name + ' · ' + S.brush.size + 'px · ' +
       Math.round(S.brush.opacity * 100) + '%';
+    syncBrushChip();           // 顶栏笔刷预设 chip 同步（窄屏 Krita 顶栏）
   }
 
   /** 画笔预览：在一条弧线上按当前参数画一笔，直观看浓淡与边缘 */
@@ -2514,11 +2515,12 @@
       b.onclick = function () { setColor(c); };
       rb.appendChild(b);
     });
-    // 最近用笔（最多 4 个；记录不满就用默认几支补齐，别空荡荡）
+    // 最近用笔（最多 4 个；记录不满就用默认几支补齐，别空荡荡）。
+    // 「橡皮」不进这支笔列：快捷条右端已有「擦除模式」钮，再摆一支橡皮笔就重复了
     var bb = $('#tdBrushes');
     bb.innerHTML = '';
-    var ids = loadRecentBrushes();
-    ['brush', 'eraser', 'pencil', 'airbrush', 'marker'].forEach(function (id) {
+    var ids = loadRecentBrushes().filter(function (id) { return id !== 'eraser'; });
+    ['brush', 'pencil', 'airbrush', 'marker'].forEach(function (id) {
       if (ids.length >= 4) return;
       if (Brushes.get(id) && ids.indexOf(id) < 0) ids.push(id);
     });
@@ -2551,12 +2553,13 @@
       });
       if (er) er.addEventListener('click', function () { toggleErase(); });
     }
+    syncToolBox();               // Krita 工具箱与快捷条是同一套状态
   }
 
-  /** 快捷条上点当前色：把装着颜色面板的抽屉拉开并跳到那一节
-   *  （颜色节被拖成浮窗时就地闪一下提醒位置） */
-  function openColorSection() {
-    var sec = document.querySelector('[data-section="color"]');
+  /** 把装着某个小节的抽屉拉开并跳到那一节（浮窗态就地闪一下提醒位置）。
+   *  颜色 / 图层 / 笔刷库的快捷入口都走这里。 */
+  function openPanelSection(sectionId) {
+    var sec = document.querySelector('[data-section="' + sectionId + '"]');
     if (!sec) return;
     if (sec.classList.contains('section-floating')) {
       sec.classList.remove('section-flash');
@@ -2572,6 +2575,11 @@
     sec.classList.remove('section-flash');
     void sec.offsetWidth;
     sec.classList.add('section-flash');
+  }
+
+  /** 快捷条上点当前色：跳到颜色面板 */
+  function openColorSection() {
+    openPanelSection('color');
   }
 
   /* ============================================================ 擦除模式（笔刷当橡皮用）
@@ -2671,28 +2679,155 @@
     });
   }
 
-  /* ============================================================ 侧栏「＋」：添加工具
-   * 把「自定义工具栏」的编辑态 + 隐藏工具池亮出来，用户从里面把工具放回工具栏。
-   * 图标栏（收纳态）下先展开面板再操作。 */
-  function openToolAdd() {
-    if (S.leftRailMode) setLeftRailMode(false);
-    if (S.narrow && S.leftPanelOpen === false) setLeftCollapsed(false, { persist: false });
-    var sec = document.querySelector('[data-section="tools"]');
-    if (!sec) return;
-    if (sec.closest('#rightPanelScroll')) {
-      $('#leftPanelScroll').appendChild(sec);
-      savePanelOrder();
+  /* ============================================================ 窄屏 Krita 工具箱
+   * 参照 Krita 的左侧工具箱（Toolbox）：常驻竖条浮在画布左缘，点一下直接换工具，
+   * 不用拉开抽屉。顶部两格是「当前笔刷（点开笔刷库）」和「擦除模式」，底部两格
+   * 是「颜色 / 图层」抽屉入口 —— 中间那排和 Krita 工具箱一一对应：
+   * 填充 / 渐变 / 框选 / 套索 / 魔棒 / 取色 / 抓手 / 缩放。 */
+  var TOOLBOX_TOOLS = ['bucket', 'gradient', 'marquee', 'lasso', 'wand', 'picker', 'hand', 'zoom'];
+  var SVG_TRANSFORM = '<path d="M6 4h9l3 3v13H6z"/><path d="M9 12h6M12 9v6"/>';
+  var SVG_LAYERS = '<path d="M12 3 3.5 7.8 12 12.6l8.5-4.8L12 3z"/><path d="m3.5 13.4 8.5 4.8 8.5-4.8"/>';
+
+  function bindToolBox() {
+    var box = $('#toolBox');
+    if (!box || box.dataset.bound) return;
+    box.dataset.bound = '1';
+  }
+
+  /** 安卓端工具箱收纳偏好：收起后只留左缘一个小把手，点一下拉回来 */
+  function toolBoxHiddenPref() {
+    try { return localStorage.getItem('chahu.toolboxHidden') === '1'; } catch (e) { return false; }
+  }
+
+  function setToolBoxHidden(on) {
+    try { localStorage.setItem('chahu.toolboxHidden', on ? '1' : '0'); } catch (e) { /* ignore */ }
+    renderToolBox();
+    if (on) toast('工具箱已收起，点左缘把手展开');
+  }
+
+  function renderToolBox() {
+    var box = $('#toolBox');
+    if (!box) return;
+    var show = $('#tbShow');
+    if (show && !show.dataset.bound) {
+      show.dataset.bound = '1';
+      show.addEventListener('click', function () { setToolBoxHidden(false); });
     }
-    // 进入工具栏编辑态（和「编辑」按钮同一个状态机）：编辑条 + 隐藏工具池由 renderToolGrid 统一刷
-    if (!S.toolEdit) {
-      S.toolEdit = true;
-      $$('#btnToolEdit, #btnBrushEdit').forEach(function (b) { b.classList.add('active'); });
+    if (!S.narrow || toolBoxHiddenPref()) {
+      box.classList.add('hidden');
+      if (show) show.classList.toggle('hidden', !S.narrow);
+      return;
     }
-    try { sec.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } catch (e) { /* ignore */ }
-    sec.classList.remove('section-flash');
-    void sec.offsetWidth;
-    sec.classList.add('section-flash');
-    renderToolGrid();
+    if (show) show.classList.add('hidden');
+    if (box.dataset.built) { syncToolBox(); box.classList.remove('hidden'); return; }
+    box.dataset.built = '1';
+
+    var mk = function (id, title, html, cls) {
+      var b = document.createElement('button');
+      b.className = 'tb-btn' + (cls ? ' ' + cls : '');
+      b.title = title;
+      b.innerHTML = html;
+      if (id) b.id = id;
+      box.appendChild(b);
+      return b;
+    };
+    mk('tbCollapse', '收起工具箱', '❮').addEventListener('click', function () { setToolBoxHidden(true); });
+    mk('tbBrush', '笔刷库（选笔 / 换笔）', '').addEventListener('click', flashBrushesSection);
+    mk('tbErase', '擦除模式：当前笔刷当橡皮（再点一次画回来）', Brushes.iconSvg('eraser'))
+      .addEventListener('click', toggleErase);
+    var sep1 = document.createElement('i'); sep1.className = 'tb-sep'; box.appendChild(sep1);
+    TOOLBOX_TOOLS.forEach(function (id) {
+      var it = Brushes.get(id);
+      if (!it) return;
+      mk('', it.name || id, Brushes.iconSvg(it.icon || id))
+        .dataset.tool = id;
+      box.lastChild.addEventListener('click', function () {
+        setErase(false);
+        loadBrush(id);
+      });
+    });
+    var sep2 = document.createElement('i'); sep2.className = 'tb-sep'; box.appendChild(sep2);
+    mk('tbTransform', '变换（Ctrl+T）', '<svg viewBox="0 0 24 24">' + SVG_TRANSFORM + '</svg>')
+      .addEventListener('click', function () {
+        var bt = $('#btnTransform');
+        if (bt) bt.click();
+      });
+    var bc = mk('tbColor', '颜色面板', '<i></i>', 'tb-color');
+    bc.addEventListener('click', openColorSection);
+    mk('', '图层面板', '<svg viewBox="0 0 24 24">' + SVG_LAYERS + '</svg>')
+      .addEventListener('click', function () { openPanelSection('layers'); });
+    syncToolBox();
+    box.classList.remove('hidden');
+  }
+
+  /** 只刷状态（激活高亮 / 当前笔刷图标 / 颜色圆点），不重建 DOM */
+  function syncToolBox() {
+    var box = $('#toolBox');
+    if (!box || !box.dataset.built) return;
+    var cur = Brushes.get(S.brushId);
+    var bp = $('#tbBrush');
+    if (bp) {
+      bp.innerHTML = (cur ? Brushes.iconSvg(cur.icon || cur.id) : '') +
+        '<em>' + (cur ? cur.name : '笔刷') + '</em>';
+      bp.classList.toggle('active', !eraseOn() && !isSpecialToolId(S.tool));
+    }
+    var be = $('#tbErase');
+    if (be) be.classList.toggle('active', eraseOn());
+    $$('#toolBox .tb-btn[data-tool]').forEach(function (b) {
+      b.classList.toggle('active', !eraseOn() && S.brushId === b.dataset.tool);
+    });
+    var bt = $('#tbTransform');
+    if (bt) bt.classList.toggle('active', !!(engine.transform && engine.transform.active));
+    var dot = document.querySelector('#tbColor i');
+    if (dot) dot.style.background = isSpecialToolId(S.tool) ? '#c9ced8' :
+      (eraseOn() ? '#c9ced8' : S.color);
+  }
+
+  /* ---- ≡ 菜单面板：窄屏把菜单栏和常用动作收进一个按钮（Krita / 移动端习惯）。
+   *  不挪 DOM：menu-bar / topbar-actions 原地变成两块 fixed 竖排面板（CSS 负责），
+   *  事件监听原封不动地继续工作。 ---- */
+  function bindAppSheet() {
+    var b = $('#btnAppSheet');
+    if (b && !b.dataset.bound) {
+      b.dataset.bound = '1';
+      b.addEventListener('click', function (e) {
+        e.stopPropagation();
+        document.body.classList.toggle('menu-sheet-open');
+      });
+    }
+    var chip = $('#brushChip');
+    if (chip && !chip.dataset.bound) {
+      chip.dataset.bound = '1';
+      chip.addEventListener('click', flashBrushesSection);
+    }
+    // 点面板外面就收起（捕获阶段：抢在菜单展开之前判断）
+    document.addEventListener('pointerdown', function (e) {
+      if (!document.body.classList.contains('menu-sheet-open')) return;
+      var t = e.target;
+      if (t.closest && (t.closest('.menu-bar') || t.closest('.topbar-actions') ||
+        t.closest('#btnAppSheet'))) return;
+      document.body.classList.remove('menu-sheet-open');
+    }, true);
+    // 点了任一动作按钮后自动收起
+    var ta = $('.topbar-actions');
+    if (ta) ta.addEventListener('click', function () {
+      document.body.classList.remove('menu-sheet-open');
+    });
+  }
+
+  /** 顶栏笔刷预设 chip：当前笔刷图标 + 名字 +（大小 · 不透明度）。
+   *  Krita 顶部工具栏同款信息密度，窄屏一眼看到手里这支笔。 */
+  function syncBrushChip() {
+    var chip = $('#brushChip');
+    if (!chip) return;
+    var cur = Brushes.get(S.brushId);
+    var ico = $('#brushChipIco');
+    if (ico) ico.innerHTML = cur ? Brushes.iconSvg(cur.icon || cur.id) : '';
+    var nm = $('#brushChipName');
+    if (nm) nm.textContent = eraseOn() ? '橡皮擦 · ' + (cur ? cur.name : '') : (cur ? cur.name : '—');
+    var meta = $('#brushChipMeta');
+    if (meta) meta.textContent = (eraseOn() || isSpecialToolId(S.tool)) ? '' :
+      S.brush.size + 'px · ' + Math.round(S.brush.opacity * 100) + '%';
   }
 
   /* ============================================================ 顶栏 */
@@ -13644,15 +13779,16 @@
     loadThemePref();        // 界面主题（system / light / dark）
     applyUiTheme();
     loadUiScale();          // 恢复上次的界面缩放（以前只写不读，刷新必丢）
-    // 侧栏收拉：把手 / 窄条 / F4（菜单里那项也走同一个函数）
-    $('#btnSideCollapse').addEventListener('click', function () { setSideCollapsed(true); });
+    // 侧栏收拉：内缘中部把手 / 窄条 / F4（菜单里那项也走同一个函数）
+    var er = $('#edgeRight'); if (er) er.addEventListener('click', function () { setSideCollapsed(true); });
     $('#sideRail').addEventListener('click', function () { setSideCollapsed(false); });
-    // 左栏同理：顶部 « 收起、左边窄条拉回（菜单项和 Tab 键也走这里）
-    var blc = $('#btnLeftCollapse'); if (blc) blc.addEventListener('click', function () { setLeftCollapsed(true); });
-    var brm = $('#btnLeftRailMode'); if (brm) brm.addEventListener('click', function () { setLeftRailMode(!S.leftRailMode); });
-    var bta = $('#btnToolAdd'); if (bta) bta.addEventListener('click', openToolAdd);
+    // 左栏同理：内缘中部把手收成图标栏 / 展开（菜单项也走这里）
+    var elh = $('#edgeLeft'); if (elh) elh.addEventListener('click', function () { setLeftRailMode(!S.leftRailMode); });
     bindChatBubble();
     var lr = $('#leftRail'); if (lr) lr.addEventListener('click', function () { setLeftCollapsed(false); });
+    // 窄屏 Krita 工具箱 / ≡ 菜单面板 / 笔刷预设 chip
+    bindToolBox();
+    bindAppSheet();
     // 窄屏抽屉：点暗色遮罩把抽屉都关掉
     var db = $('#drawerBack');
     if (db) db.addEventListener('click', function () {
@@ -14438,10 +14574,11 @@
       $('#leftPanelScroll').appendChild(toolsSec);
       savePanelOrder();
     }
-    var btn = $('#btnLeftRailMode');
-    if (btn) {
-      btn.textContent = on ? '❮' : '❯';
-      btn.title = on ? '展开操作面板' : '收纳成图标栏（只留一列工具小图标）';
+    // 内缘把手箭头随状态翻转：展开态 ❮（点击收成图标栏），图标栏态 ❯（点击展开）
+    var eh = $('#edgeLeft');
+    if (eh) {
+      eh.textContent = on ? '❯' : '❮';
+      eh.title = on ? '展开操作面板' : '收成图标栏（只留一列工具小图标）';
     }
     if (on && S.leftPanelOpen === false) setLeftCollapsed(false, { persist: false });
     if (!opts || opts.persist !== false) {
@@ -14450,9 +14587,12 @@
     engine.resize();
   }
 
+  /** 「收起 / 展开操作面板」（菜单项 / 外部调用入口）。
+   *  收起 = 收成 Krita 式图标栏（一列工具小图标），不再是整个隐藏 —— 桌面端
+   *  「完全藏起来」的状态只留给窄屏抽屉用。 */
   function toggleLeftPanel(opts) {
-    setLeftCollapsed(S.leftPanelOpen, opts);   // 现在开着 → 收；关着 → 开
-    if (!opts || !opts.silent) toast(S.leftPanelOpen ? '已展开操作面板' : '已收起操作面板');
+    setLeftRailMode(!S.leftRailMode, opts);
+    toast(S.leftRailMode ? '已收成图标栏' : '已展开操作面板');
   }
 
   /** 窄屏下两栏是浮在画布上的抽屉，中间垫一层暗色遮罩；点它就关抽屉 */
@@ -14468,26 +14608,31 @@
     if (S.narrow && S.leftPanelOpen) setLeftCollapsed(true, { persist: false });
   }
 
-  /** 窄屏 = 同一套 UI 的自适应：左右栏变成浮在画布上的抽屉（不再另起一套 HUD）。
+  /** 窄屏 = 同一套 UI 的自适应：左右栏变成浮在画布上的抽屉 + Krita 式工具箱。
    *  进出窄屏只切换「抽屉化 + 收纳」，用户的桌面偏好（图标栏等）留着不被污染。 */
   function applyLayoutMode(force) {
     var narrow = NARROW_MQ.matches;
     if (!force && narrow === S.narrow) return;
     S.narrow = narrow;
     document.body.classList.toggle('layout-narrow', narrow);
+    // ≡ 菜单面板只在窄屏存在，回宽屏时收掉
+    document.body.classList.remove('menu-sheet-open');
     if (narrow) {
       setLeftCollapsed(true, { persist: false });
       setSideCollapsed(true, { persist: false });
       setQuickBarCollapsed(true, false);
       syncChatBubble();
     } else {
-      setLeftCollapsed(lsGet('chahu.leftOpen', '1') === '0', { persist: false });
+      // 宽屏的左栏「收起」就是图标栏（见图二），不再有整个隐藏的状态
+      setLeftCollapsed(false, { persist: false });
       setSideCollapsed(lsGet('chahu.side', '1') === '0', { persist: false });
       hideChatBubble();
     }
     // 图标栏（收纳）两种布局都保留 —— 窄屏抽屉里也能收成一列工具图标
     setLeftRailMode(lsGet('chahu.leftRailMode', '0') === '1', { persist: false });
     syncDrawerBack();
+    renderToolBox();
+    syncBrushChip();
     engine.resize();
   }
 

@@ -99,7 +99,7 @@ async function main() {
     chatTab: document.querySelector('#sidePanel .tab[data-tab="chat"]').classList.contains('active')
   }));
   ok('点气泡拉出右侧聊天抽屉（停在聊天 tab）', drawer.sideOpen && drawer.chatTab);
-  await page.evaluate(() => { document.getElementById('btnSideCollapse').click(); });
+  await page.evaluate(() => window.ChaApp.toggleSide());   // 收起右抽屉（遮罩外点按也可）
   await sleep(400);
 
   /* [3] 取色钮 + 擦除模式 */
@@ -110,8 +110,8 @@ async function main() {
 
   // 擦除模式：先落一笔黑墨，再开擦除画过去 → 笔迹 tool=eraser 且画布像素被擦掉
   await page.evaluate(() => { const mk = document.querySelector('#entryMask'); if (mk) mk.style.display = 'none'; });
-  // 切回画笔（拉抽屉点笔刷栏第一格「画笔」）
-  await page.tap('#leftRail');
+  // 切回画笔（工具箱「当前笔刷」拉抽屉点笔刷栏）
+  await page.tap('#tbBrush');
   await sleep(500);
   await page.tap('#brushGrid .tool[data-item="brush"]');
   await sleep(400);
@@ -136,7 +136,6 @@ async function main() {
   await page.evaluate(() => {
     const back = document.getElementById('drawerBack');
     if (back && !back.classList.contains('hidden')) back.click();
-    else { const b = document.getElementById('btnLeftCollapse'); if (b) b.click(); }
   });
   await sleep(400);
   await touch('touchStart', [{ x: mid.x - 40, y: mid.y }]);
@@ -164,28 +163,88 @@ async function main() {
   });
   ok('浮窗标题栏为 ✕ 预留席位（不压「编辑」）', cssOk !== '', 'padding-right=' + cssOk);
 
-  /* [6] 侧栏「＋」 */
-  await page.tap('#leftRail');
+  /* [6] Krita 工具箱（常驻左缘） */
+  const tbCount = await page.evaluate(() => document.querySelectorAll('#toolBox .tb-btn').length);
+  ok('工具箱常驻左缘（≥11 格：笔刷/擦除/8 工具/变换/颜色/图层）', tbCount >= 11, 'count=' + tbCount);
+  await page.tap('#toolBox .tb-btn[data-tool="hand"]');
+  await sleep(400);
+  const handTool = await page.evaluate(() => window.ChaApp.state.tool);
+  ok('工具箱直达抓手工具', handTool === 'hand', 'tool=' + handTool);
+  await page.tap('#tbColor');
   await sleep(500);
-  await page.tap('#btnToolAdd');
-  await sleep(500);
-  const toolEdit = await page.evaluate(() => ({
-    editing: window.ChaApp.state.toolEdit === true,
-    bar: !document.getElementById('toolEditBar').classList.contains('hidden')
-  }));
-  ok('侧栏「＋」进入工具栏编辑态（可找回隐藏工具）', toolEdit.editing || toolEdit.bar, JSON.stringify(toolEdit));
-
-  /* [7] 图标栏收纳（面板内部的按钮用 evaluate 点，避免可见性等待） */
+  const colorDrawer = await page.evaluate(() =>
+    !document.querySelector('aside.panel.left').classList.contains('hidden'));
+  ok('工具箱「颜色」拉出颜色抽屉', colorDrawer);
   await page.evaluate(() => {
-    const e = document.getElementById('btnToolEdit'); if (e) e.click();
-    const r = document.getElementById('btnLeftRailMode'); if (r) r.click();
+    const b = document.getElementById('drawerBack');
+    if (b && !b.classList.contains('hidden')) b.click();
   });
-  await sleep(500);
-  const rail = await page.evaluate(() => {
-    const p = document.querySelector('aside.panel.left');
-    return { railMode: document.body.classList.contains('left-rail-mode'), w: Math.round(p.getBoundingClientRect().width) };
+  await sleep(300);
+
+  /* [7] ≡ 菜单面板 + 顶栏笔刷 chip */
+  await page.tap('#btnAppSheet');
+  await sleep(400);
+  const sheet = await page.evaluate(() => ({
+    open: document.body.classList.contains('menu-sheet-open'),
+    menuVisible: getComputedStyle(document.getElementById('menuBar')).display !== 'none',
+    actionsVisible: getComputedStyle(document.querySelector('.topbar-actions')).display !== 'none'
+  }));
+  ok('≡ 打开菜单面板（菜单栏 + 动作按钮竖排）', sheet.open && sheet.menuVisible && sheet.actionsVisible, JSON.stringify(sheet));
+  await page.tap('#btnAppSheet');
+  await sleep(300);
+  const chip = await page.evaluate(() => ({
+    name: document.getElementById('brushChipName').textContent,
+    shown: getComputedStyle(document.getElementById('brushChip')).display !== 'none'
+  }));
+  ok('顶栏笔刷 chip 显示当前笔刷', chip.shown && chip.name && chip.name !== '—', JSON.stringify(chip));
+
+  /* [9] 快捷条橡皮去重：橡皮不再作为「一支笔」出现在笔刷列里 */
+  const dedup = await page.evaluate(() => {
+    const chips = Array.from(document.querySelectorAll('#tdBrushes .td-chip'));
+    const eraserMode = document.getElementById('tdErase');
+    return {
+      count: chips.length,
+      hasEraserChip: chips.some(c => c.id !== 'tdErase' && c.querySelector('svg') &&
+        c.innerHTML.indexOf('eraser') >= 0),
+      eraserModeBtn: !!eraserMode && getComputedStyle(eraserMode).display !== 'none'
+    };
   });
-  ok('图标栏收纳在窄屏可用（面板收成 56~64px 一列）', rail.railMode && rail.w <= 70, JSON.stringify(rail));
+  ok('擦除模式钮仍在快捷条右端', dedup.eraserModeBtn);
+  ok('笔刷列里没有重复的橡皮芯片（≤4 支且无橡皮）', dedup.count <= 4 && !dedup.hasEraserChip,
+    'count=' + dedup.count);
+  // 从笔刷名再兜一道：芯片 title 不该是「橡皮」
+  const eraserTitle = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('#tdBrushes .td-chip'))
+      .some(c => /橡皮/.test(c.title)));
+  ok('笔刷列芯片没有橡皮（title 兜底检查）', !eraserTitle);
+
+  /* [10] 工具箱收纳：顶部 ❮ 收起 → 左缘把手 → 点把手展开 */
+  const tbBefore = await page.evaluate(() => ({
+    visible: !document.getElementById('toolBox').classList.contains('hidden'),
+    hasCollapse: !!document.getElementById('tbCollapse')
+  }));
+  ok('工具箱显示且带收纳钮', tbBefore.visible && tbBefore.hasCollapse);
+  await page.evaluate(() => document.getElementById('tbCollapse').click());
+  await sleep(400);
+  const tbCollapsed = await page.evaluate(() => ({
+    hidden: document.getElementById('toolBox').classList.contains('hidden'),
+    restoreVisible: (() => {
+      const r = document.getElementById('tbShow');
+      return r && !r.classList.contains('hidden') && r.getBoundingClientRect().width > 0;
+    })(),
+    persisted: localStorage.getItem('chahu.toolboxHidden') === '1'
+  }));
+  ok('点收纳钮 → 工具箱收起', tbCollapsed.hidden);
+  ok('左缘出现展开把手', tbCollapsed.restoreVisible);
+  ok('收纳偏好已记忆', tbCollapsed.persisted);
+  await page.evaluate(() => document.getElementById('tbShow').click());
+  await sleep(400);
+  const tbBack = await page.evaluate(() =>
+    !document.getElementById('toolBox').classList.contains('hidden') &&
+    localStorage.getItem('chahu.toolboxHidden') !== '1');
+  ok('点把手 → 工具箱展开回来', tbBack);
+  // 收尾：清掉偏好，免得污染别的用例（同一 profile 共享 localStorage）
+  await page.evaluate(() => localStorage.removeItem('chahu.toolboxHidden'));
 
   console.log('\n页面报错数（应为 0）: ' + errors.length);
   errors.slice(0, 5).forEach(e => console.log('  · ' + e.slice(0, 140)));
