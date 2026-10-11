@@ -1059,6 +1059,122 @@
     lsSet(ITEM_KEYS_STORE, JSON.stringify(ITEM_KEYS));
     renderToolGrid();
   }
+
+  /** 恢复笔刷/工具键位的默认值（「快捷键设置」里「全部恢复默认」用） */
+  function resetItemKeys() {
+    ITEM_KEYS = {};
+    for (var id in ITEM_KEYS_DEFAULT) ITEM_KEYS[id] = ITEM_KEYS_DEFAULT[id];
+    saveKeymap();
+  }
+
+  /**
+   * 「快捷键设置」对话框里的「笔刷与工具」区块（menu.js renderKeyTable 末尾回调）。
+   * 和右键笔刷格子改的是同一份键位表 —— 两个入口理顺成一个数据源：
+   * 这里能看到全部键位、能改能清；右键格子是「就地快改」的捷径。
+   */
+  function brushKeyRows(body) {
+    if (!body) return;
+    var h = document.createElement('div');
+    h.className = 'key-group';
+    h.textContent = '笔刷与工具（右键笔刷格子也能改）';
+    body.appendChild(h);
+    var list = visibleItems();
+    list.forEach(function (it) {
+      var row = document.createElement('div');
+      row.className = 'key-row';
+      var cur = itemKey(it.id);
+      var changed = cur !== (ITEM_KEYS_DEFAULT[it.id] === undefined ? '' : ITEM_KEYS_DEFAULT[it.id]);
+      row.innerHTML =
+        '<span class="kname">' + esc(it.name) + (isBrushItem(it) ? '' : '（工具）') + '</span>' +
+        '<input class="kinput" data-item="' + esc(it.id) + '" readonly value="' +
+        esc(cur || '（未设置）') + '">' +
+        '<button class="mini kgap" data-clear-item="' + esc(it.id) + '" title="清空这个快捷键">清空</button>' +
+        (changed ? '<button class="mini kgap" data-reset-item="' + esc(it.id) + '" title="恢复默认">默认</button>'
+          : '<span class="kgap"></span>');
+      body.appendChild(row);
+    });
+
+    /** 把 key 设给 item；撞了别的笔刷就清掉对方（和菜单键的行为一致），返回提示串 */
+    function assignItemKey(id, key) {
+      var cleared = [];
+      for (var other in ITEM_KEYS) {
+        if (other === id || !ITEM_KEYS[other]) continue;
+        if (String(ITEM_KEYS[other]).toUpperCase() === String(key).toUpperCase()) {
+          var oit = Brushes.get(other);
+          cleared.push(oit ? oit.name : other);
+          ITEM_KEYS[other] = '';
+        }
+      }
+      ITEM_KEYS[id] = key;
+      saveKeymap();
+      return cleared;
+    }
+
+    body.querySelectorAll('input[data-item]').forEach(function (inp) {
+      var id = inp.dataset.item;
+      inp.onkeydown = function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.key === 'Escape') { inp.blur(); return; }
+        if (e.key === 'Backspace' || e.key === 'Delete') { inp.value = '（未设置）'; inp.dataset.pending = ''; return; }
+        if (['Control', 'Shift', 'Meta'].indexOf(e.key) >= 0) return;
+        var key;
+        if (e.key === 'Alt') { key = 'Alt'; }               // Alt = 按住取色（SAI 习惯）
+        else if (/^[a-zA-Z]$/.test(e.key)) {
+          var up = e.key.toUpperCase();
+          if (up === 'X' || up === 'D' || up === 'H') {
+            toast('X / D / H 是全局功能键（换色 / 黑白 / 翻转），换一个吧', 'err');
+            return;
+          }
+          key = up;
+        } else return;  // 空格 / F1 这类不理，继续等
+        inp.value = key;
+        inp.dataset.pending = key;
+        inp.blur();       // 笔刷键是单键，设完就收 —— 不像菜单键等失焦再提交
+      };
+      inp.onblur = function () {
+        var k = inp.dataset.pending;
+        if (k === undefined) return;
+        delete inp.dataset.pending;
+        if (k === itemKey(id)) { brushKeyRows(body); return; }
+        var cleared = assignItemKey(id, k);
+        var name = (Brushes.get(id) || {}).name || id;
+        var msg = '「' + name + '」快捷键已设为 ' + (k === 'Alt' ? 'Alt（按住取色）' : k);
+        if (cleared.length) msg += '，原属于「' + cleared.join('」「') + '」的已被清空';
+        // 撞了菜单的裸字母键也说明一声：按下时会优先切笔刷，菜单那个动作不再响应
+        if (global.ChaMenu && k !== 'Alt') {
+          var menuHit = global.ChaMenu.matchEvent(
+            { key: k, ctrlKey: false, altKey: false, shiftKey: false, metaKey: false });
+          if (menuHit && !/^(Ctrl|Alt)\+/.test(global.ChaMenu.keyOf(menuHit.id))) {
+            msg += '；菜单「' + menuHit.label + '」的同名键将被笔刷优先';
+          }
+        }
+        toast(msg, 'ok', 4200);
+        brushKeyRows(body);   // 重画（清空对方的行也要更新）
+      };
+      inp.onclick = function () {
+        inp.value = ''; inp.placeholder = '按字母或 Alt…';
+        inp.dataset.pending = '';
+        inp.focus();
+      };
+    });
+    body.querySelectorAll('button[data-clear-item]').forEach(function (b) {
+      b.onclick = function () {
+        ITEM_KEYS[b.dataset.clearItem] = '';
+        saveKeymap();
+        toast('已清空该快捷键', 'ok');
+        brushKeyRows(body);
+      };
+    });
+    body.querySelectorAll('button[data-reset-item]').forEach(function (b) {
+      b.onclick = function () {
+        var id = b.dataset.resetItem;
+        ITEM_KEYS[id] = ITEM_KEYS_DEFAULT[id] === undefined ? '' : ITEM_KEYS_DEFAULT[id];
+        saveKeymap();
+        brushKeyRows(body);
+      };
+    });
+  }
   /** 按键找笔刷：只认当前面板上看得见的（收起的笔不吃键，避免「隐形抢键」） */
   function findItemByKey(key) {
     if (!key) return null;
@@ -1304,6 +1420,8 @@
     if (!m) return;
     $('#icmName').textContent = it.name + (it.imported ? '（导入）' : '');
     refreshIcmKey();
+    // 重命名只给导入的笔刷：内置笔刷的名字跟着功能走（改名会把快捷键说明弄乱）
+    $('#icmRename').classList.toggle('hidden', !it.imported);
     $('#icmDel').textContent = it.imported ? '删除笔刷' : '收起笔刷（编辑模式可放回）';
     m.classList.remove('hidden');
     // 尺寸用 offsetWidth/offsetHeight：入场有缩放动画，rect 会被 transform 缩小
@@ -2530,8 +2648,9 @@
       var b = document.createElement('button');
       b.className = 'td-chip td-brush' + (id === S.brushId ? ' active' : '');
       b.innerHTML = Brushes.iconSvg(it.icon || it.id);
-      b.title = it.name + '（点一下就换）';
+      b.title = it.name + '（点一下就换，长按弹笔刷库）';
       b.onclick = function () { loadBrush(id); };
+      bindLongPress(b, function () { popSectionCard('brushes', b); });
       bb.appendChild(b);
     });
     // 取色 / 擦除两个模式钮：图标固定，激活态跟着工具走
@@ -2546,7 +2665,10 @@
     }
     if (!dockBound) {
       dockBound = true;
-      $('#tdColor').addEventListener('click', openColorSection);
+      var tdColor = $('#tdColor');
+      tdColor.addEventListener('click', openColorSection);
+      tdColor.title = '当前颜色（点一下跳颜色面板，长按弹出色版）';
+      bindLongPress(tdColor, function () { popSectionCard('color', tdColor); });
       if (pk) pk.addEventListener('click', function () {
         setErase(false);
         setTool('picker');
@@ -2580,6 +2702,67 @@
   /** 快捷条上点当前色：跳到颜色面板 */
   function openColorSection() {
     openPanelSection('color');
+  }
+
+  /* ---- 长按弹出小节卡片（安卓快捷条：颜色长按=色版，笔刷长按=笔刷库） ---- */
+
+  /** 通用长按：450ms 不动 = 触发；触发后拦掉随后的 click（别再走点按逻辑） */
+  function bindLongPress(el, fn) {
+    if (!el || el.dataset.lpBound) return;
+    el.dataset.lpBound = '1';
+    el.classList.add('lp-target');    // CSS：禁长按选中/系统呼出（真机安卓需要）
+    var timer = null, sx = 0, sy = 0, fired = false;
+    // ⚠ 安卓真机：长按 ~500ms 会弹系统上下文菜单（还伴随 pointercancel / 文本选择），
+    //   正好卡在 450ms 触发点后面捣乱 —— 必须按掉，并禁止选中/呼出（CSS 侧配合
+    //   .lp-target 的 user-select:none / -webkit-touch-callout:none）。
+    el.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+    el.addEventListener('pointerdown', function (e) {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      fired = false; sx = e.clientX; sy = e.clientY;
+      timer = setTimeout(function () { timer = null; fired = true; fn(e); }, 450);
+    });
+    el.addEventListener('pointermove', function (e) {
+      // 手指滑动（滚动/拖拽意图）就取消，别在用户滚动列表时突然弹卡
+      if (timer && (Math.abs(e.clientX - sx) > 10 || Math.abs(e.clientY - sy) > 10)) {
+        clearTimeout(timer); timer = null;
+      }
+    });
+    ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (t) {
+      el.addEventListener(t, function () { if (timer) { clearTimeout(timer); timer = null; } });
+    });
+    el.addEventListener('click', function (e) {
+      if (fired) { e.stopImmediatePropagation(); e.preventDefault(); fired = false; }
+    }, true);
+  }
+
+  /**
+   * 把一个小节弹成卡片（触屏快捷条的长按入口）。
+   * 桌面/窄屏都适用：浮窗 z-index 70 盖过画布、抽屉和快捷条；
+   * placeFloat 负责夹进视口 —— 高卡片（色板/笔刷库）保证标题栏在屏内可拖。
+   * anchorEl = 长按的那个按钮，卡片优先弹在它上方居中。
+   */
+  function popSectionCard(sectionId, anchorEl) {
+    var sec = document.querySelector('[data-section="' + sectionId + '"]');
+    if (!sec) return;
+    var r = anchorEl ? anchorEl.getBoundingClientRect() : { left: innerWidth / 2, width: 0, top: innerHeight / 2 };
+    if (sec.classList.contains('section-floating')) {
+      // 已经弹着：重新锚定到按钮旁边 + 闪一下提醒
+      placeFloat(sec, r.left + r.width / 2 - sec.offsetWidth / 2, r.top - sec.offsetHeight - 10);
+      sec.classList.remove('section-flash');
+      void sec.offsetWidth;
+      sec.classList.add('section-flash');
+    } else {
+      var cx = r.left + r.width / 2;
+      var estY = Math.max(8, r.top - 280);   // 先按估计高度浮出，下一行按真实尺寸精调
+      floatSection(sec, cx - 120, estY);
+      sec.classList.add('hud-card');
+      placeFloat(sec, cx - sec.offsetWidth / 2, r.top - sec.offsetHeight - 10);
+    }
+    // 色板小节滚到色板那一段；笔刷库滚到列表
+    var inner = sec.querySelector('#swatchBox, .swatch-wrap, .brush-list');
+    if (inner && inner.scrollIntoView) {
+      try { inner.scrollIntoView({ block: 'nearest' }); } catch (e) { /* ignore */ }
+    }
   }
 
   /* ============================================================ 擦除模式（笔刷当橡皮用）
@@ -2784,15 +2967,36 @@
   }
 
   /* ---- ≡ 菜单面板：窄屏把菜单栏和常用动作收进一个按钮（Krita / 移动端习惯）。
-   *  不挪 DOM：menu-bar / topbar-actions 原地变成两块 fixed 竖排面板（CSS 负责），
-   *  事件监听原封不动地继续工作。 ---- */
+   *  打开时把 .topbar-actions **整个节点**挪进 .menu-bar 面板末尾 —— 右侧只有
+   *  一块可滚动的面板，左边不再露出第二块（用户反馈「左边也会有一点显示」）。
+   *  appendChild 移动节点不会丢监听器，事件照常工作；关闭时移回原位。
+   *  之前「不挪 DOM、两块 fixed 面板」的做法在真机上像两处分离的浮层，
+   *  而且动作按钮组超高没处滚 —— 合并后统一交给面板的 overflow-y 滚动。 ---- */
+  function setAppSheet(open) {
+    var bar = $('.menu-bar'), ta = $('.topbar-actions');
+    if (!bar || !ta) { document.body.classList.toggle('menu-sheet-open', !!open); return; }
+    if (open) {
+      if (ta.parentElement !== bar) {
+        ta._sheetHome = { parent: ta.parentElement, next: ta.nextSibling };
+        bar.appendChild(ta);            // 节点移动保留全部事件监听
+      }
+      document.body.classList.add('menu-sheet-open');
+    } else {
+      var home = ta._sheetHome;
+      if (home && ta.parentElement !== home.parent) {
+        home.parent.insertBefore(ta, home.next);
+      }
+      document.body.classList.remove('menu-sheet-open');
+    }
+  }
+
   function bindAppSheet() {
     var b = $('#btnAppSheet');
     if (b && !b.dataset.bound) {
       b.dataset.bound = '1';
       b.addEventListener('click', function (e) {
         e.stopPropagation();
-        document.body.classList.toggle('menu-sheet-open');
+        setAppSheet(!document.body.classList.contains('menu-sheet-open'));
       });
     }
     var chip = $('#brushChip');
@@ -2806,12 +3010,12 @@
       var t = e.target;
       if (t.closest && (t.closest('.menu-bar') || t.closest('.topbar-actions') ||
         t.closest('#btnAppSheet'))) return;
-      document.body.classList.remove('menu-sheet-open');
+      setAppSheet(false);
     }, true);
     // 点了任一动作按钮后自动收起
     var ta = $('.topbar-actions');
     if (ta) ta.addEventListener('click', function () {
-      document.body.classList.remove('menu-sheet-open');
+      setAppSheet(false);
     });
   }
 
@@ -3590,7 +3794,9 @@
 
   /** 把解析出来的笔尖变成一支可用的笔刷条目 */
   function importedItem(rec, idx) {
-    var d = Math.max(4, Math.min(400, Math.round(rec.diameter || 40)));
+    // 默认直径封顶 200：PS 纹理笔刷源图常有 2000px+ 的，照搬会让第一笔就是
+    // 400px 大章，tip 再清晰也是糊的（用户观感：喷枪）。想要更大可以拖滑条（上限 400）。
+    var d = Math.max(4, Math.min(200, Math.round(rec.diameter || 40)));
     var params = {
       brush: 'custom',
       size: d,
@@ -3824,6 +4030,20 @@
       renderToolGrid();
     }
     toast('已删除「' + it.name + '」');
+  }
+
+  /** 重命名导入的笔刷：Brushes 与 S.imported 是同一份对象引用，改 name 两边同步 */
+  function renameImported(id) {
+    var it = Brushes.get(id);
+    if (!it || !it.imported) return;
+    var name = (global.prompt ? global.prompt('新的笔刷名（最长 16 字）：', it.name) : '') || '';
+    name = name.replace(/\s+/g, ' ').trim().slice(0, 16);
+    if (!name || name === it.name) return;
+    it.name = name;
+    saveImported();
+    renderToolGrid();
+    updateBrushLabel();
+    toast('已改名为「' + name + '」');
   }
 
   /* ============================================================ 成员 / 聊天 / 笔迹 */
@@ -7907,6 +8127,18 @@
       }
       // 右键小弹窗开着时按 Esc 关掉它
       if (ctxItem && e.key === 'Escape') { closeItemCtx(); return; }
+      // 单字母 = 单笔快捷键（右键笔刷可自定义），必须排在菜单键匹配之前：
+      // 菜单里 U（模糊）/ S（涂抹）也是裸字母键，以前排在前面，
+      // 用户把 U/S 设给笔刷后按键永远被菜单吃掉 —— 就是「快捷键设置没用」的元凶。
+      // 笔刷键是用户显式设置的，优先于菜单的隐式默认；没设该字母的笔刷时照样落回菜单。
+      // 变换中不查（其余快捷键一律不响应，见下面 transform 分支）。
+      if (!engine.transform) {
+        var kb = e.key.toLowerCase();
+        if (kb.length === 1 && kb >= 'a' && kb <= 'z') {
+          var brushHit = findItemByKey(kb);
+          if (brushHit) { e.preventDefault(); loadBrush(brushHit); return; }
+        }
+      }
       // 菜单 / 快捷键先过一遍：键位是可以在「快捷键设置」里改的
       if (global.ChaMenu) {
         var hit = global.ChaMenu.matchEvent(e);
@@ -8498,6 +8730,12 @@
         refreshIcmKey();   // 弹窗留着，方便接着设别的
         toast('「' + ctxItem.name + '」已无快捷键');
       });
+      $('#icmRename').addEventListener('click', function () {
+        if (!ctxItem) return;
+        var it = ctxItem;
+        closeItemCtx();
+        renameImported(it.id);
+      });
       $('#icmDel').addEventListener('click', function () {
         if (!ctxItem) return;
         var it = ctxItem;
@@ -8596,6 +8834,7 @@
       $('#btnKeyReset').addEventListener('click', function () {
         global.ChaMenu.resetKeys();
         global.ChaMenu.buildMenuBar();
+        resetItemKeys();            // 笔刷/工具键位也一起回默认
         global.ChaMenu.openKeyDialog();
         toast('快捷键已全部恢复默认', 'ok');
       });
@@ -14615,8 +14854,8 @@
     if (!force && narrow === S.narrow) return;
     S.narrow = narrow;
     document.body.classList.toggle('layout-narrow', narrow);
-    // ≡ 菜单面板只在窄屏存在，回宽屏时收掉
-    document.body.classList.remove('menu-sheet-open');
+    // ≡ 菜单面板只在窄屏存在，回宽屏时收掉（并把挪进去的动作按钮组移回顶栏）
+    setAppSheet(false);
     if (narrow) {
       setLeftCollapsed(true, { persist: false });
       setSideCollapsed(true, { persist: false });
@@ -16315,6 +16554,8 @@
 
   global.ChaApp = {
     engine: engine, net: net, state: S, undo: undo, redo: redo, toast: toast,
+    // 快捷键：menu.js 的「快捷键设置」对话框末尾用它追加「笔刷与工具」区块
+    brushKeyRows: brushKeyRows,
     // 笔刷导入（给测试用，也让控制台里能手动导一支试试）
     openBrushImport: openBrushImport,
     handleBrushFiles: handleBrushFiles,

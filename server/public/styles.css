@@ -2601,6 +2601,7 @@ body.panel-dragging * { cursor: grabbing !important; }
 }
 .key-row .kinput:focus { outline: 2px solid var(--accent); outline-offset: -1px; background: var(--surface); }
 .key-row .kgap { flex: none; width: 40px; }
+.key-row button.mini { white-space: nowrap; padding-left: 6px; padding-right: 6px; }
 
 /* ---------------- 笔刷导入（PS .abr / CSP .sut） ---------------- */
 .hidden-file { display: none; }
@@ -4985,6 +4986,16 @@ body.layout-narrow .chat-bubble { display: inline-flex; }
 }
 .side-rail.left-rail { border-radius: 8px 0 0 8px; }
 
+/* 长按目标（安卓快捷条的颜色钮 / 笔刷 chip）：按住 450ms 弹卡片。
+   真机上长按会触发系统文本选择 / 上下文菜单 —— 全部按掉，别跟卡片抢手指 */
+.lp-target {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
 /* ---- 窄屏（安卓）：Krita 式布局 ---- */
 @media (max-width: 1080px) {
   /* 桌面那套收拉把手在窄屏没有意义：抽屉有自己的开关路径 */
@@ -5000,6 +5011,9 @@ body.layout-narrow .chat-bubble { display: inline-flex; }
     display: flex;
     position: fixed;
     top: 52px;
+    height: auto;               /* ★ 覆盖 base .menu-bar 的 height:30px —— 否则九个标题
+                                   竖排挤在 30px 的滚动盒里（滚动条还隐藏着），
+                                   看上去「一大半菜单点不了」，点击还会穿透到下面的工具箱 */
     flex-direction: column;
     align-items: stretch;
     gap: 2px;
@@ -5011,9 +5025,34 @@ body.layout-narrow .chat-bubble { display: inline-flex; }
     background: var(--glass-sheen, none), var(--panel);
     box-shadow: 0 10px 30px rgba(15, 22, 36, .25);
   }
-  body.layout-narrow.menu-sheet-open .menu-bar { left: 8px; width: 148px; z-index: 26; }
-  body.layout-narrow.menu-sheet-open .topbar-actions { right: 8px; width: 132px; z-index: 26; }
+  body.layout-narrow.menu-sheet-open .menu-bar { left: auto; right: 8px; width: 216px; z-index: 26; }
+  /* 动作按钮组（房间/游戏/画布…）已被 JS 挪进菜单面板末尾：
+     从「第二块 fixed 浮层」降级为面板内的一节 —— 左侧不再露出任何东西，
+     全部内容跟着面板一起滚（用户反馈：功能不全 + 左边漏出来一点）。 */
+  body.layout-narrow.menu-sheet-open .topbar-actions {
+    position: static;
+    top: auto; right: auto;
+    width: auto;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 2px;
+    margin: 4px 0 0;               /* 覆盖 base .topbar-actions 的 margin-left:auto（竖排面板里会把它推离左边） */
+    padding: 6px 2px 2px;
+    border-top: 1px solid var(--line);
+    z-index: auto;
+  }
   body.layout-narrow.menu-sheet-open .topbar-actions .btn { text-align: left; }
+  /* 面板超高时滚动：滚动条要看得见摸得着（安卓触摸滚动 + 细滚动条） */
+  body.layout-narrow.menu-sheet-open .menu-bar {
+    overflow-x: hidden;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    -webkit-overflow-scrolling: touch;
+  }
+  body.layout-narrow.menu-sheet-open .menu-bar::-webkit-scrollbar { width: 8px; }
+  body.layout-narrow.menu-sheet-open .menu-bar::-webkit-scrollbar-thumb {
+    background: rgba(128, 138, 155, .5); border-radius: 4px;
+  }
   /* ≡ 按钮只在窄屏出现（覆盖上面的默认隐藏） */
   body.layout-narrow .narrow-only { display: inline-flex !important; }
 }

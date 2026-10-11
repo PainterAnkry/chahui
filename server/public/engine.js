@@ -189,6 +189,10 @@
    */
   function blurPxOf(stroke) {
     var h = stroke.hardness == null ? 1 : stroke.hardness;
+    // ★ 导入笔刷（带笔尖位图）：软边已经烧在位图的 alpha 里（PS 对采样笔刷也是这样），
+    //   再按硬度对整条笔迹蒙版叠一层模糊是双重糊化 —— 纹理笔刷（硬度 0.05、直径 200）
+    //   会被糊成 95px 的大黑雾，用户看到的「黑色喷枪」就是它。所以有 tip 一律不模糊。
+    if (stroke.tip) return 0;
     if (h >= 0.98) return 0;
     var b = stroke.size * (1 - h) * 0.5;
     return b < 0.35 ? 0 : b;
@@ -693,6 +697,35 @@
   }
 
   /**
+   * 染色版笔尖（tip × 当前颜色）。
+   *
+   * ⚠ 曾经的 bug：stampTip 直接 drawImage 原始 tip 位图 —— unpackTip 解出来的
+   * 像素是「RGB 全白 + alpha 形状」（标准蒙版），而 fillStyle 对 drawImage **完全不
+   * 参与**，于是导入的笔刷不管什么形状，画出来一律是白色（用户报的「白色喷枪」）。
+   *
+   * 修法：用 source-in 把形状蒙版染成 stroke.color。按 (颜色|tip) 缓存 ——
+   * 一条笔迹一个颜色，缓存命中率极高；换色只是换 key，原始蒙版仍在 tipCache 里。
+   */
+  var tintCache = new Map();     // color + '|' + tip 字符串 -> 染色 canvas
+
+  function tintedTip(tipStr, color) {
+    var base = tipCanvas(tipStr);
+    if (!base) return null;
+    var key = color + '|' + tipStr;
+    if (tintCache.has(key)) return tintCache.get(key);
+    var c = document.createElement('canvas');
+    c.width = base.width; c.height = base.height;
+    var cx = c.getContext('2d');
+    cx.drawImage(base, 0, 0);
+    cx.globalCompositeOperation = 'source-in';   // 只保留形状范围内的填充色
+    cx.fillStyle = color;
+    cx.fillRect(0, 0, c.width, c.height);
+    if (tintCache.size > 96) tintCache.clear();  // 32 色 × 3 支常用笔的量级，够了
+    tintCache.set(key, c);
+    return c;
+  }
+
+  /**
    * 按笔尖位图落笔：沿路径按弧长等距盖章。
    *
    * 为什么不是「沿路径描一条线」：导入的笔刷（PS 的星形、CSP 的各种笔尖）
@@ -700,7 +733,7 @@
    * 所以两端算出的落点完全一致。
    */
   function paintTipStroke(ctx, stroke, pts, fromIndex, m) {
-    var tip = tipCanvas(stroke.tip);
+    var tip = tintedTip(stroke.tip, stroke.color);   // 必须用染色版（见 tintedTip 注释）
     if (!tip) return false;                        // 还没解出来：交给调用方退化处理
     strokeStyleSetup(ctx, stroke);
     var n = pts.length;

@@ -508,13 +508,59 @@
       wrap.appendChild(b);
       wrap.appendChild(subBox);
       b.onmouseenter = function () {
+        // 触屏 tap 切换后的合成 mouseenter 别再拉回来（收起→又打开）
+        if (wrap._touchToggledAt && Date.now() - wrap._touchToggledAt < 600) return;
         subBox.classList.remove('hidden');
         b.classList.add('active');
         placeSub(subBox, wrap);
+        wrap._hoverOpenedAt = Date.now();
       };
       wrap.onmouseleave = function () {
+        // 触屏 tap 后浏览器会补发合成的 mouseover/enter/leave ——
+        // leave 会把 pointerup 刚展开的子菜单又收掉。触屏切换后 600ms 内不理。
+        if (wrap._touchToggledAt && Date.now() - wrap._touchToggledAt < 600) return;
         subBox.classList.add('hidden');
         b.classList.remove('active');
+      };
+      // 触屏没有真 hover —— 二级菜单（滤镜 → 像素化这类）在安卓上永远打不开。
+      // tap 父项 = 切换子菜单；桌面（hover:hover）上 hover 已经展开，点击不动作。
+      // ⚠ 触屏 tap 会合成 mouseenter（子菜单被提前打开），click 也可能整个不派发。
+      //   所以触屏挂在 pointerup，并以 pointerdown 前的开关状态为准做切换。
+      var hoverCapable = global.matchMedia && global.matchMedia('(hover: hover)').matches;
+      function expandSub() {
+        var drop = wrap.closest('.menu-drop');
+        if (drop) drop.querySelectorAll('.menu-sub:not(.hidden)').forEach(function (s) {
+          if (s !== subBox) {
+            s.classList.add('hidden');
+            var pw = s.closest('.menu-subwrap');
+            if (pw) { var pb = pw.querySelector('.menu-row.has-sub'); if (pb) pb.classList.remove('active'); }
+          }
+        });
+        subBox.classList.remove('hidden');
+        b.classList.add('active');
+        placeSub(subBox, wrap);
+      }
+      function collapseSub() {
+        subBox.classList.add('hidden');
+        b.classList.remove('active');
+      }
+      b.addEventListener('pointerdown', function (e) {
+        if (e.pointerType === 'mouse') return;
+        wrap._wasOpenAtDown = !subBox.classList.contains('hidden');
+      });
+      b.addEventListener('pointerup', function (e) {
+        if (e.pointerType === 'mouse') return;
+        wrap._touchToggledAt = Date.now();
+        // down 前是关的 → 这次 tap = 打开（合成 mouseenter 可能已开了，ensure 一遍）
+        // down 前是开的 → 这次 tap = 收起
+        if (wrap._wasOpenAtDown) collapseSub(); else expandSub();
+      });
+      b.onclick = function (ev) {
+        ev.stopPropagation();
+        // 触屏 tap：pointerup 已处理；click（若浏览器派发了）跳过防双触发
+        if (wrap._touchToggledAt && Date.now() - wrap._touchToggledAt < 500) return;
+        if (hoverCapable) return;   // 桌面：hover 已负责展开
+        if (subBox.classList.contains('hidden')) expandSub(); else collapseSub();
       };
       return wrap;
     }
@@ -589,11 +635,15 @@
     // 右边界超出：翻到父项左侧
     if (left + w > vw - 4) {
       subBox.classList.add('flip-x');
-      left = pr.left - w;
-    }
-    // 左边界也超出（屏幕太窄）：贴左边，别掉出屏幕
-    if (left < 4) {
-      left = 4;
+      left = pr.left - w - 2;
+      // ⚠ 翻转后掉出屏幕左缘 → 贴左缘 4px。
+      //   ⚠⚠ 不能贴右缘（以前的做法）：≡ 面板现在整块贴右，父项就在右缘，
+      //   子菜单贴右必然整块压回父项上 —— tap 的合成 click 命中盖在上面的
+      //   子菜单第一行（而不是父项），stopPropagation 不执行，click 冒泡到
+      //   document 的 closeAll 把刚展开的又全部关掉。390px 宽的安卓必现，
+      //   表现就是「滤镜的二级菜单点不开」。贴左缘只会盖住下拉的左半，
+      //   tap 点的父项中心不受影响。
+      if (left < 4) left = 4;
     }
     subBox.style.left = Math.round(left) + 'px';
     subBox.style.right = 'auto';
@@ -739,6 +789,11 @@
         buildMenuBar();
       };
     });
+    // 「笔刷与工具」区块：笔刷键位表在 app.js（ITEM_KEYS），由 app 侧渲染追加。
+    // 两个入口改的是同一份数据 —— 这里是总览，右键笔刷格子是就地快改。
+    if (global.ChaApp && global.ChaApp.brushKeyRows) {
+      try { global.ChaApp.brushKeyRows(body); } catch (e) { console.error(e); }
+    }
   }
 
   function commitKeyInput(inp) {

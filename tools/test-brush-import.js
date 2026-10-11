@@ -58,15 +58,15 @@ function check(name, ok, extra) {
     }
     return {
       tip: tip, w: u.w, h: u.h, bytes: u.rgba.length, len: tip.length,
-      centre: u.rgba[(24 * u.w + 24) * 4 + 3],
+      centre: u.rgba[(48 * u.w + 48) * 4 + 3],
       corner: u.rgba[(1 * u.w + 1) * 4 + 3],
       hard: hard, soft: BI.hardnessOf(soft, w, h),
       bad: [BI.unpackTip('nope'), BI.unpackTip('32x32x8:AAAA'), BI.unpackTip('')]
     };
   });
   console.log('  打包结果:', pack.w + '×' + pack.h, '共', pack.len, '字符');
-  check('笔尖打包成 48×48 的 4 位小图', pack.w === 48 && pack.h === 48, pack.w + '×' + pack.h);
-  check('打包体积够小（≤ 1700 字符，会跟着每一笔走）', pack.len <= 1700, pack.len + ' 字符');
+  check('笔尖打包成 96×96 的 4 位小图（48 太糊，纹理笔刷会变喷枪）', pack.w === 96 && pack.h === 96, pack.w + '×' + pack.h);
+  check('打包体积在协议上限内（≤ 7000 字符，会跟着每一笔走）', pack.len <= 7000, pack.len + ' 字符');
   check('解包后中心不透明、角落透明', pack.centre > 200 && pack.corner < 40, pack.centre + ' / ' + pack.corner);
   check('硬边的硬度推断 > 软边', pack.hard > pack.soft, pack.hard.toFixed(2) + ' > ' + pack.soft.toFixed(2));
   check('坏字符串一律解不出东西（不瞎猜）', pack.bad.every(v => v === null));

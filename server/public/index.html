@@ -1134,6 +1134,7 @@
 <!-- 右键笔刷/工具格子的小弹窗：改快捷键 / 清除 / 删除（定位 fixed，JS 控制位置） -->
 <div class="hidden" id="itemCtxMenu">
   <div class="icm-name" id="icmName">—</div>
+  <button class="icm-row hidden" id="icmRename" type="button">重命名</button>
   <button class="icm-row" id="icmKey" type="button">快捷键</button>
   <button class="icm-row" id="icmClear" type="button">清除快捷键</button>
   <button class="icm-row danger" id="icmDel" type="button">删除笔刷</button>
@@ -1198,7 +1199,8 @@
     </div>
     <div class="modal-body">
       <p class="hint">点某一行的输入框，然后按下你想要的组合键即可。改了立刻生效，下次打开还在。
-        与别的功能撞键时，会提示并把对方清空（再点「默认」可还原）。</p>
+        与别的功能撞键时，会提示并把对方清空（再点「默认」可还原）。
+        下面的「笔刷与工具」也能在这里改 —— 平时右键笔刷格子可以直接快改。</p>
       <div class="key-list" id="keyBody"></div>
       <div class="imp-actions">
         <button class="btn tiny ghost" id="btnKeyReset">全部恢复默认</button>

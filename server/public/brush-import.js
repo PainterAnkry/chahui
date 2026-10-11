@@ -281,7 +281,12 @@
               for (var k2 = 0; k2 < gray.length; k2++) gray[k2] = r.u16() >> 8;
             } else throw new Error('不支持的位深 ' + depth);
 
-            out.push({ name: id, w: w, h: h, gray: gray, spacing: 0.1 });
+            // v6+ 的「名字」其实是内部 GUID（a8be0ecf-d959-…），亮在 UI 上没法看；
+            // 置空让统一出口兜底成「笔刷 N」。
+            // spacing 0.25 = PS 采样笔刷的默认间距（25%）：纹理章要拉开才看得清形状，
+            // 以前写 0.1，加上大尺寸，章与章几乎完全重叠，又是一层「喷枪感」。
+            var isGuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+            out.push({ name: isGuid ? '' : id, w: w, h: h, gray: gray, spacing: 0.25 });
           } catch (e) { /* 这一支坏了就跳过，别让整个文件打不开 */ }
           r.seek(Math.min(brushEnd, buf.length));
           if (brushEnd <= 0) break;
@@ -1475,27 +1480,41 @@
 
   /* ============================================================ 笔尖打包 */
 
-  var TIP_SIZE = 48;      // 打包后的边长
-  var TIP_BITS = 4;       // 每像素 4 位 → 48×48 是 1152 字节，base64 约 1536 字符；\n                          // 32×32 对树皮 / 皮肤这类纹理笔刷太糊了
+  // ⚠ 96 不是随便挑的：tip 会**逐笔**跟着笔迹走（协议 TIP_MAX_CHARS 卡着），
+  //   96×96/2 = 4608 字节 → base64 6152 字符，是历史体积和形状保真的平衡点。
+  //   曾经是 48 —— 纹理类笔刷（树皮/皮肤/水纹，源图 2000px+）压到 48px 再被
+  //   放大 8 倍盖章，细节全没，画出来全是「喷枪」。枫叶这类高对比剪影侥幸能看，
+  //   用户报「除了枫叶其他全和喷枪一样」就是它。
+  var TIP_SIZE = 96;      // 打包后的边长
+  var TIP_BITS = 4;       // 每像素 4 位；再高对观感提升很小，体积却翻倍
 
-  /** 把任意尺寸的灰度笔尖按面积平均缩到 TIP_SIZE×TIP_SIZE，再量化成 4 位 */
+  /**
+   * 把任意尺寸的灰度笔尖重采样成 TIP_SIZE×TIP_SIZE，再量化成 4 位。
+   *
+   * ⚠ 必须按**目标格**反向映射源区间，不能按源像素正向投到目标格：
+   *   正向投影只在「缩小」（源比 N 大）时正确 —— 多个源像素挤进同一目标格；
+   *   一旦源比 N 小（老 48 时代的 32×32 夹具、现在 96 下的小笔尖），每个源像素
+   *   只能点亮一个目标格，其余 2/3 的目标格 cnt=0 → 透明。整支笔就成了
+   *   「几根孤立的细条」，画出来几乎没有墨。
+   */
   function packTip(gray, w, h) {
-    var N = TIP_SIZE, acc = new Float64Array(N * N), cnt = new Float64Array(N * N);
-    for (var y = 0; y < h; y++) {
-      var ty = Math.min(N - 1, Math.floor(y * N / h));
-      for (var x = 0; x < w; x++) {
-        var tx = Math.min(N - 1, Math.floor(x * N / w));
-        var i = ty * N + tx;
-        acc[i] += gray[y * w + x];
-        cnt[i] += 1;
+    var N = TIP_SIZE, packed = new Uint8Array(N * N / 2);
+    for (var ty = 0; ty < N; ty++) {
+      var sy0 = Math.floor(ty * h / N);
+      var sy1 = Math.max(sy0 + 1, Math.floor((ty + 1) * h / N));
+      for (var tx = 0; tx < N; tx++) {
+        var sx0 = Math.floor(tx * w / N);
+        var sx1 = Math.max(sx0 + 1, Math.floor((tx + 1) * w / N));
+        var sum = 0, n = 0;
+        for (var y = sy0; y < sy1 && y < h; y++) {
+          for (var x = sx0; x < sx1 && x < w; x++) { sum += gray[y * w + x]; n++; }
+        }
+        var v = n ? sum / n : 0;
+        var q = Math.max(0, Math.min(15, Math.round(v / 255 * 15)));
+        var p = ty * N + tx;
+        if (p % 2 === 0) packed[p >> 1] = q << 4;
+        else packed[p >> 1] |= q;
       }
-    }
-    var packed = new Uint8Array(N * N / 2);
-    for (var p = 0; p < N * N; p++) {
-      var v = cnt[p] ? acc[p] / cnt[p] : 0;
-      var q = Math.max(0, Math.min(15, Math.round(v / 255 * 15)));
-      if (p % 2 === 0) packed[p >> 1] = q << 4;
-      else packed[p >> 1] |= q;
     }
     return N + 'x' + N + 'x' + TIP_BITS + ':' + bytesToB64(packed);
   }

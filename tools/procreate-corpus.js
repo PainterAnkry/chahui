@@ -27,14 +27,14 @@ const EXPECT = {
   'marker.brush': {
     zipBytes: 179410, entries: 4, pngBytes: 4345,
     w: 256, h: 256, colorType: 0, graySum: 5459199,
-    name: 'Marker', tipLen: 1544, hardness: 0.651, diameter: 34, spacing: 0.06,
+    name: 'Marker', tipLen: 6152, hardness: 0.651, diameter: 34, spacing: 0.06,
     // 凿形椭圆：硬度的面积法就该给出「偏硬」，环平均法会给 0.05（下限）
     hardnessAtLeast: 0.4
   },
   'pencil.brush': {
     zipBytes: 192276, entries: 4, pngBytes: 9438,
     w: 256, h: 256, colorType: 0, graySum: 10121860,
-    name: 'Pencil', tipLen: 1544, hardness: 0.414, diameter: 27, spacing: 0.08,
+    name: 'Pencil', tipLen: 6152, hardness: 0.414, diameter: 27, spacing: 0.08,
     hardnessAtLeast: 0.25
   }
 };
@@ -91,7 +91,7 @@ function runBuiltin() {
     if (!b) continue;
     check('笔名', b.name === exp.name, b.name);
     check('笔尖字符串长度', b.tip.length === exp.tipLen, b.tip.length + ' 字符');
-    check('笔尖长度在协议上限内（≤1600）', b.tip.length <= 1600, b.tip.length + ' / 1600');
+    check('笔尖长度在协议上限内（≤7000）', b.tip.length <= 7000, b.tip.length + ' / 7000');
     check('笔尖能解包', !!BI.unpackTip(b.tip));
     check('硬度', near(b.hardness, exp.hardness, 0.02), b.hardness.toFixed(3));
     // 这条是专治「拿半径环平均去量凿形椭圆」的：那样会给出下限 0.05
