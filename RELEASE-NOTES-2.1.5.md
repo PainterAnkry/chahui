@@ -14,6 +14,7 @@
   - 未装 libfuse2 的系统（Ubuntu 22.04+ 默认没有）可加 `--appimage-extract` 解压运行，或改用 deb
 - **deb**（`chahui-linux-2.1.5-amd64.deb`）：Debian / Ubuntu / Deepin / UOS 等，双击交给软件安装器，或 `sudo dpkg -i`
   - 运行依赖已在包内声明（gtk3 / nss / libsecret / libnotify 等）
+- **tar.gz 绿色版**（`chahui-linux-2.1.5-x64.tar.gz`）：解压即用，进 `茶绘-绿色版-2.1.5/` 目录运行 `./chahui-desktop`（先 `chmod +x`）
 - 功能与 Windows 版**完全一致**：内置服务器（双击即开房联机）、离线模式、一键公网隧道、笔刷导入、`.chahu` 工程文件、PSD 导入导出、你画我猜 / 接龙
 - 更新检测适配 Linux：关于页按平台挑 AppImage / deb，AppImage 下载后自动补可执行位
 - 修复协议同步漏洞：`shared/protocol.js`（同步唯一来源）漏改笔尖上限，每次 `npm run sync` 会把已发布的 7000 字符上限覆盖回 1600，导致导入笔尖被服务端静默丢弃 —— 本次在源文件补齐
@@ -29,5 +30,5 @@
 - 快捷键设置对话框新增「笔刷与工具」区块，两入口同源、撞键自动让位
 - 协议笔尖上限 1600→7000 字符，服务端 12MB 消息上限无压力
 
-**下载**：Windows 安装程序（setup）/ 便携版（portable）/ 绿色版（zip）；Linux AppImage / deb；安卓 APK；服务端（tar.gz），SHA256SUMS 附后。
+**下载**：Windows 安装程序（setup）/ 便携版（portable）/ 绿色版（zip）；Linux AppImage / deb / tar.gz 绿色版；安卓 APK；服务端（tar.gz），SHA256SUMS 附后。
 **注意**：旧版本导入过的笔刷需删除后重新导入一次，才能获得 96px 新笔尖效果。

@@ -22,6 +22,7 @@
 | `chahui-green-<版本>.zip` | Windows x64 | 绿色版：解压后双击 `茶绘.exe`（报 NSIS Error 的机器用这份） |
 | `chahui-linux-<版本>-x86_64.AppImage` | Linux x64 | 通用版：`chmod +x` 后双击即用，无需安装 |
 | `chahui-linux-<版本>-amd64.deb` | Debian/Ubuntu x64 | 安装版：双击用软件安装器打开，或 `sudo dpkg -i <文件>` |
+| `chahui-linux-<版本>-x64.tar.gz` | Linux x64 | 绿色版：解压后运行 `./茶绘-绿色版-<版本>/chahui-desktop`（先 `chmod +x`） |
 | `chahui-android-<版本>.apk` | Android 7.0+ | 安卓版，下载后直接安装 |
 | `chahui-server-<版本>.tar.gz` | Linux | 自建服务端（解压覆盖 `server/` 即可） |
 
