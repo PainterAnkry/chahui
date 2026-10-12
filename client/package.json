@@ -5,11 +5,13 @@
   "private": true,
   "description": "茶绘 · 多人实时协作绘画聊天室（桌面端）",
   "author": "Ankry",
+  "homepage": "https://github.com/PainterAnkry/chahui",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "dist": "electron-builder --win --x64",
-    "dist:portable": "electron-builder --win portable --x64"
+    "dist:portable": "electron-builder --win portable --x64",
+    "dist:linux": "electron-builder --linux --x64"
   },
   "devDependencies": {
     "electron": "^33.2.1",
@@ -36,8 +38,48 @@
       "server/**/*",
       "renderer/**/*",
       "build/icon.png",
+      "build/icon-linux.png",
       "!node_modules/chahui/**"
     ],
+    "linux": {
+      "icon": "build/icon-linux.png",
+      "category": "Graphics",
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "appImage": {
+      "artifactName": "chahui-linux-${version}-x86_64.AppImage"
+    },
+    "deb": {
+      "artifactName": "chahui-linux-${version}-amd64.deb",
+      "packageName": "chahui",
+      "maintainer": "Ankry <noreply@painterankry.com>",
+      "synopsis": "多人实时协作绘画聊天室",
+      "category": "Graphics",
+      "depends": [
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libuuid1",
+        "libsecret-1-0"
+      ]
+    },
     "win": {
       "icon": "build/icon.png",
       "target": [

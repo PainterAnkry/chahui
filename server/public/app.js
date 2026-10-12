@@ -15617,7 +15617,13 @@
         msg.textContent = '安装包已下载，正在启动安装程序…';
         toast('正在启动安装程序', 'ok', 3200);
       } else if (res.path) {
-        msg.textContent = '已下载到 ' + res.path + '（打开它就能安装）';
+        // Linux：AppImage 已由主进程补上可执行位（双击即跑）；deb 交给系统安装器
+        var hint = (updateInfo.platform === 'linux' && /\.AppImage$/i.test(updateReady.name))
+          ? '（已设为可执行，双击即可运行新版）'
+          : (updateInfo.platform === 'linux' && /\.deb$/i.test(updateReady.name))
+            ? '（用系统软件安装器打开它即可升级）'
+            : '（打开它就能安装）';
+        msg.textContent = '已下载到 ' + res.path + hint;
         $('#aboutUpdateMsg').title = res.path;
         toast('更新已下载', 'ok', 3200);
       } else {

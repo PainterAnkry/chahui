@@ -20,11 +20,14 @@
 | `chahui-setup-<版本>.exe` | Windows x64 | 安装版，可自选目录 |
 | `chahui-portable-<版本>.exe` | Windows x64 | 免安装，双击即用 |
 | `chahui-green-<版本>.zip` | Windows x64 | 绿色版：解压后双击 `茶绘.exe`（报 NSIS Error 的机器用这份） |
+| `chahui-linux-<版本>-x86_64.AppImage` | Linux x64 | 通用版：`chmod +x` 后双击即用，无需安装 |
+| `chahui-linux-<版本>-amd64.deb` | Debian/Ubuntu x64 | 安装版：双击用软件安装器打开，或 `sudo dpkg -i <文件>` |
 | `chahui-android-<版本>.apk` | Android 7.0+ | 安卓版，下载后直接安装 |
 | `chahui-server-<版本>.tar.gz` | Linux | 自建服务端（解压覆盖 `server/` 即可） |
 
 - 桌面端升级：「其他 → 关于 → 检查更新」会自己认出该下哪个包并直接下载
 - 首次运行弹 SmartScreen 是未签名 exe 的正常提示，点「更多信息 → 仍要运行」即可
+- Linux 的 AppImage 首次运行需先 `chmod +x chahui-linux-*-x86_64.AppImage`；Ubuntu 22.04+ 没预装 libfuse2 的，可改用 deb 包，或 `./chahui-linux-*-x86_64.AppImage --appimage-extract` 解压后运行
 
 ---
 

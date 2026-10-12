@@ -571,10 +571,12 @@
     tip: ''            // 笔尖位图（打包成 32x32x4:base64 的 4 位灰度小图）
   };
 
-  // 笔尖位图字符串的形状与长度上限：32x32x4 打包后 base64 约 683 字符，
-  // 留一倍余量。它会被逐笔写进房间历史，所以必须卡死。
+  // 笔尖位图字符串的形状与长度上限：96x96x4 打包后 base64 6152 字符，
+  // 留余量到 7000。它会被逐笔写进房间历史，所以必须卡死。
+  // （曾经 1600 只装得下 48×48 —— 纹理笔刷压到 48px 再放大盖章就是喷枪，
+  //   提到 96×96 是形状保真和历史体积的平衡点，见 brush-import.js 的 TIP_SIZE 注释。）
   var TIP_RE = /^(\d{1,3})x(\d{1,3})x(\d{1,2}):([A-Za-z0-9+/]+={0,2})$/;
-  var TIP_MAX_CHARS = 1600;
+  var TIP_MAX_CHARS = 7000;
   function normalizeTip(v) {
     if (typeof v !== 'string' || !v || v.length > TIP_MAX_CHARS) return '';
     var m = TIP_RE.exec(v);

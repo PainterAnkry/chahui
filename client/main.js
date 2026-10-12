@@ -413,6 +413,11 @@ ipcMain.handle('chahu:download-update', async (e, url, name) => {
         // 交给系统跑安装程序（UAC 弹窗由安装包自己出）
         const err2 = await shell.openPath(dest);
         launched = !err2;
+      } else if (process.platform === 'linux' && /\.AppImage$/i.test(dest)) {
+        // AppImage 靠可执行位跑：下载下来默认没有，补上再交给用户
+        // （不自动启动 —— 单实例锁会让新版启动后直接退掉，用户看不到任何反应）
+        try { fs.chmodSync(dest, 0o755); } catch (err) { /* 文件系统不支持就算了 */ }
+        shell.showItemInFolder(dest);
       } else {
         shell.showItemInFolder(dest);
       }
