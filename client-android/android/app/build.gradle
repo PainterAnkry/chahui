@@ -7,9 +7,9 @@ android {
         applicationId "com.painterankry.chahui"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        // 对齐 client/package.json 的 2.1.5（versionCode = 2*10000 + 1*100 + 15）
-        versionCode 20115
-        versionName "2.1.5"
+        // 对齐 client/package.json 的 2.1.6（2.1.5=20115；补丁号个位时按前值顺延，避免 20106 < 20115 倒退）
+        versionCode 20116
+        versionName "2.1.6"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.

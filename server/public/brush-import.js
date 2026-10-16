@@ -9,15 +9,17 @@
  *
  *   .abr v1/v2（旧格式，PS 6 之前）
  *     u16 版本(1|2) · u16 数量
- *     每支笔: u16 类型(2=采样) · u32 本块字节数 · 块内容
- *       块内容: [v2 才有] unicode 名 · u32 misc · u16 间距 · u8 抗锯齿 · 8 字节短边界
+ *     每支笔: u16 类型(1=计算 2=采样) · u32 本块字节数 · 块内容
+ *       块内容: u32 misc · u16 间距 · [v2 才有: unicode 名] · u8 抗锯齿 · 8 字节短边界
  *               i32 top/left/bottom/right · u16 位深 · u8 压缩 · 位图
  *
- *   .abr v6/v7/v10（新格式）
+ *   .abr v6..v10（新格式，市面上的绝对主流；整体逻辑按 PhotoCraft 的 abr 解码移植）
  *     u16 版本 · u16 次版本
  *     之后是一串 '8BIM' 块: 4 字节签名 · 4 字节 key · u32 长度 · 数据（4 字节对齐）
- *       'samp' 块里是若干条: u32 条目长度 · unicode 名 · 上面那串「边界+位深+压缩+位图」
- *       'desc' 块里是笔刷动态参数（这里不解析，形状和间距已经够用了）
+ *       'samp' 块里是若干条: u32 条目长度 · Pascal 串（通常是 GUID）· 跳 10/264 字节 ·
+ *                            上面那串「边界+位深+压缩+位图」
+ *       'desc' 块是 ActionDescriptor：笔刷预设的真名、直径、硬度、间距都在这
+ *       'phry'（分组目录）/ 'patt'（内嵌纹理）/ 'lPdc'（工具预设）茶绘用不上，忽略
  *
  *   .sut（CSP）
  *     文件本体就是一个 SQLite 库（头 16 字节 "SQLite format 3\0"），笔尖图以 blob 藏在
@@ -101,87 +103,170 @@
     this.pos += n;
     return b;
   };
-  Reader.prototype.ascii = function (n) {
-    var s = '';
-    for (var i = 0; i < n; i++) s += String.fromCharCode(this.buf[this.pos++]);
-    return s;
-  };
   Reader.prototype.skip = function (n) { this.bytes(n); };
-  Reader.prototype.seek = function (p) { this.pos = p; };
-  /** Pascal 字符串：n 字节长度前缀 + 字符（n=1 时长度按字节，Photoshop 的 .abr 用这种） */
-  Reader.prototype.pascal = function (n) {
-    var len = n === 1 ? this.u8() : this.u16();
-    if (len > this.buf.length) throw new RangeError('字符串长度不合理：' + len);
-    var s = '';
-    for (var i = 0; i < len; i++) s += String.fromCharCode(this.buf[this.pos++]);
-    return s;
-  };
-  /** Photoshop 的 unicode 字符串：u32 长度（UTF-16 码元数）+ UTF-16BE，末尾 NUL 丢掉 */
-  Reader.prototype.unicode = function () {
-    var len = this.u32();
-    if (len * 2 > this.buf.length) throw new RangeError('unicode 长度不合理：' + len);
-    var s = '';
-    for (var i = 0; i < len; i++) {
-      var c = this.u16();
-      if (c !== 0) s += String.fromCharCode(c);
-    }
-    return s;
-  };
-
-  /** PackBits（TIFF/PS 通用的行程压缩） */
-  function packBits(src, expect) {
-    var out = new Uint8Array(expect);
-    var o = 0, i = 0;
-    while (i < src.length && o < expect) {
-      var n = (src[i++] << 24) >> 24;          // 有符号
-      if (n >= 0) {
-        var cnt = n + 1;
-        for (var k = 0; k < cnt && i < src.length && o < expect; k++) out[o++] = src[i++];
-      } else if (n !== -128) {
-        var rep = 1 - n;
-        var b = i < src.length ? src[i++] : 0;
-        for (var j = 0; j < rep && o < expect; j++) out[o++] = b;
-      }
-    }
-    return out;
-  }
 
   /* ============================================================ .abr */
 
-  function readSampledTail(r) {
-    r.i32(); r.i32(); r.i32(); r.i32();        // top/left/bottom/right
-    var depth = r.u16();
-    var compression = r.u8();
-    var b = r.bytes(0);                        // 占位，下面按需要读
-    void b;
-    return { depth: depth, compression: compression };
+  // 这套解码器按 PhotoCraft（Rust）的 abr 解码移植（abr.rs 读布局、descriptor.rs 读
+  // desc 块、abr_map.rs 做参数映射）。旧实现踩了三个真实文件里的坑，都是它修掉的：
+  //   1. v1/v2 采样笔的字段顺序错了：正确是 misc → 间距 → [v2 名字] → 抗锯齿
+  //      （GIMP / python-abr / PhotoCraft 一致），旧版把名字读在最前，v2 文件整支错位；
+  //   2. 16 位笔尖 + PackBits 直接不支持（PS CC 的笔刷大量是 16 位），整支被跳过；
+  //   3. samp 条目不做隔离读：条目声明长度被写歪时会串读到别的条目，长度为 0 时
+  //      直接死循环。
+  // 另外把 desc 块（ActionDescriptor）接上了：PS CC 的笔刷名、直径、硬度、间距都写在
+  // 里面，旧版一律「笔刷 N」+ 写死 25% 间距，导入的笔名和手感都不对。
+
+  var ABR_MAX_EDGE = 8192;              // 单支笔尖最长边（PS 自身限制 5000，放宽到 8192）
+  var ABR_MAX_BRUSHES = 20000;          // 单文件笔尖/预设数量上限
+  var ABR_MAX_TOTAL_BYTES = 512 << 20;  // 全文件笔尖解压后的字节预算（防解压炸弹）
+
+  function abrWarn(out, msg) {
+    if (out.warnings.length < 200) out.warnings.push(msg);
+  }
+
+  /** 全文件共享的解压字节预算：任何一支笔尖都不许把它吃穿 */
+  function AbrBudget() { this.left = ABR_MAX_TOTAL_BYTES; }
+  AbrBudget.prototype.spend = function (n) {
+    this.left -= n;
+    if (this.left < 0) throw new Error('笔尖解压后超出 ' + (ABR_MAX_TOTAL_BYTES >> 20) + 'MB 上限');
+  };
+
+  /**
+   * PackBits 单行解压（严格版）：填不满整行就是坏数据，返回 null。
+   * 旧版「能填多少填多少」会静默产出半截笔尖 —— 宁可跳过也不交付错的。
+   */
+  function abrPackBitsRow(src, expect) {
+    var out = new Uint8Array(expect);
+    var o = 0, i = 0;
+    while (i < src.length && o < expect) {
+      var n = (src[i++] << 24) >> 24;              // 有符号
+      if (n >= 0) {
+        var cnt = n + 1;
+        if (cnt > src.length - i || cnt > expect - o) return null;
+        for (var k = 0; k < cnt; k++) out[o++] = src[i++];
+      } else if (n !== -128) {
+        var rep = 1 - n;
+        if (i >= src.length || rep > expect - o) return null;
+        var b = src[i++];
+        for (var j = 0; j < rep; j++) out[o++] = b;
+      }
+    }
+    return o === expect ? out : null;
   }
 
   /**
-   * 采样笔刷的尾巴：边界 + 位深 + 压缩 + 位图。
-   * 边界被后面的 r.seek(块末尾) 兜底，所以这里读错也不会失控。
+   * 采样笔尖的公共尾巴：i32 top/left/bottom/right · u16 位深(8|16) ·
+   * u8 压缩(0=原样 | 1=PackBits) · 位图。整个条目在隔离的定长 Reader 里读，
+   * 读坏只影响这一条。16 位取高字节 —— 笔尖最终打包成 4 位小图，高字节足够。
    */
-  function readSampled(r) {
+  function abrSampleBody(r, budget) {
     var top = r.i32(), left = r.i32(), bottom = r.i32(), right = r.i32();
-    var depth = r.u16();
-    var compression = r.u8();
     var w = right - left, h = bottom - top;
-    if (w <= 0 || h <= 0 || w * h > 40000000) throw new Error('笔尖尺寸不合理 ' + w + 'x' + h);
-    if (depth !== 8) throw new Error('只支持 8 位笔尖（实际 ' + depth + ' 位）');
-    var gray;
-    if (compression === 0) {
-      gray = r.bytes(w * h).slice();
-    } else if (compression === 1) {
-      var lens = [];
-      for (var y = 0; y < h; y++) lens.push(r.u16());
-      gray = new Uint8Array(w * h);
-      for (var yy = 0; yy < h; yy++) {
-        gray.set(packBits(r.bytes(lens[yy]), w), yy * w);
-      }
+    if (w <= 0 || h <= 0) throw new Error('笔尖边界不合法 ' + w + '×' + h);
+    if (w > ABR_MAX_EDGE || h > ABR_MAX_EDGE) throw new Error('笔尖尺寸超限 ' + w + '×' + h);
+    var depth = r.u16();
+    if (depth !== 8 && depth !== 16) throw new Error('不支持的位深 ' + depth);
+    var comp = r.u8();
+    if (comp !== 0 && comp !== 1) throw new Error('不支持的压缩方式 ' + comp);
+    var bpp = depth >> 3, rowBytes = w * bpp, x, y;
+    budget.spend(rowBytes * h);
+    var gray = new Uint8Array(w * h);
+    if (comp === 0) {
+      var data = r.bytes(rowBytes * h);
+      if (depth === 8) gray.set(data);
+      else for (var i = 0; i < gray.length; i++) gray[i] = data[i * 2];
     } else {
-      throw new Error('不支持的压缩方式 ' + compression);
+      var lens = [];
+      for (y = 0; y < h; y++) lens.push(r.u16());   // 每行一个 u16 行长（PSD 布局）
+      for (y = 0; y < h; y++) {
+        var row = abrPackBitsRow(r.bytes(lens[y]), rowBytes);
+        if (!row) throw new Error('PackBits 数据损坏（第 ' + y + ' 行）');
+        if (depth === 8) gray.set(row, y * w);
+        else for (x = 0; x < w; x++) gray[y * w + x] = row[x * 2];
+      }
     }
     return { w: w, h: h, gray: gray };
+  }
+
+  /** v2 采样笔的名字：u32 码元数 + UTF-16BE（末尾 NUL 去掉） */
+  function abrUcs2(r) {
+    var n = r.u32();
+    if (n > 4096) throw new Error('笔刷名长度不合理：' + n);
+    var s = '';
+    for (var i = 0; i < n; i++) s += String.fromCharCode(r.u16());
+    return s.replace(/\0+$/, '');
+  }
+
+  /** v1/v2（PS 6 之前的旧格式） */
+  function abrParseV12(r, version, out, budget) {
+    var count = r.u16();
+    for (var i = 0; i < count; i++) {
+      if (r.left() === 0) { abrWarn(out, '文件在 ' + i + ' / ' + count + ' 支处提前结束'); break; }
+      var ty = r.u16();
+      var len = r.u32();
+      var body;
+      try { body = r.bytes(len); }
+      catch (e) { abrWarn(out, '笔刷 ' + (i + 1) + ' 被截断'); break; }
+      var b = new Reader(body);
+      try {
+        if (ty === 1) {
+          // 计算笔（圆/椭圆，纯参数）：合成一张灰度笔尖，参数尽量还原
+          b.u32();                                   // misc
+          var spacing = b.u16();
+          var diameter = b.u16();
+          var roundness = b.u16();
+          var angle = b.u16() << 16 >> 16;           // i16
+          var hardness = b.u16();
+          out.legacy.push({ computed: true, name: diameter + 'px 圆头', spacing: spacing,
+            diameter: diameter, hardness: hardness, angle: angle, roundness: roundness });
+        } else if (ty === 2) {
+          // 字段顺序按规范来（GIMP / PhotoCraft / python-abr 一致）：misc → 间距 → [v2 名字]
+          b.u32();                                   // misc
+          var sp = b.u16();
+          var name = version === 2 ? abrUcs2(b) : '';
+          b.u8();                                    // 抗锯齿（茶绘没有对应概念）
+          b.skip(8);                                 // 短边界（后面还有 32 位边界，以它为准）
+          var s = abrSampleBody(b, budget);
+          s.name = name;
+          s.spacing = sp;
+          out.legacy.push(s);
+        } else {
+          abrWarn(out, '笔刷 ' + (i + 1) + '：未知类型 ' + ty + '，跳过');
+        }
+      } catch (e) { abrWarn(out, '笔刷 ' + (i + 1) + ' 坏了，跳过：' + e.message); }
+    }
+  }
+
+  function abrIsSig(b, off) {
+    return b[off] === 0x38 && b[off + 1] === 0x42 && b[off + 2] === 0x49 && b[off + 3] === 0x4d;
+  }
+
+  /** v6+ 的 samp 块：u32 条目长（4 字节对齐）· Pascal 串 · 跳 10(次版本1)/264(次版本2) 字节 · 笔尖尾巴 */
+  function abrReadSamp(data, minor, out, budget) {
+    var r = new Reader(data);
+    while (r.left() >= 4) {
+      if (out.samples.length >= ABR_MAX_BRUSHES) { abrWarn(out, '笔尖数量超出上限，其余跳过'); break; }
+      var len = r.u32();
+      if (len === 0) break;                          // 旧版在这里会原地打转
+      var padded = (len + 3) & ~3;
+      var body;
+      try { body = r.bytes(Math.min(padded, r.left())); }
+      catch (e) { body = null; }
+      if (!body || body.length < len) { abrWarn(out, '采样笔尖 ' + (out.samples.length + 1) + ' 被截断'); break; }
+      var b = new Reader(body);
+      try {
+        var n = b.u8();
+        var id = asciiOf(b.bytes(n), 0, n);
+        b.skip(minor === 1 ? 10 : 264);
+        var s = abrSampleBody(b, budget);
+        s.id = id;
+        // 条目名一般是内部 GUID（a8be0ecf-d959-…），亮在 UI 上没法看；
+        // 真名在 desc 块的预设里。非 GUID 的老文件才把它当名字用。
+        s.name = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ? '' : id;
+        out.samples.push(s);
+      } catch (e) { abrWarn(out, '采样笔尖 ' + (out.samples.length + 1) + ' 坏了，跳过：' + e.message); }
+    }
   }
 
   /** 入口统一成 Uint8Array —— FileReader 给的是 ArrayBuffer，测试里也可能直接给数组 */
@@ -194,112 +279,259 @@
     throw new Error('不是能识别的二进制数据');
   }
 
+  /* ---------- desc 块：ActionDescriptor（PS 的通用键值树，只为读预设名和参数） ---------- */
+
+  var DESC_MAX_DEPTH = 64;
+
+  function descCount(r, minPer) {
+    var n = r.u32();
+    if (n * minPer > r.left()) throw new Error('条目数量不合理：' + n);
+    return n;
+  }
+  function descId(r) {
+    var n = r.u32();
+    if (n === 0) return asciiOf(r.bytes(4), 0, 4);   // 4 字节码（'Nm  '、'Brsh'…）
+    return asciiOf(r.bytes(n), 0, n);                // 显式长度串（'sampledData'…）
+  }
+  function descUstr(r) {
+    var n = r.u32();
+    if (n > (1 << 24)) throw new Error('unicode 串长度不合理：' + n);
+    var s = '';
+    for (var i = 0; i < n; i++) s += String.fromCharCode(r.u16());
+    return s.replace(/\0+$/, '');
+  }
+  function descClass(r) { descUstr(r); return descId(r); }
+  function descF64(r) { var v = r.view.getFloat64(r.pos, false); r.pos += 8; return v; }
+
+  function descValue(r, depth) {
+    if (depth > DESC_MAX_DEPTH) throw new Error('descriptor 嵌套太深');
+    var ty = asciiOf(r.bytes(4), 0, 4), n, i, items;
+    switch (ty) {
+      case 'obj ':
+        n = descCount(r, 8);
+        for (i = 0; i < n; i++) descRefItem(r, depth + 1);
+        return { t: 'ref' };
+      case 'Objc': case 'GlbO':
+        return { t: 'desc', d: descDescriptor(r, depth + 1) };
+      case 'VlLs':
+        n = descCount(r, 4);
+        items = [];
+        for (i = 0; i < n; i++) items.push(descValue(r, depth + 1));
+        return { t: 'list', v: items };
+      case 'doub': return { t: 'num', v: descF64(r) };
+      case 'UntF': r.bytes(4); return { t: 'num', v: descF64(r) };   // 单位（#Prc/#Pxl…）
+      case 'UnFl':
+        r.bytes(4);
+        n = descCount(r, 8);
+        for (i = 0; i < n; i++) descF64(r);
+        return { t: 'raw' };
+      case 'TEXT': return { t: 'text', v: descUstr(r) };
+      case 'enum': descId(r); descId(r); return { t: 'enum' };
+      case 'long': return { t: 'num', v: r.i32() };
+      case 'comp': { var hi = r.i32(); return { t: 'num', v: hi * 4294967296 + r.u32() }; }
+      case 'bool': return { t: 'bool', v: r.u8() !== 0 };
+      case 'type': case 'GlbC': descClass(r); return { t: 'class' };
+      case 'alis': case 'Pth ': case 'tdta': r.bytes(r.u32()); return { t: 'raw' };
+      case 'ObAr': r.u32(); descDescriptor(r, depth + 1); return { t: 'raw' };
+      default: throw new Error('OSType 不认识：' + ty);
+    }
+  }
+
+  function descRefItem(r, depth) {
+    if (depth > DESC_MAX_DEPTH) throw new Error('descriptor 嵌套太深');
+    var ty = asciiOf(r.bytes(4), 0, 4);
+    if (ty === 'prop') { descClass(r); descId(r); }
+    else if (ty === 'Clss') descClass(r);
+    else if (ty === 'Enmr') { descClass(r); descId(r); descId(r); }
+    else if (ty === 'rele') { descClass(r); r.i32(); }
+    else if (ty === 'Idnt' || ty === 'indx') { descClass(r); r.u32(); }
+    else if (ty === 'name') { descClass(r); descUstr(r); }
+    else throw new Error('引用类型不认识：' + ty);
+  }
+
+  function descDescriptor(r, depth) {
+    if (depth > DESC_MAX_DEPTH) throw new Error('descriptor 嵌套太深');
+    descUstr(r);                                     // 类显示名（一般空）
+    var cid = descId(r);
+    var n = descCount(r, 10);
+    var items = Object.create(null);
+    for (var i = 0; i < n; i++) {
+      var k = descId(r);
+      var v = descValue(r, depth + 1);
+      if (!(k in items)) items[k] = v;               // 同名键取第一个（和 PhotoCraft 的 get 一致）
+    }
+    return { cid: cid, items: items };
+  }
+
+  /** desc 块 → 预设描述符列表（'Brsh' 列表里的 brushPreset 对象；分组在 phry 里，这里不管） */
+  function abrParseDesc(data, out) {
+    try {
+      var r = new Reader(data);
+      if (r.u32() !== 16) throw new Error('descriptor 版本不是 16');
+      var root = descDescriptor(r, 0);
+      var list = root.items['Brsh'];
+      if (!list || list.t !== 'list') { abrWarn(out, 'desc 块里没有笔刷预设列表'); return; }
+      for (var i = 0; i < list.v.length; i++) {
+        if (out.presets.length >= ABR_MAX_BRUSHES) break;
+        if (list.v[i] && list.v[i].t === 'desc') out.presets.push(list.v[i].d);
+      }
+    } catch (e) { abrWarn(out, 'desc 块读不出来，笔名会退回编号：' + e.message); }
+  }
+
+  function descGet(d, k) { return d ? d.items[k] : undefined; }
+  function descNum(v) { return v && v.t === 'num' && isFinite(v.v) ? v.v : NaN; }
+  function descPct(v) { var x = descNum(v); return isFinite(x) ? x / 100 : NaN; }   // #Prc → 0..1
+  function descText(v) { return v && v.t === 'text' ? v.v : undefined; }
+  function descObj(v) { return v && v.t === 'desc' ? v.d : undefined; }
+
+  /**
+   * 合成「计算笔」的笔尖：椭圆 + 硬度渐变（PS 计算笔在 PhotoCraft 里用内置 Round 笔尖画，
+   * 茶绘要的是位图笔尖，这里按同一条轮廓公式画一张）。分辨率固定 96：packTip 反正会
+   * 重采样到 96×96。
+   */
+  function abrComputedTip(hardness, angle, roundness) {
+    var n = 96, c = n / 2;
+    var g = new Uint8Array(n * n);
+    var soft = Math.max(0.03, 1 - clampNum(hardness, 0, 1));
+    var rad = -(angle || 0) * Math.PI / 180;
+    var cos = Math.cos(rad), sin = Math.sin(rad);
+    var ry = clampNum(roundness <= 0 ? 1 : roundness, 0.01, 1);
+    for (var y = 0; y < n; y++) {
+      for (var x = 0; x < n; x++) {
+        var dx = x + 0.5 - c, dy = y + 0.5 - c;
+        var ex = dx * cos - dy * sin;
+        var ey = (dx * sin + dy * cos) / ry;
+        var d = Math.sqrt(ex * ex + ey * ey);
+        var a = d >= 1 ? 0 : clampNum((1 - d) / soft, 0, 1);
+        g[y * n + x] = Math.round(Math.pow(a, 0.7) * 255);
+      }
+    }
+    return { w: n, h: n, gray: g };
+  }
+
+  /** 把解析结果映射成茶绘的笔刷记录（abr_map.rs 的精简版：茶绘只收笔尖 + 能量化的参数） */
+  function abrMap(out) {
+    var brushes = [], i, s;
+    if (out.legacy.length) {
+      for (i = 0; i < out.legacy.length; i++) {
+        var lb = out.legacy[i];
+        var spacing = lb.spacing === 0 ? 0.25 : lb.spacing / 100;   // 0 = 间距关，按 PS 默认 25%
+        if (lb.computed) {
+          var tip = abrComputedTip(lb.hardness / 100, lb.angle, lb.roundness / 100);
+          brushes.push({ name: lb.name, w: tip.w, h: tip.h, gray: tip.gray, spacing: spacing,
+            diameter: Math.max(1, lb.diameter), hardnessHint: clampNum(lb.hardness / 100, 0.05, 1) });
+        } else {
+          brushes.push({ name: lb.name || '', w: lb.w, h: lb.h, gray: lb.gray, spacing: spacing });
+        }
+      }
+    } else if (!out.presets.length) {
+      // 早期 v6 文件：只有 samp 没有 desc —— 一支笔尖算一支笔，间距用 PS 采样笔默认 25%
+      // （纹理章要拉开才看得清形状；以前这里的 0.1 加上大尺寸，章与章几乎完全重叠）
+      for (i = 0; i < out.samples.length; i++) {
+        s = out.samples[i];
+        brushes.push({ name: s.name || '', w: s.w, h: s.h, gray: s.gray, spacing: 0.25 });
+      }
+    } else {
+      for (i = 0; i < out.presets.length; i++) {
+        var d = out.presets[i];
+        var name = (descText(descGet(d, 'Nm  ')) || '').trim();
+        var label = name || '笔刷 ' + (i + 1);
+        var brsh = descObj(descGet(d, 'Brsh'));
+        if (!brsh) { abrWarn(out, '预设「' + label + '」没有笔刷定义，跳过'); continue; }
+        var sampledId = descText(descGet(brsh, 'sampledData'));
+        if (sampledId != null || brsh.cid === 'sampledBrush') {
+          // 采样笔：按 id 配 samp 里的笔尖；全文件只有一支时拿它兜底（PhotoCraft 同款）
+          var found = null;
+          for (var j = 0; j < out.samples.length; j++) {
+            if (out.samples[j].id === sampledId) { found = out.samples[j]; break; }
+          }
+          if (!found && out.samples.length === 1) found = out.samples[0];
+          if (!found) { abrWarn(out, '预设「' + label + '」的笔尖不在文件里，跳过'); continue; }
+          var rec = { name: name, w: found.w, h: found.h, gray: found.gray };
+          var hrd = descPct(descGet(brsh, 'Hrdn'));
+          if (isFinite(hrd)) rec.hardnessHint = clampNum(hrd, 0.05, 1);
+          var dmtr = descNum(descGet(brsh, 'Dmtr'));
+          if (dmtr > 0) rec.diameter = clampNum(Math.round(dmtr), 1, 5000);
+          var spcn = descPct(descGet(brsh, 'Spcn'));
+          rec.spacing = clampNum(isFinite(spcn) ? spcn : 0.25, 0.01, 10);
+          brushes.push(rec);
+        } else {
+          // 计算笔（computedBrush）：直径/硬度/角度/圆度都在 desc 里
+          var dia = descNum(descGet(brsh, 'Dmtr'));
+          var hrd2 = descPct(descGet(brsh, 'Hrdn'));
+          var angl = descNum(descGet(brsh, 'Angl'));
+          var rndn = descPct(descGet(brsh, 'Rndn'));
+          var tip2 = abrComputedTip(isFinite(hrd2) ? hrd2 : 0.8, isFinite(angl) ? angl : 0, isFinite(rndn) ? rndn : 1);
+          var sp2 = descPct(descGet(brsh, 'Spcn'));
+          brushes.push({
+            name: name || (dia > 0 ? Math.round(dia) + 'px 圆头' : ''),
+            w: tip2.w, h: tip2.h, gray: tip2.gray,
+            spacing: clampNum(isFinite(sp2) ? sp2 : 0.25, 0.01, 10),
+            diameter: clampNum(Math.round(dia > 0 ? dia : 40), 1, 5000),
+            hardnessHint: clampNum(isFinite(hrd2) ? hrd2 : 0.8, 0.05, 1)
+          });
+        }
+      }
+      // desc 里一支都没配上（笔尖全缺失）时退回 samp，别让用户空手而归
+      if (!brushes.length && out.samples.length) {
+        abrWarn(out, '预设全部缺失笔尖，退回按采样笔尖导入');
+        for (i = 0; i < out.samples.length; i++) {
+          s = out.samples[i];
+          brushes.push({ name: s.name || '', w: s.w, h: s.h, gray: s.gray, spacing: 0.25 });
+        }
+      }
+    }
+    return brushes;
+  }
+
   function parseAbr(buf) {
     buf = asBytes(buf);
     var r = new Reader(buf);
     var version = r.u16();
-    var out = [];
+    var out = { version: version, minor: 0, legacy: [], samples: [], presets: [], warnings: [] };
 
     if (version === 1 || version === 2) {
-      var count = r.u16();
-      for (var i = 0; i < count; i++) {
-        var type = r.u16();
-        var size = r.u32();
-        var end = r.pos + size;
-        if (type === 2) {
-          try {
-            var name = version === 2 ? r.unicode() : '';
-            r.u32();                    // misc
-            var spacing = r.u16();
-            r.u8();                     // 抗锯齿
-            r.skip(8);                  // 短边界（下面还有一套长边界，以长边界为准）
-            var s = readSampled(r);
-            s.name = name;
-            s.spacing = spacing / 100;
-            out.push(s);
-          } catch (e) { /* 这一支坏了就跳过，别让整个文件打不开 */ }
-        }
-        if (end > r.buf.length) break;
-        r.seek(end);
+      abrParseV12(r, version, out, new AbrBudget());
+    } else if (version >= 6 && version <= 10) {
+      // 6/7/9/10 —— 这才是真正在用的格式（市面上绝大多数 .abr 都是这一类）
+      var minor = r.u16();
+      if (minor !== 1 && minor !== 2) {
+        throw new Error('不支持的 .abr 次版本 ' + minor + '（只认 1 和 2）');
       }
-      return { version: version, brushes: out };
-    }
-
-    // ISBN 6/7/9/10 —— 这才是真正在用的格式（市面上绝大多数 .abr 都是这一类）
-    //
-    // 字段顺序是拿真实文件校准出来的，别凭印象改：
-    //   samp 块里，每一条 =
-    //     u32 条目长度（4 字节对齐）
-    //     Pascal 字符串（1 字节长度前缀）—— 内容通常是 GUID
-    //     **次版本 1 跳 10 字节，次版本 2 跳 264 字节**   ← 这一步漏了就会满盘皆错
-    //     i32 y · i32 x · i32 (y+h) · i32 (x+w)
-    //     u16 位深（8 或 16）· u8 压缩（0 原样 / 1 RLE）· 位图
-    //
-    // 我第一版参照的那份实现只跳了 8 字节、而且把字符串当 unicode 读，
-    // 结果在 17 个真实文件上一个都过不去 —— 所以现在有 tools/abr-corpus.js 拿真文件回归。
-    if (version !== 6 && version !== 7 && version !== 9 && version !== 10) {
+      out.minor = minor;
+      var budget = new AbrBudget();
+      var pattWarned = false;
+      while (r.left() >= 12) {
+        if (!abrIsSig(buf, r.pos)) { abrWarn(out, '偏移 ' + r.pos + ' 处不是 8BIM 块，其后忽略'); break; }
+        r.pos += 4;
+        var key = asciiOf(r.bytes(4), 0, 4);
+        var size = r.u32();
+        var data;
+        try { data = r.bytes(size); }
+        catch (e) { abrWarn(out, '块 ' + key + ' 被截断'); data = r.bytes(r.left()); }
+        // 块本身按 4 字节对齐，但只认「跳过补齐字节后正好是下一个 8BIM」的补齐
+        // —— 有些第三方写手不补齐，硬跳会错位到读不出后续块（PhotoCraft 同款判定）。
+        var pad = (4 - size % 4) % 4;
+        if (pad > 0 && !abrIsSig(buf, r.pos) && abrIsSig(buf, r.pos + pad)) r.pos += pad;
+        if (key === 'samp') abrReadSamp(data, minor, out, budget);
+        else if (key === 'desc') abrParseDesc(data, out);
+        else if (key === 'patt' && !pattWarned) {
+          pattWarned = true;
+          abrWarn(out, '内嵌纹理（patt 块）茶绘用不上，忽略');
+        }
+        // phry（PS CC 的分组目录）、lPdc（工具预设）：茶绘没有对应概念，忽略
+      }
+    } else {
       throw new Error('不支持的 .abr 版本 ' + version);
     }
-    var minor = r.u16();
-    if (minor !== 1 && minor !== 2) {
-      throw new Error('不支持的 .abr 次版本 ' + minor + '（只认 1 和 2）');
+
+    var brushes = abrMap(out);
+    if (!brushes.length) {
+      var why = out.warnings.length ? '（' + out.warnings[0] + '）' : '';
+      throw new Error('这个 .abr 里没有可识别的笔刷' + why);
     }
-
-    var found = false;
-    while (r.left() >= 12) {
-      if (r.ascii(4) !== '8BIM') break;
-      var key = r.ascii(4);
-      var size = r.u32();
-      if (size > r.left() + 4) break;
-      var end = r.pos + size;
-
-      if (key === 'samp') {
-        found = true;
-        while (r.pos < end) {
-          var brushLength = r.u32();
-          while (brushLength & 3) brushLength++;        // 条目本身按 4 字节对齐
-          var brushEnd = r.pos + brushLength;
-          try {
-            var id = r.pascal(1);
-            r.skip(minor === 1 ? 10 : 264);
-            var top = r.i32(), left = r.i32();
-            var h = r.i32() - top;
-            var w = r.i32() - left;
-            if (w <= 0 || h <= 0 || w * h > 40000000) throw new Error('笔尖边界不合法 ' + w + '×' + h);
-            var depth = r.u16();
-            var comp = r.u8();
-            var gray = new Uint8Array(w * h);
-            if (depth === 8) {
-              if (comp === 0) gray.set(r.bytes(w * h));
-              else if (comp === 1) {
-                var lens = [];
-                for (var yy = 0; yy < h; yy++) lens.push(r.u16());
-                for (var y2 = 0; y2 < h; y2++) gray.set(packBits(r.bytes(lens[y2]), w), y2 * w);
-              } else throw new Error('不支持的压缩方式 ' + comp);
-            } else if (depth === 16) {
-              if (comp !== 0) throw new Error('16 位 + RLE 暂不支持');
-              for (var k2 = 0; k2 < gray.length; k2++) gray[k2] = r.u16() >> 8;
-            } else throw new Error('不支持的位深 ' + depth);
-
-            // v6+ 的「名字」其实是内部 GUID（a8be0ecf-d959-…），亮在 UI 上没法看；
-            // 置空让统一出口兜底成「笔刷 N」。
-            // spacing 0.25 = PS 采样笔刷的默认间距（25%）：纹理章要拉开才看得清形状，
-            // 以前写 0.1，加上大尺寸，章与章几乎完全重叠，又是一层「喷枪感」。
-            var isGuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
-            out.push({ name: isGuid ? '' : id, w: w, h: h, gray: gray, spacing: 0.25 });
-          } catch (e) { /* 这一支坏了就跳过，别让整个文件打不开 */ }
-          r.seek(Math.min(brushEnd, buf.length));
-          if (brushEnd <= 0) break;
-        }
-      }
-
-      // 块整体按 4 字节对齐（对齐量按声明的长度算，不是按绝对偏移）
-      r.seek(Math.min(end + ((4 - (size % 4)) % 4), buf.length));
-    }
-
-    if (!found) throw new Error('这个 .abr 里没有 samp 块（可能是纯「计算笔刷」文件）');
-    if (!out.length) throw new Error('samp 块里没解析出可用的笔尖');
-    return { version: version, minor: minor, brushes: out };
+    if (out.warnings.length) console.warn('[笔刷导入] .abr 警告：' + out.warnings.join('；'));
+    return { version: out.version, minor: out.minor, brushes: brushes, warnings: out.warnings };
   }
 
   /* ============================================================ .sut */
@@ -1775,9 +2007,8 @@
   function parseBru(bytes) {
     // 1) 假 .bru：其实是 .abr 改的后缀
     //    （社区教程里最常见的一招：「找到下载的笔刷，重命名改成 .bru」）
-    //    .abr 没有文件签名，开头直接就是版本字（1/2/6/7/10），按这个认。
-    if (bytes[0] === 0 && (bytes[1] === 1 || bytes[1] === 2 || bytes[1] === 6 ||
-        bytes[1] === 7 || bytes[1] === 10)) {
+    //    .abr 没有文件签名，开头直接就是版本字（1/2/6..10），按这个认。
+    if (bytes[0] === 0 && (bytes[1] === 1 || bytes[1] === 2 || (bytes[1] >= 6 && bytes[1] <= 10))) {
       try { return parseAbr(bytes); } catch (e) { /* 不是 abr，接着往下试 */ }
     }
 
@@ -1876,7 +2107,7 @@
       res = parseAbr(bytes); kind = 'abr';
     } else if (/\.sut$/.test(name)) {
       res = parseSut(bytes); kind = 'sut';
-    } else if (bytes[0] === 0 && (bytes[1] === 1 || bytes[1] === 2 || bytes[1] === 6 || bytes[1] === 7 || bytes[1] === 10)) {
+    } else if (bytes[0] === 0 && (bytes[1] === 1 || bytes[1] === 2 || (bytes[1] >= 6 && bytes[1] <= 10))) {
       res = parseAbr(bytes); kind = 'abr';
     } else {
       // 后缀不可信时按内容猜：
@@ -1920,7 +2151,7 @@
       delete b.gray;
       delete b.png;   // 原始 PNG 不许跟着记录走（体积太大，localStorage 会爆）
     });
-    return { kind: kind, version: res.version, brushes: res.brushes };
+    return { kind: kind, version: res.version, brushes: res.brushes, warnings: res.warnings || [] };
   }
 
   global.ChaBrushImport = {

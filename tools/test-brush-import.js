@@ -75,6 +75,7 @@ function check(name, ok, extra) {
   console.log('\n=== .abr（旧格式 v1 / v2） ===');
   const abr12 = await page.evaluate((ver) => {
     // 手写一个 v1/v2 的 .abr：1 支采样笔，8 位、不压缩、带 4 字节对齐的块
+    // ★ 字段顺序按规范（GIMP / PhotoCraft / python-abr 一致）：misc → 间距 → [v2 名字]
     const w = 16, h = 16;
     const gray = new Uint8Array(w * h);
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
@@ -86,9 +87,9 @@ function check(name, ok, extra) {
     const name = ver === 2 ? 'TestBrush' : '';
     const nameBytes = ver === 2 ? [].concat(u32(name.length), Array.from(name).flatMap(c => [0, c.charCodeAt(0)])) : [];
     const body = [].concat(
-      nameBytes,
       u32(0),                       // misc
       u16(25),                      // spacing 25%
+      nameBytes,                    // [v2 才有] unicode 名（在 misc/间距之后，别照印象改）
       [1],                          // 抗锯齿
       new Array(8).fill(0),         // 短边界
       u32(0), u32(0), u32(h), u32(w),  // top/left/bottom/right
