@@ -50,14 +50,17 @@ async function main() {
     window.CHAHU_CONFIG.publicServer = ''; // 断开与默认公网服务器的关联（纯 P2P 环境）
   }, sigPort);
 
-  // 进离线模式（local://）：入口页的开关按钮（等同菜单里「离线模式」）
+  // 官方公共服务器已下线：安卓（Capacitor）缺省就落在离线模式（local://）。
+  // 老版本这里要手动点「切到离线」；现在先看默认值，只有不在离线时才点。
   await pageH.evaluate(() => {
     document.querySelector('#nameInput').value = 'H';
-    const btn = document.querySelector('#btnServerToggle');
-    if (btn) btn.click(); else window.ChaApp.toggleServer();
+    if (!window.ChaApp.isOffline()) {
+      const btn = document.querySelector('#btnServerToggle');
+      if (btn) btn.click(); else window.ChaApp.toggleServer();
+    }
   });
   await pageH.waitForFunction(() => window.ChaApp.isOffline(), { timeout: 15000 });
-  ok('房主进入离线模式（local://）', true);
+  ok('安卓（无官方服）默认 / 切到离线模式（local://）', true);
 
   // 建房（离线状态下走 local-core 状态机）
   await pageH.evaluate(() => {
@@ -81,18 +84,39 @@ async function main() {
     ok('公网联机开启（WebRTC P2P）', false, JSON.stringify(st).slice(0, 160));
   }
 
-  /* ---------------- 访客端：普通浏览器，webrtc:// 通道 ---------------- */
-  if (hostUrl) {
+  /* ---------------- 分享链接：纯安卓（没有页面托管）也要能用 ---------------- */
+  // 没有官方公网服 / 自建服务端时，shareBase() 推不出页面地址 —— 此时分享
+  // 必须退回 chahui:// 应用链接，而不是把裸房间号复制出去（本次修的 bug）。
+  const appShare = await pageH.evaluate(() => {
+    window.ChaApp.showInfo();
+    return (document.querySelector('#shareLinkText') || {}).textContent || '';
+  });
+  ok('无页面托管时分享 chahui:// 应用链接（不是裸房间号）',
+    /^chahui:\/\/join\?room=/.test(appShare) && /server=webrtc%3A%2F%2F/.test(appShare), appShare);
+
+  // 配了自建服务端（网页版页面托管）→ 生成完整 http 分享链接，页面 + P2P 入口都在里面
+  await pageH.evaluate((base) => {
+    window.CHAHU_CONFIG.publicServer = base.replace(/^http/, 'ws') + '/ws';
+    window.ChaApp.showInfo();
+  }, BASE);
+  const shareAll = await pageH.evaluate(() => (document.querySelector('#shareLinkText') || {}).textContent || '');
+  const share = shareAll.split('\n')[0].trim();
+  ok('生成完整分享链接（页面地址 + ?room + ?server=webrtc://）',
+    /^http:\/\/127\.0\.0\.1:\d+\/\?room=/.test(share) && /server=webrtc%3A%2F%2F/.test(share) &&
+    /server=webrtc:\/\//.test(decodeURIComponent(share)),
+    share);
+  ok('房间信息里同时给出 chahui:// 应用链接', /\n茶绘应用链接：chahui:\/\/join\?room=/.test(shareAll), shareAll);
+
+  /* ---------------- 访客端：普通浏览器，直接打开分享链接 ---------------- */
+  if (hostUrl && /^https?:\/\//.test(share)) {
     const ctxG = await browser.newContext({ viewport: { width: 900, height: 700 } });
     const pageG = await ctxG.newPage();
     pageG.on('pageerror', e => errors.push('guest: ' + e.message));
-    // 访客不伪装 Capacitor —— 走纯网页路径；server 地址从 localStorage 塞进去
-    // （webrtc:// 无法从页面 origin 推断，等价于用户粘贴链接后的 stored server）。
-    // 信令服务器用 ?signal= 参数：config.js 加载时原生读取（与生产自建信令同一路径）。
-    await pageG.addInitScript(function (serverUrl) {
-      try { localStorage.setItem('chahu.server', serverUrl); localStorage.setItem('chahu.name', 'G'); } catch (e) { /* ignore */ }
-    }, hostUrl);
-    await pageG.goto(BASE + '/?room=' + roomId + '&signal=ws://127.0.0.1:' + SIG_PORT, { waitUntil: 'domcontentloaded' });
+    // 不手工塞 localStorage —— 走用户真实路径：点开分享链接，
+    // 由 ?server=webrtc://… 切到 P2P 通道，再由 ?room= 自动进房。
+    // 信令服务器用 ?signal= 参数（config.js 加载时读取，与生产自建信令同一路径）。
+    await pageG.goto(share + '&signal=' + encodeURIComponent('ws://127.0.0.1:' + SIG_PORT),
+      { waitUntil: 'domcontentloaded' });
     await pageG.waitForFunction(() => window.ChaApp && window.ChaApp.state, { timeout: 20000 });
 
     let joined = false;

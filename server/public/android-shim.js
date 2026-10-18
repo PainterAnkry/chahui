@@ -338,7 +338,10 @@
       createReadStream: function () { throw new Error('安卓离线模式用不到 createReadStream（静态站不在这里）'); },
       promises: {
         rm: function (p, _o) { removeTree(pathm.normalize(p)); return Promise.resolve(); },
-        writeFile: function (p, data) { fs.writeFileSync(p, data); return Promise.resolve(); }
+        mkdir: function (p, o) { fs.mkdirSync(p, o); return Promise.resolve(); },
+        writeFile: function (p, data) { fs.writeFileSync(p, data); return Promise.resolve(); },
+        rename: function (a, b) { fs.renameSync(a, b); return Promise.resolve(); },
+        readFile: function (p, o) { return Promise.resolve(fs.readFileSync(p, o)); }
       }
     };
     return { fs: fs, hydrate: hydrate, flush: flush };
@@ -907,7 +910,11 @@
         if (webrtcHost) {
           return webrtcHost.start().then(function (r) {
             if (r && r.ok) return r;
-            // P2P 不成（对称 NAT / 信令不通）→ 回落默认中继（8437 直连端口）
+            // P2P 不成（对称 NAT / 信令不通）→ 回落中继。官方公共服务器已下线，
+            // 没配 publicServer 时没有中继可用：把 P2P 的真实错误原样报出去，
+            // 别用「没有可用的中继服务器地址」盖掉真正的原因。
+            var relay = (global.CHAHU_CONFIG && global.CHAHU_CONFIG.publicServer) || '';
+            if (!relay) return r;
             return tunnelHost.start('');
           });
         }

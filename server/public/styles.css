@@ -1862,6 +1862,9 @@ body { -webkit-touch-callout: none; }
 }
 @starting-style { .modal { opacity: 0; transform: scale(.95) translateY(14px); } }
 .modal.info { max-width: 460px; }
+/* 房间信息里的分享链接可能是两行（网页链接 + chahui:// 应用链接）：
+   保留真实换行，选中复制时不会把两行粘成一条坏链接。 */
+#shareLinkText { white-space: pre-wrap; word-break: break-all; }
 
 /* 画布设置弹窗 */
 .canvas-form { display: flex; flex-direction: column; gap: 2px; }

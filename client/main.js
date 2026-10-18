@@ -6,6 +6,11 @@ const fs = require('fs');
 const https = require('https');
 
 const isDev = !!process.env.CHAHU_DEV;
+// 测试 / 便携模式：把用户数据目录指到别处（必须在下面第一次 getPath('userData') 之前）。
+// 自动化测试用它隔离测试实例，不碰真实用户的房间存档与配置。
+if (process.env.CHAHU_USER_DATA) {
+  try { app.setPath('userData', path.resolve(process.env.CHAHU_USER_DATA)); } catch (e) { /* ignore */ }
+}
 let win = null;
 // 内置服务器的运行信息（端口 / 局域网地址），渲染进程要拿去显示分享链接
 let serverInfo = null;
@@ -23,6 +28,11 @@ let serverInfo = null;
 process.env.CHAHU_EMBEDDED = '1';
 if (!process.env.DATA_DIR) process.env.DATA_DIR = path.join(app.getPath('userData'), 'rooms');
 if (!process.env.PUBLIC_DIR) process.env.PUBLIC_DIR = path.join(__dirname, 'renderer');
+/* 已下线的官方公共服务器：老配置里记住过它，启动时清掉，
+   否则每次开窗都会把渲染进程送到一个连不上的地址。
+   （必须声明在第一次 readConfig() 之前 —— const 有 TDZ。） */
+const RETIRED_OFFICIAL = 'ws://139.199.90.209:8437/ws';
+
 // 端口同理：用户改过端口的话，第一次 require 就得是最终那个值，
 // 否则「先离线（默认 8437 被锁死）、后开服务器（想用 9000）」会静默起在 8437。
 if (!process.env.PORT) process.env.PORT = String(readConfig().port || 8437);
@@ -34,7 +44,13 @@ function configPath() {
 }
 
 function readConfig() {
-  try { return JSON.parse(fs.readFileSync(configPath(), 'utf8')); } catch (e) { return {}; }
+  let cfg = {};
+  try { cfg = JSON.parse(fs.readFileSync(configPath(), 'utf8')) || {}; } catch (e) { cfg = {}; }
+  if (cfg.server && String(cfg.server).replace(/\/+$/, '') === RETIRED_OFFICIAL) {
+    delete cfg.server;
+    try { fs.writeFileSync(configPath(), JSON.stringify(cfg, null, 2), 'utf8'); } catch (e) { /* ignore */ }
+  }
+  return cfg;
 }
 
 function writeConfig(patch) {
@@ -53,6 +69,13 @@ function createWindow() {
   const cfg = readConfig();
   const params = [];
   if (cfg.server) params.push('server=' + encodeURIComponent(cfg.server));
+  // 没有显式服务器时，渲染层缺省连本机内置服务器 —— 端口可能被用户改过，
+  // 必须把**实际端口**告诉它（config.js 里的 8437 只是最后兜底）。
+  // 用 localport 而不是 server=：server= 的优先级高于用户记住的服务器，
+  // 那样用户手动填的公网服下次启动就会被内置服务器顶掉。
+  else if (serverInfo && serverInfo.port) {
+    params.push('localport=' + serverInfo.port);
+  }
   // 内置服务器起来之后，把它的局域网地址告诉渲染进程 —— 分享链接要用它，
   // 用 localhost 分享出去朋友是打不开的。
   if (serverInfo && serverInfo.lan && serverInfo.lan.length) {

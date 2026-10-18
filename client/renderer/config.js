@@ -4,14 +4,15 @@
  *   - 桌面端（file://）→ localStorage 记住的地址，否则回落到内置地址
  */
 window.CHAHU_CONFIG = {
-  // 公网服务端地址（部署后填写；本地开发留空即可）
-  // 已部署到腾讯云 Lighthouse 轻量服务器（2 核 2G / 广州），24 小时在线。
-  publicServer: 'ws://139.199.90.209:8437/ws',
+  // 公网服务端地址（自建 / 托管服务端时填写）。
+  // ★ 官方公共服务器已下线，这里**不再带默认值**：留空时安卓默认进离线模式
+  //   （本机房间 + 公网联机 P2P），桌面端默认连本机内置服务器，网页版默认同源。
+  publicServer: '',
   localServer: 'ws://localhost:8437/ws',
   defaultName: '',
   appName: '茶绘',
   // 版本号：关于页显示 + 和 GitHub 的最新 release 比对
-  appVersion: '2.1.6',
+  appVersion: '2.1.7',
   // 开源仓库（更新检测用）
   repo: 'PainterAnkry/chahui'
 };
@@ -29,9 +30,18 @@ window.CHAHU = window.CHAHU || {};
     if (qSig) CFG.signalServer = String(qSig).trim();
   } catch (e) { /* ignore */ }
 
+  // ?localport= —— 桌面端内置服务器的**实际端口**（用户改过端口时 8437 不对）。
+  // 只改 localServer 这个兜底值，不碰「?server= / 用户记住的服务器」的优先级。
+  try {
+    var qLp = parseInt(new URLSearchParams(location.search || '').get('localport'), 10);
+    if (qLp > 0 && qLp < 65536) CFG.localServer = 'ws://localhost:' + qLp + '/ws';
+  } catch (e) { /* ignore */ }
+
   var LS_SERVER = 'chahu.server';
   var LS_NAME = 'chahu.name';
   var LS_AVATAR = 'chahu.avatar';
+  // 已下线的官方公共服务器：老版本把它记在 localStorage / 桌面配置里，启动时清掉
+  var RETIRED_OFFICIAL = 'ws://139.199.90.209:8437/ws';
 
   function normalize(url) {
     if (!url) return '';
@@ -56,7 +66,16 @@ window.CHAHU = window.CHAHU || {};
   }
 
   function stored() {
-    try { return localStorage.getItem(LS_SERVER) || ''; } catch (e) { return ''; }
+    try {
+      var s = localStorage.getItem(LS_SERVER) || '';
+      // 官方公共服务器已下线：老版本记住的这条地址不能再当默认（连不上还会
+      // 把入口页卡在「正在连接」），清掉让它回退到「本机服务器 / 离线模式」。
+      if (s && s.replace(/\/+$/, '') === RETIRED_OFFICIAL) {
+        localStorage.removeItem(LS_SERVER);
+        return '';
+      }
+      return s;
+    } catch (e) { return ''; }
   }
 
   function resolve() {
@@ -66,9 +85,10 @@ window.CHAHU = window.CHAHU || {};
     if (s) return s;
     // 安卓壳（Capacitor）：页面是本地资产，origin 是 http://localhost ——
     // 「同源推断」会推出一个没人监听的 ws://localhost/ws。
-    // 这里的正确默认和桌面端 file:// 一样：公网服务器。
+    // 没有官方公网服之后，安卓的缺省落点是**离线模式**（本机房间 + 公网联机 P2P）；
+    // 要连别人 / 自建服务器，在入口页的「服务器」里填地址（会记住）。
     if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) {
-      return normalize(CFG.publicServer) || normalize(CFG.localServer);
+      return normalize(CFG.publicServer) || 'local://';
     }
     if (location.protocol === 'http:' || location.protocol === 'https:') {
       return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';

@@ -4211,13 +4211,10 @@
   function copyLan() {
     var lan = Cfg.lanBase ? Cfg.lanBase() : '';
     if (!lan) return;
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(lan).then(function () {
-        toast('局域网地址已复制：' + lan, 'ok', 3200);
-      }, function () { toast(lan); });
-    } else {
-      toast(lan);
-    }
+    copyText(lan).then(function (ok) {
+      if (ok) toast('局域网地址已复制：' + lan, 'ok', 3200);
+      else toast('剪贴板被系统拦下了：' + lan, 'warn', 4200);
+    });
   }
 
   /* ============================================== 本机服务器开关（桌面端） */
@@ -4406,14 +4403,16 @@
     if (!confirmSrvSwitch()) return;
     var btn = $('#btnServerToggle');
 
-    // 安卓：本机没有服务器可开，直接连「记住的 / 默认的」那台
+    // 安卓：本机没有服务器可开，直接连「记住的 / 默认的」那台。
+    // 没有官方公网服之后，缺省 resolve() 会落到 local:// —— 那就等于还在离线，
+    // 这时不要假装「正在连接」，直接让用户填地址。
     if (!desktopBridge()) {
       if (btn) { btn.disabled = true; btn.textContent = '正在连接…'; }
       var aUrl = (global.ChaConfig && global.ChaConfig.resolve) ? global.ChaConfig.resolve() : '';
-      if (!aUrl) {
+      if (!aUrl || /^local:\/\//i.test(aUrl)) {
         if (btn) btn.disabled = false;
         renderServerToggle();
-        toast('没有可用的服务器地址，先在设置里填一个', 'err');
+        toast('还没有可连的服务器 —— 在「服务器」里填一个地址（自建服务端或别人的公网服）再连', 'err', 4800);
         return;
       }
       if (S.joined) resetRoomUi('');
@@ -4561,15 +4560,33 @@
    * 桌面端还额外认一条 `chahui://join?room=<房间号>&server=<ws://…>`（装的时候注册过协议，
    * 点一下直接拉起茶绘进房）。再加上「光粘一个房间号」——三种都从这一个函数过。
    *
-   * 返回 { roomId, server }（认不出来时 roomId 为空串）。
+   * ★ 公网联机的入口是 `webrtc://<房主peerId>`（安卓 / 网页房主）。它**不是房间号**，
+   *   而是「连到哪台机器」的通道地址；以前这里只认 http/chahui/裸 id，粘 webrtc://
+   *   会掉进「裸房间号」分支然后被正则拒掉。现在把它当 **server** 解析，并带上
+   *   entry 标记 —— 只有入口没有房间号时，调用方先切服务器，让用户从列表里选房间。
+   *
+   * 返回 { roomId, server, entry }（认不出来时 roomId 为空串）。
    */
   function parseRoomLink(text) {
     var s = String(text == null ? '' : text).trim();
-    if (!s) return { roomId: '', server: '' };
+    if (!s) return { roomId: '', server: '', entry: false };
     var server = '';
     var room = '';
+    var entry = false;
     var m = /^chahui:\/\//i.test(s);
-    if (m || /^https?:\/\//i.test(s)) {
+    var rtc = /^webrtc:\/\//i.test(s);
+    if (rtc) {
+      // webrtc://<peerId>[?room=<房间号>]：peer 地址原样交给 net 层
+      var ru = null;
+      try { ru = new URL(s); } catch (e) { ru = null; }
+      if (ru) {
+        server = ('webrtc://' + ru.host + (ru.pathname && ru.pathname !== '/' ? ru.pathname : '')).replace(/\/+$/, '');
+        try { room = ru.searchParams.get('room') || ''; } catch (e2) { /* ignore */ }
+      } else {
+        server = s.replace(/\/+$/, '');
+      }
+      entry = !room;
+    } else if (m || /^https?:\/\//i.test(s)) {
       var u = null;
       try { u = new URL(m ? s.replace(/^chahui:/i, 'http:') : s); } catch (e) { u = null; }
       if (u) {
@@ -4595,7 +4612,7 @@
     room = String(room).trim();
     // 房间号只允许「像 id 的字符」；带空格的（有人把房间名当链接发过来）就当没认出来
     if (room && !/^[A-Za-z0-9_-]{2,64}$/.test(room)) room = '';
-    return { roomId: room, server: server };
+    return { roomId: room, server: server, entry: entry && !!server };
   }
 
   /**
@@ -4605,6 +4622,19 @@
   function joinByLink(text, opts) {
     var p = parseRoomLink(text);
     if (!p.roomId) {
+      if (p.entry && p.server) {
+        // 只给了联机入口（webrtc://<peer>）：先切过去，房间从列表里选。
+        // 入口 ≠ 房间号 —— 这正是「粘了公网入口却说房间不存在」的根源。
+        Cfg.remember(p.server);
+        var si0 = $('#serverInput');
+        if (si0) si0.value = p.server;
+        if (net.url !== p.server) {
+          setStatus('正在连接 ' + p.server + ' …');
+          net.connect(p.server);
+        }
+        toast('这是公网联机入口，已切到 ' + p.server + ' —— 请从房间列表里选一间进入', 'ok', 4600);
+        return false;
+      }
       if (!(opts && opts.silent)) toast('这串东西里没认出房间号：' + String(text || '').slice(0, 40), 'err', 3200);
       return false;
     }
@@ -4937,22 +4967,22 @@
 
   /**
    * 入口页「服务器」输入框下面那行现状：连的哪个服 / 连没连上。
-   * 安卓端默认连官方公网服，这行让人随时知道自己在哪；连不上时给出明确的
-   * 「换地址 / 切回官方服」出口，而不是只留一个空房间列表。
+   * 没有官方公网服之后，安卓默认落在离线模式（local://）；这行让人随时知道
+   * 自己在哪，连不上时给出明确的「换地址 / 切回自建服务器」出口。
    */
   function renderServerHint() {
     var el = $('#serverHint');
     if (!el) return;
     var url = net.url || '';
     var bits = [];
-    if (net.isOpen()) {
+    if (net.isLocal && net.isLocal()) {
+      bits.push('离线模式（房间存在本机，不占端口、不出网）');
+    } else if (net.isOpen()) {
       bits.push('已连接 <b>' + esc(url) + '</b>' + (net.latency ? '（' + net.latency + 'ms）' : ''));
     } else if (net.status === 'connecting') {
       bits.push('正在连接 ' + esc(url || '…') + ' …');
     } else if (url) {
       bits.push('<span class="bad">连不上 ' + esc(url) + '</span>：检查地址和网络，或换一个服务器');
-    } else if (net.isLocal && net.isLocal()) {
-      bits.push('离线模式（自己单机画，房间存在本机）');
     } else {
       bits.push('尚未连接服务器');
     }
@@ -7197,35 +7227,54 @@
   }
 
   /**
-   * 分享链接的基地址。
+   * 分享链接的基地址（只用 http(s) 页面地址，不含 websocket 路径）。
    * 优先用局域网地址：桌面端内置服务器起来后，朋友要用你的内网 IP 才能打开，
    * 用 localhost 发出去对方点开只会连到他自己那台机器。
+   *
+   * ★ 安卓「离线 + 公网联机」时 net.url 是 local://（推不出页面地址），
+   *   而公网入口是 webrtc://（没有网页可打开）—— 以前这两条一起落空，
+   *   分享链接就退化成一个裸房间号。现在按「页面托管与联机解耦」补齐兜底：
+   *   ① 当前服务器是 http(s)/ws(s) → 用它托管页面；
+   *   ② 网页版 → 就用当前页面所在站点（localhost 除外，发给别人打不开）；
+   *   ③ 配了自建 publicServer → 用它的网页入口；
+   *   ④ 都没有（纯安卓离线 + P2P）→ 空串，调用方改用 chahui:// 应用链接。
    */
   function shareBase() {
     // 公网隧道优先：外网朋友也能打开，局域网地址只对同一 WiFi 的人有效
     if (S.publicUrl) {
-      // webrtc:// 入口没有 http 站点可言 —— 页面从哪打开就回落到哪（页面托管与联机解耦），
-      // 访客端点通过 roomShareLink 的 ?server= 参数带上
+      // webrtc:// 入口没有 http 站点可言 —— 往下走页面兜底
       if (!/^webrtc:\/\//i.test(S.publicUrl)) {
         // 安卓中继：publicUrl 是「访客 ws 端点」，分享链接用中继的 http 地址
         //（?server= 参数由 roomShareLink 补上）
         var m = /^(wss?):\/\/([^\/]+)/i.exec(S.publicUrl);
         if (m) return (m[1] === 'wss' ? 'https://' : 'http://') + m[2];
-        return S.publicUrl;
+        if (/^https?:\/\//i.test(S.publicUrl)) return S.publicUrl.replace(/\/+$/, '');
       }
     }
     var lan = Cfg.lanBase ? Cfg.lanBase() : '';
     if (lan) return lan;
-    return Cfg.httpBaseOf(net.url);
+    // 当前连的服务器本身能托管网页版（ws(s)://host/ws → http(s)://host）
+    var cur = Cfg.httpBaseOf(net.url);
+    if (cur) return cur;
+    // 网页版：页面从哪打开就回落到哪（安卓壳的 http://localhost 不算 —— 别人打不开）
+    try {
+      if ((location.protocol === 'http:' || location.protocol === 'https:') &&
+          !/^(localhost|127\.0\.0\.1|\[::1\])$/i.test(location.hostname)) {
+        return location.origin;
+      }
+    } catch (e) { /* ignore */ }
+    // 自建 / 托管服务端：publicServer 的 http 地址就是网页版入口
+    return Cfg.httpBaseOf(Cfg.normalize((Cfg.cfg && Cfg.cfg.publicServer) || ''));
   }
 
   /**
-   * 房间分享链接。普通情形 = base + ?room=；安卓隧道开着时还要把
-   * 「访客 ws 端点」作为 server 参数带上 —— 朋友的客户端要连的是隧道的
-   * 那根管道，不是中继自己的房间服务。
+   * 房间分享链接。普通情形 = base + ?room=；开公网联机时还要把「联机入口」
+   * 作为 server 参数带上（ws 中继或 webrtc:// 都一样）—— 朋友的客户端要连的是
+   * 那条通道，不是页面托管服务器自己的房间服务。
+   * base 为空（没有页面可托管）时返回空串：调用方改用 appRoomLink()。
    */
   function roomShareLink(base, roomId) {
-    if (!base) return roomId || '';
+    if (!base) return '';
     var link = base + '/?room=' + roomId;
     if (S.tunnel && S.tunnel.phase === 'on' && S.publicUrl &&
         /^(wss?|webrtc):\/\//i.test(S.publicUrl)) {
@@ -7352,7 +7401,8 @@
     } else {
       toast('正在建立 P2P 直连房间……（数据不经任何服务器）', 'ok', 3000);
     }
-    // 中继地址：安卓缺省用配置里的默认服务器（任何 2.1.1+ 服务端都能当中继）
+    // 中继地址：安卓缺省**不带**（官方公共服务器已下线）—— 先走 P2P；
+    // 只有配置了 publicServer（自建服务端）时，android-shim 才会回落到它当哑中继。
     d.startTunnel(global.chahuDesktop && global.chahuDesktop.isAndroid ? '' : undefined).then(function (r) {
       if (r && r.ok) return;
       if (r && r.error) {
@@ -7396,14 +7446,16 @@
     var t = S.tunnel || { phase: 'off' };
     // 安卓的隧道服务的是**本机房间**（WebView 里的离线状态机）——
     // 在线连着别的服务器时，当前房间不在本机。连的本来就是公网服务器的话，
-    // 房间天生就在公网上，直接分享链接即可 —— 把这点说清楚，别让人以为按钮坏了。
+    // 房间天生就在公网上，直接分享链接即可 —— 这里不再摆一颗永远点不动的
+    // 「无需开启」按钮（看着像坏了），只留一行说明。
     if (d.isAndroid && !net.isLocal() && t.phase !== 'on') {
+      btn.classList.add('hidden');
       btn.disabled = true;
-      btn.textContent = '无需开启';
       st.className = 'srv-state off';
       st.textContent = '当前连的是公网服务器，房间本来就在公网上 —— 直接点「分享」发房间链接就能进。要在本机开房（手机当服务器）请先切到离线模式';
       return;
     }
+    btn.classList.remove('hidden');
     btn.disabled = false;
     if (S.publicUrl || t.phase === 'on') {
       btn.textContent = '关闭公网联机';
@@ -7433,6 +7485,9 @@
   /**
    * 房间信息里的「公网入口」那一行。
    * 网页版只给一句提示（它没有起隧道的权限），桌面端给一键开关。
+   * ★ 公网入口是**联机通道地址**（webrtc://peer / ws://relay/tunnel/…），不是
+   *   网页、也不是房间号 —— 分享出去请用下面那条「分享链接」，别让用户把一个
+   *   peer id 当房间号粘进去。
    */
   function tunnelRowHtml() {
     setupTunnelBridge();                       // 幂等：保证订阅已经接上
@@ -7441,11 +7496,16 @@
     var inner;
     if (S.publicUrl) {
       inner = '<code>' + esc(S.publicUrl) + '</code>' +
-        '<span class="hint">（外网的朋友打开这个地址就能加入）</span>' +
+        '<span class="hint">（联机通道地址，不是网页也不是房间号；跨端请用下面的「分享链接」）</span>' +
         (d ? ' <button class="btn tiny ghost" id="btnTunnelOff">关闭公网联机</button>' : '');
     } else if (t.phase === 'downloading' || t.phase === 'starting') {
       inner = '<span class="hint">' + esc(tunnelStatusText()) + '</span>'
         + (tunnelHintText() ? '<span class="hint">' + esc(tunnelHintText()) + '</span>' : '');
+    } else if (d && d.isAndroid && !net.isLocal()) {
+      // 安卓连着公网服务器时，房间本来就在公网上 —— 不摆「开启」按钮
+      //（点了也帮不上忙），只说明该走「分享」。
+      inner = '<span class="hint">当前连的是公网服务器，房间本来就在公网上 —— ' +
+        '直接分享房间链接即可；要在本机开房（手机当服务器）请先切到离线模式。</span>';
     } else if (d) {
       inner = '<button class="btn tiny primary" id="btnTunnelOn">开启公网联机</button>' +
         '<span class="hint">（一键穿透，不用装任何东西；外网的朋友点链接就能进来）</span>' +
@@ -7457,33 +7517,87 @@
     return '<div class="kv"><label>公网入口</label><div>' + inner + '</div></div>';
   }
 
+  /**
+   * 复制一段文本。优先异步 Clipboard API（桌面端 / 网页版），失败回退
+   * textarea + execCommand —— 安卓 WebView（尤其旧版、或没装 Capacitor
+   * Clipboard 插件时）writeText 可能不存在或被系统拒掉；以前失败是静默的，
+   * 用户看到的就是「复制链接点了没反应」。
+   * 返回 Promise<boolean>：true = 确实进了剪贴板。
+   */
+  function copyText(text) {
+    var s = String(text == null ? '' : text);
+    return new Promise(function (resolve) {
+      var fallback = function () {
+        var ta = null;
+        try {
+          ta = document.createElement('textarea');
+          ta.value = s;
+          ta.setAttribute('readonly', '');
+          ta.style.position = 'fixed';
+          ta.style.top = '-1000px';
+          ta.style.left = '-1000px';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.focus();
+          ta.select();
+          try { ta.setSelectionRange(0, s.length); } catch (e) { /* 老 WebView */ }
+          var ok = false;
+          try { ok = document.execCommand('copy'); } catch (e2) { ok = false; }
+          resolve(!!ok);
+        } catch (e3) {
+          resolve(false);
+        } finally {
+          if (ta && ta.parentNode) { try { ta.parentNode.removeChild(ta); } catch (e4) { /* ignore */ } }
+        }
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        try {
+          navigator.clipboard.writeText(s).then(function () { resolve(true); }, fallback);
+          return;
+        } catch (e) { /* 同步抛（个别 WebView）→ 走兜底 */ }
+      }
+      fallback();
+    });
+  }
+
+  /** 房间的两条分享链接（http 网页链接 / chahui:// 应用链接）。 */
+  function shareLinks() {
+    var base = shareBase();
+    var http = roomShareLink(base, S.room ? S.room.id : '');
+    var app = appRoomLink();
+    var text;
+    if (http) text = app ? (http + '\n茶绘应用链接：' + app) : http;
+    else text = app || ((S.room && S.room.id) || '');
+    return { http: http, app: app, text: text };
+  }
+
   function doShare() {
     if (!S.room) { toast('还没有进入房间'); return; }
-    var base = shareBase();
     // ★ 2.0.10：给两条链接 ——
     //   ① http(s) 分享链接：网页端点开就能进，谁都能用；
     //   ② chahui:// 应用链接：装了茶绘的机器点一下直接拉起客户端进房
     //      （安装时注册了这个协议，见 client/package.json 的 build.protocols）。
-    //   两条一起复制，粘给谁都能用；本应用自己的「房间链接」输入框两种都认。
-    var text = roomShareLink(base, S.room.id);
-    if (base) text += '\n茶绘应用链接：' + appRoomLink();
-    var note = text + (S.room.hasPassword ? '（房间有密码，请向房主索取）' : '');
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(note).then(function () {
-        toast('分享链接已复制：' + note, 'ok', 3600);
-      }, function () { showInfo(text); });
-    } else {
-      showInfo(text);
-    }
+    //   没有页面可托管时（纯安卓离线 + P2P）至少把应用链接复制出去。
+    var L = shareLinks();
+    var note = L.text + (S.room.hasPassword ? '（房间有密码，请向房主索取）' : '');
+    copyText(note).then(function (ok) {
+      if (ok) {
+        toast('分享链接已复制：' + note, 'ok', 3800);
+      } else {
+        showInfo(L.text);
+        toast('剪贴板被系统拦下了 —— 链接已显示在房间信息里，可长按手动复制', 'warn', 4600);
+      }
+    });
   }
 
-  /** 应用内链接：chahui://join?room=<房间号>&server=<当前服务器> */
+  /** 应用内链接：chahui://join?room=<房间号>&server=<联机入口> */
   function appRoomLink() {
     if (!S.room) return '';
-    // 安卓隧道开着时，房间在本机、访客走隧道端点 —— server 参数必须是
-    // 隧道访客地址而不是 net.url（离线模式下那是 local://，点开等于进错门）
+    // 公网联机开着时，房间在本机 / 在本机服务器上，访客要走的是那条入口：
+    // ws 中继、webrtc:// 还是 https 隧道都原样带上（normalize 会转成对应通道）。
+    // 离线模式下 net.url 是 local://，点开等于进错门，绝不能用它。
     var srv = net.url || '';
-    if (S.tunnel && S.tunnel.phase === 'on' && /^wss?:\/\//i.test(S.publicUrl || '')) {
+    if (S.tunnel && S.tunnel.phase === 'on' && S.publicUrl && !/^local:\/\//i.test(S.publicUrl)) {
       srv = S.publicUrl;
     }
     return 'chahui://join?room=' + encodeURIComponent(S.room.id) +
@@ -7493,11 +7607,8 @@
   function showInfo(text) {
     $('#infoTitle').textContent = '房间信息';
     var r = S.room || {};
-    // 没显式传链接就自己算一条（会优先用公网地址）
-    if (text === undefined || text === null) {
-      var b0 = shareBase();
-      text = r.id ? roomShareLink(b0, r.id) : (r.id || '');
-    }
+    // 没显式传链接就自己算一条（有页面就 http 链接，没有就退回 chahui:// 应用链接）
+    if (text === undefined || text === null) text = shareLinks().text;
     $('#infoBody').innerHTML =
       '<div class="kv"><label>房间名</label><div>' + esc(r.name || '-') + '</div></div>' +
       '<div class="kv"><label>房间号</label><div><code>' + esc(r.id || '-') + '</code></div></div>' +
@@ -7512,7 +7623,8 @@
         ? '<div class="kv"><label>局域网</label><div><code>' + esc(Cfg.lanBase()) + '</code>' +
           '<span class="hint">（同一 WiFi 下的朋友用浏览器打开这个地址就能加入）</span></div></div>'
         : '') +
-      '<div class="kv"><label>分享链接</label><div><code id="shareLinkText">' + esc(text || '-') + '</code></div></div>' +
+      '<div class="kv"><label>分享链接</label><div><code id="shareLinkText">' +
+        esc(text || '-') + '</code></div></div>' +
       '<div class="info-actions">' +
       '<button class="btn tiny" id="btnInfoCopy">复制链接</button>' +
       '<button class="btn tiny" id="btnInfoLeave">离开房间</button>' +

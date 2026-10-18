@@ -1004,8 +1004,8 @@
         <label>服务器</label>
         <input type="text" id="serverInput" spellcheck="false" placeholder="ws://localhost:8437/ws" />
       </div>
-      <!-- 服务器现状一行：连的哪个服 / 连没连上。安卓默认连官方公网服，
-           这行让人随时知道自己在哪、连不上时该换地址还是先离线。 -->
+      <!-- 服务器现状一行：连的哪个服 / 连没连上。官方公共服务器已下线，
+           安卓默认落在离线模式（local://），这行让人随时知道自己在哪。 -->
       <p class="hint srv-hint" id="serverHint"></p>
       <!-- ★ 2.0.10：别人发来的房间链接粘这里就能进 ——
            http(s) 分享链接 / chahui:// 应用链接 / 光一个房间号，三种都认。
@@ -1015,7 +1015,7 @@
         <input type="text" id="joinLinkInput" spellcheck="false" placeholder="粘一个分享链接，或直接填房间号" />
         <button class="btn tiny" id="btnJoinLink" title="解析链接并加入（回车也行）">加入</button>
       </div>
-      <p class="hint" id="joinLinkHint">粘贴后自动识别：http(s) 分享链接、chahui:// 应用链接，或一个房间号</p>
+      <p class="hint" id="joinLinkHint">粘贴后自动识别：http(s) 分享链接、chahui:// 应用链接、webrtc:// 公网入口（会先切服务器），或一个房间号</p>
       <!-- 离线模式开关（只有桌面端有）。它**不会停掉本机服务器**：
            「切到离线」只是你自己断开、走本机通道（不占端口、不出网），
            服务器继续在后台跑，同一 WiFi 的人照样能加入；
@@ -1046,7 +1046,7 @@
             <span class="srv-state" id="tunnelState">—</span>
           </div>
         </div>
-        <span class="hint" id="tunnelHint">开启后生成一个公网直连入口，跨网的朋友点链接就能进；关闭即切回本地。手机上房间跑在本机，走 P2P 直连（数据不经任何服务器，失败自动换中继通道）；桌面端走 cloudflared 隧道。</span>
+        <span class="hint" id="tunnelHint">开启后生成一个公网直连入口，跨网的朋友点链接就能进；关闭即切回本地。手机上房间跑在本机，走 P2P 直连（数据不经任何服务器；配了中继服务器时失败会自动切换）；桌面端走 cloudflared 隧道。</span>
       </div>
 
       <div class="split">

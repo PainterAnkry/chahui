@@ -35,6 +35,8 @@ const BASE = process.argv[2] || 'http://127.0.0.1:8440';
       http: f('http://139.199.90.209/?room=' + rid),
       https: f('https://example.com/?room=' + rid),
       app: f('chahui://join?room=' + rid + '&server=ws%3A%2F%2F1.2.3.4%3A8437%2Fws'),
+      p2p: f('webrtc://chahui-4cds78xsvb9r?room=' + rid),
+      entry: f('webrtc://chahui-4cds78xsvb9r'),
       bare: f(rid),
       name: f('周末茶绘'),
       junk: f('看看这个 https://example.com/'),
@@ -47,6 +49,11 @@ const BASE = process.argv[2] || 'http://127.0.0.1:8440';
   check('★ https 链接 → wss', /^wss:\/\//.test(cases.https.server), cases.https.server);
   check('★ chahui:// 应用链接 → 房间号 + 链接里带的服务器',
     cases.app.roomId === roomId && cases.app.server === 'ws://1.2.3.4:8437/ws', cases.app);
+  check('★ webrtc:// + ?room= → 房间号 + P2P 服务器',
+    cases.p2p.roomId === roomId && cases.p2p.server === 'webrtc://chahui-4cds78xsvb9r', cases.p2p);
+  check('★ 只给 webrtc:// 公网入口 → 当服务器（不是房间号），并标记为 entry',
+    cases.entry.roomId === '' && cases.entry.server === 'webrtc://chahui-4cds78xsvb9r' && cases.entry.entry === true,
+    cases.entry);
   check('★ 光一个房间号也认', cases.bare.roomId === roomId, cases.bare);
   check('★ 房间名（带空格的中文）不会被当成房间号', cases.name.roomId === '', cases.name);
   check('★ 没有 room 参数的网页链接认不出来（不瞎猜）', cases.junk.roomId === '', cases.junk);
@@ -62,13 +69,26 @@ const BASE = process.argv[2] || 'http://127.0.0.1:8440';
     /^chahui:\/\/join\?room=/.test(share.app) && /server=ws/.test(share.app), share.app);
   check('★ 入口页有「房间链接」输入框', share.inputVisible === true);
 
+  // 公网联机开着（webrtc:// 入口）时，应用链接的 server 必须跟着换成 P2P 入口
+  const p2pApp = await page.evaluate(() => {
+    const S = window.ChaApp.state;
+    const old = { pub: S.publicUrl, tun: S.tunnel };
+    S.publicUrl = 'webrtc://chahui-testpeer';
+    S.tunnel = { phase: 'on', url: S.publicUrl, error: '' };
+    const link = window.ChaApp.appRoomLink();
+    S.publicUrl = old.pub; S.tunnel = old.tun;
+    return link;
+  });
+  check('★ 公网联机开着时，应用链接带 webrtc:// 入口（不是 local://）',
+    /server=webrtc%3A%2F%2Fchahui-testpeer/.test(p2pApp), p2pApp);
+
   console.log('\n[3] 真的用链接进房');
   // 先离开房间回到入口页，再粘一条链接进去
   await page.evaluate(() => window.ChaApp.leaveRoom());
   await sleep(600);
   await page.evaluate(() => window.ChaApp.openEntry(true));
   await page.waitForSelector('#joinLinkInput');
-  await page.fill('#joinLinkInput', 'http://127.0.0.1:8440/?room=' + roomId);
+  await page.fill('#joinLinkInput', BASE + '/?room=' + roomId);
   await page.click('#btnJoinLink');
   let joined = false;
   for (let i = 0; i < 30; i++) {
