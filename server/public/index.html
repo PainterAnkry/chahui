@@ -50,6 +50,11 @@
     <button class="btn ghost" id="btnExport" title="导出当前画布为 PNG">导出</button>
     <button class="btn ghost" id="btnBake" title="把当前画面固化为底图，压缩房间历史">固化</button>
     <button class="btn primary" id="btnShare" title="复制分享链接">分享</button>
+    <div class="lang-switch" id="langSwitch" data-i18n-skip title="Language / 语言 / 言語">
+      <button data-lang="zh" class="on">中</button>
+      <button data-lang="en">EN</button>
+      <button data-lang="ja">日</button>
+    </div>
   </div>
 </header>
 
@@ -81,7 +86,7 @@
     <div class="panel-scroll" id="leftPanelScroll">
       <div class="panel-handle" id="panelHandle">
         <span class="panel-handle-grip">⋮⋮</span>
-        <span class="panel-handle-label">拖动小节标题可排序，也能拖到右边那栏去</span>
+        <span class="panel-handle-label">拖动小节标题排序，也能拖到右栏</span>
         <button class="panel-handle-reset" id="btnPanelReset" title="恢复默认面板布局（小节都回左栏）">↺</button>
       </div>
 
@@ -134,9 +139,17 @@
       <section class="group" data-section="brushes">
         <h4><span class="section-grip" title="拖动调整顺序">⋮⋮</span>笔刷栏
           <button class="mini h4-btn" id="btnBrushImport" title="导入笔刷：Photoshop (.abr)、CSP (.sut)、Procreate (.brush / .brushset)、SAI2 (.saitdat / .saitset)、画世界Pro (.bru)。SAI2 的笔尖形状 BMP 请和 .saitdat 一起选上。">导入</button>
+          <button class="mini h4-btn" id="btnBrushManage" title="批量管理：多选导入的笔刷，一次删掉">批量</button>
           <button class="mini h4-btn" id="btnBrushEdit" title="自定义笔刷栏：调整顺序与显隐">编辑</button>
         </h4>
         <div class="tool-grid" id="brushGrid"></div>
+        <div class="brush-manage hidden" id="brushManageBar">
+          <span class="bm-count" id="bmCount">已选 0 支</span>
+          <button class="mini" id="bmAll">全选</button>
+          <button class="mini" id="bmInvert">反选</button>
+          <button class="mini bm-del" id="bmDelete">删除所选</button>
+          <button class="mini" id="bmDone">完成</button>
+        </div>
         <p class="hint" id="brushTip">—</p>
       </section>
 
@@ -1857,6 +1870,11 @@
 <script src="filters.js"></script>
 <script src="export-formats.js"></script><script src="psd.js"></script><script src="psd-read.js"></script>
 <script src="rulers.js"></script>
+<!-- 多语言：字典 + 运行期翻译层。必须在 menu.js / app.js 之前加载：
+     它们在启动阶段就往 DOM 里塞菜单和面板，翻译层要能看见第一批节点。 -->
+<script src="i18n-dict.js"></script>
+<script src="i18n-extra.js"></script>
+<script src="i18n.js"></script>
 <script src="menu.js"></script>
 <script src="engine.js"></script>
 <script src="transform.js"></script>

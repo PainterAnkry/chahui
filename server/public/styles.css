@@ -306,6 +306,35 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline: non
 
 .topbar-actions { margin-left: auto; display: flex; gap: 7px; }
 
+/* 语言切换：三段式小开关（中 / EN / 日） */
+.lang-switch {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 2px;
+  border-radius: 9px;
+  background: var(--surface-mute);
+  border: 1px solid var(--line-soft);
+}
+.lang-switch button {
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background var(--dur-fast), color var(--dur-fast);
+}
+.lang-switch button:hover { color: var(--text); background: var(--hover); }
+.lang-switch button.on {
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 1px 4px -1px var(--accent);
+}
+
 /* ============================== 按钮 ==============================
    三档：.btn（常规按钮）/ .btn.primary（一支强调色，给主操作）/ .mini（面板里的小片）。
    iOS 手感：悬停只提亮底色，**按下整颗轻微缩放**（transform 不影响布局），
@@ -803,6 +832,68 @@ body.tool-dragging { cursor: grabbing; user-select: none; }
   cursor: pointer;
 }
 .tool-grid .tbadge button:hover { background: var(--accent); color: var(--text-on-accent); }
+
+/* ---- 批量管理导入笔刷 ---- */
+.tool-grid.managing .tool { cursor: pointer; }
+.tool-grid.managing .tool.dis {
+  opacity: .32;
+  filter: grayscale(1);
+  cursor: not-allowed;
+}
+.tool-grid.managing .tool.sel {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset, 0 2px 10px -4px var(--accent);
+}
+.tool-grid .tool .tsel {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  line-height: 13px;
+  text-align: center;
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  opacity: 0;
+  transform: scale(.6);
+  transition: opacity var(--dur-fast), transform var(--dur-fast);
+}
+.tool-grid.managing .tool.sel .tsel { opacity: 1; transform: scale(1); }
+.tool-grid.managing .tool:not(.sel) .tsel { opacity: 0; }
+
+.brush-manage {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin-top: 6px;
+  padding: 6px 7px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  animation: bm-in var(--dur-fast) ease-out;
+}
+@keyframes bm-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+.brush-manage .bm-count {
+  flex: 1 1 auto;
+  min-width: 60px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-ink);
+}
+.brush-manage .mini { padding: 3px 7px; font-size: 11px; }
+.brush-manage .bm-del {
+  color: #fff;
+  background: #d4483f;
+  border-color: transparent;
+  font-weight: 600;
+}
+.brush-manage .bm-del:hover:not(:disabled) { background: #e0524a; }
+.brush-manage .bm-del:disabled { opacity: .45; cursor: not-allowed; }
 
 .tool-edit-bar {
   display: flex; align-items: center; gap: 6px;
@@ -5165,3 +5256,197 @@ body.layout-narrow .tb-restore:not(.hidden) { display: inline-flex; }
 @media (pointer: coarse) {
   .tb-restore { width: 22px; height: 72px; font-size: 13px; }
 }
+
+/* ==========================================================================
+   视觉精修（2.1.8）
+   --------------------------------------------------------------------------
+   2.2 那轮把设计令牌和液态玻璃的骨架立起来了，这一轮只做「收边」：
+   把散在几十个组件里的圆角 / 描边 / 内高光 / 数字字重统一到一处，
+   让面板、弹窗、菜单看起来是同一套材质，而不是各画各的。
+
+   三条原则（和 2.2 一致，别在这里破）：
+     · 只改观感，不改尺寸节奏 —— 但凡是测试里有几何断言的（菜单定位、面板宽度、
+       按钮命中区域），这里一律不动宽高，只动颜色 / 圆角 / 阴影。
+     · 强调色仍只有一支：主操作、选中态、焦点环。精修不用第二支彩色。
+     · 玻璃必须能读出「材质」：半透明 + 模糊 + 饱和 + 顶部发丝高光 + 分层投影，
+       四样缺一，落在白画布上就会退化成一块纯白方块。
+   ========================================================================== */
+
+/* ---------------- 1. 输入控件：一套描边 / 圆角 / 焦点表现 ---------------- */
+input[type=text], input[type=password], input[type=number], textarea, select {
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  /* 输入框用「内凹」而不是外投影：凹陷感来自内阴影，不占外部空间，不会挤动排版 */
+  box-shadow: inset 0 1px 2px rgba(16, 26, 44, .05);
+}
+html[data-theme="dark"] input[type=text], html[data-theme="dark"] input[type=password],
+html[data-theme="dark"] input[type=number], html[data-theme="dark"] textarea, html[data-theme="dark"] select {
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, .35);
+}
+input[type=text]:hover, input[type=password]:hover, input[type=number]:hover, textarea:hover, select:hover {
+  border-color: var(--accent-line);
+}
+input[type=text]:focus, input[type=password]:focus, input[type=number]:focus,
+textarea:focus, select:focus {
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+/* 原生下拉箭头各家长得都不一样，换成一个统一的细箭头（灰阶，深浅主题都读得清） */
+select {
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: 22px;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238d94a0' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 7px center;
+  background-size: 10px 6px;
+}
+select::-ms-expand { display: none; }
+
+/* ---------------- 2. 按钮：同一档圆角与字重，按下仍是「整颗缩放」 ---------------- */
+.btn {
+  border-radius: 9px;
+  font-weight: 550;
+  letter-spacing: .1px;
+}
+.btn.tiny { border-radius: 7px; }
+.mini { border-radius: 7px; font-weight: 500; }
+.mini.wide { border-radius: 7px; }
+/* 主操作：渐变上再加一层顶高光，看起来是「压出来的一颗」而不是一块色 */
+.btn.primary {
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, .18), rgba(255, 255, 255, 0) 52%),
+                    var(--accent-grad);
+  border-color: var(--accent-strong);
+}
+
+/* ---------------- 3. 顶栏：让 chrome 读起来是「一条材质」而不是一块灰 ---------------- */
+.topbar {
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, .55), rgba(255, 255, 255, 0));
+}
+html[data-theme="dark"] .topbar {
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, .05), rgba(255, 255, 255, 0));
+}
+.brand-mark {
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, .22), rgba(255, 255, 255, 0) 55%),
+                    var(--accent-grad);
+  box-shadow: var(--accent-glow), inset 0 1px 0 rgba(255, 255, 255, .45),
+              inset 0 0 0 1px rgba(255, 255, 255, .18);
+  letter-spacing: 0;
+}
+/* 房间胶囊也用玻璃：它压在顶栏上，比顶栏再「厚」一档才分得清层级 */
+.room-chip {
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+  border-color: var(--glass-border);
+  box-shadow: var(--glass-inset);
+}
+.room-chip:hover { background: var(--glass-strong); }
+.room-chip b { font-weight: 600; letter-spacing: .2px; }
+/* 动作区与品牌之间加一条极淡的竖线，右侧按钮不再和左边挤成一片 */
+.topbar-actions::before {
+  content: '';
+  width: 1px;
+  align-self: stretch;
+  margin: 10px 3px 10px 0;
+  background: var(--line);
+  opacity: .7;
+}
+
+/* ---------------- 4. 面板：内顶高光 + 小节标题的字距节奏 ---------------- */
+.panel.left, .panel.right {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .5);
+}
+html[data-theme="dark"] .panel.left, html[data-theme="dark"] .panel.right {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .04);
+}
+.group h4 {
+  font-size: 11.5px;
+  letter-spacing: .55px;
+  color: var(--text-dim);
+  text-transform: none;
+}
+.group h4 em { font-size: 10.5px; letter-spacing: .2px; }
+.group h4 .h4-btn { font-size: 11px; }
+/* 小节本身已经是「卡片」（.group 有白底 + 描边 + 圆角 + 微投影），
+   所以**不要**再补「分组之间画一条线」那种老式分隔 —— 卡片之间的留白就是分隔。
+   这里只把卡片之间的节奏拉开一点，扫读时更容易看出是一块块。 */
+.group { margin-bottom: 9px; }
+.group:last-child { margin-bottom: 2px; }
+
+/* ---------------- 5. 工具格 / 笔刷格：选中态给一点「发光」，不是只换个底色 ---------------- */
+.tool-grid .tool {
+  border-radius: 9px;
+  transition: background var(--dur-fast), border-color var(--dur-fast),
+              box-shadow var(--dur-fast), transform var(--dur-fast);
+}
+.tool-grid .tool:hover { box-shadow: var(--shadow-xs); }
+.tool-grid .tool.active {
+  box-shadow: 0 0 0 1px var(--accent-line), 0 4px 12px -6px rgba(47, 125, 225, .55);
+}
+html[data-theme="dark"] .tool-grid .tool.active {
+  box-shadow: 0 0 0 1px var(--accent-line), 0 4px 14px -6px rgba(0, 0, 0, .8);
+}
+
+/* ---------------- 6. 菜单 / 右键弹窗：把玻璃的四要素补齐 ---------------- */
+.menu-drop { border-radius: var(--radius-lg); }
+.menu-row { border-radius: 7px; }
+.menu-sep { background: var(--line); opacity: .55; }
+/* 悬停填强调色时，顶边加一道更亮的高光，块面才有立体感 */
+.menu-row:hover { box-shadow: inset 0 1px 0 rgba(255, 255, 255, .22); }
+.mrow-key { font-variant-numeric: tabular-nums; letter-spacing: .2px; }
+
+/* ---------------- 7. 弹窗：更明确的材质与排版节奏 ---------------- */
+.modal { border-radius: var(--radius-xl); }
+.modal-head { padding: 15px 18px 13px; }
+.modal-head h3 { font-size: 15px; font-weight: 640; letter-spacing: .3px; }
+.modal-body { padding: 18px; }
+.modal-foot { padding: 13px 18px; }
+/* 长文（用户准则 / 风险须知）的正文节奏：段距、行距、列表缩进都收一收 */
+.modal-body p { margin: 0 0 10px; line-height: 1.72; }
+.modal-body p:last-child { margin-bottom: 0; }
+.modal-body ul { margin: 0 0 12px; padding-left: 18px; }
+.modal-body li { margin: 0 0 6px; line-height: 1.7; }
+.modal-body li:last-child { margin-bottom: 0; }
+.modal-body h4 { margin: 16px 0 8px; font-size: 12px; font-weight: 650; letter-spacing: .4px; color: var(--text-dim); }
+.modal-body h4:first-child { margin-top: 0; }
+.modal-body code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--line-soft);
+}
+.modal-body .warn { color: var(--danger); font-weight: 600; }
+
+/* 「图像大小」：430px 塞两列数字 + 两个单位下拉太挤，放宽并把单位列收窄 */
+.canvas-form.image-size { max-width: 520px; }
+.canvas-form.image-size .form-row > label { width: 96px; }
+.canvas-form.image-size .unit-sel { width: 92px; }
+.is-preview { background: var(--surface-sunken); border-radius: var(--radius-sm); }
+.is-block b { letter-spacing: .3px; }
+
+/* ---------------- 8. 滚动条：细、半透明、只在悬停时变实 ---------------- */
+* { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--text-mute); background-clip: padding-box; }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* ---------------- 9. 底栏 / 状态条：数字用等宽，跳数时不抖 ---------------- */
+.status-bar, .statusbar, #statusText { font-variant-numeric: tabular-nums; }
+
+/* 「图像大小」复用的是通用确认弹窗（.modal.confirm，380px），
+   两列数字 + 两个单位下拉塞进去会挤成三行。按内容把这一只放宽。
+   （:has 在 Chrome/Electron 105+ 与新版安卓 WebView 都支持；老 WebView 上只是
+    维持 380px，不会坏版。） */
+.modal.confirm:has(.canvas-form.image-size) { max-width: 520px; }
+.modal.confirm:has(.canvas-form.image-size) .form-row > label { width: 112px; }

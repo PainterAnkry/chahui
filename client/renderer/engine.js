@@ -46,6 +46,96 @@
   function qa(v) { return Math.max(1, Math.round(v * ALPHA_STEPS)) / ALPHA_STEPS; }
   function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
 
+  /**
+   * 折线保角加密（给「并集盖章」「笔尖盖章」用）。
+   *
+   * 为什么需要：采样点来自指针事件的频率（60~120Hz），快速画圈时相邻点可能隔几十像素；
+   * 直接按折线盖章，圆的每一段就是一个弦 —— 屏幕上就是一圈**明显的多边形折线**，
+   * 看起来像「被抖动修正过」。
+   *
+   * 算法：**三点圆弧插值**。相邻两点 + 前一点（或后一点）唯一确定一个圆，
+   * 就沿那段圆弧补点 —— 手画圆本来就是圆，这是最贴合意图的拟合；
+   * 三点共线（直线段）时圆弧退化成直线，自然回落到线性补点。
+   * 试过向心 Catmull-Rom：12 点画圆仍有 1.9px 的系统性内凹（弦高的一半），
+   * 圆弧插值同条件下误差 < 0.05px。
+   *
+   * 拐角必须保住：画折角、写「V」字时把角磨圆是灾难。按夹角判定，
+   * 转角小于约 52°（cos > 0.62）的急转折点所在两段一律走直线，只有平缓处才拟合。
+   *
+   * 纯函数、只依赖输入点与固定步长，远端回放与本地预览得到完全一致的结果。
+   */
+  function densifyPath(xs, ys, ps, step) {
+    var n = xs.length;
+    if (n < 3) return null;
+    var s0 = Math.max(0.6, step || 1);
+    var ox = [xs[0]], oy = [ys[0]], op = [ps[0]];
+    // 每个顶点是不是「急转折点」：急转两侧都不拟合，保住原角
+    var sharp = new Array(n);
+    for (var c = 0; c < n; c++) sharp[c] = false;
+    for (var v = 1; v < n - 1; v++) {
+      var ux = xs[v] - xs[v - 1], uy = ys[v] - ys[v - 1];
+      var wx = xs[v + 1] - xs[v], wy = ys[v + 1] - ys[v];
+      var lu = Math.hypot(ux, uy), lw = Math.hypot(wx, wy);
+      if (lu < 1e-6 || lw < 1e-6) { sharp[v] = true; continue; }
+      sharp[v] = ((ux * wx + uy * wy) / (lu * lw)) < 0.62;
+    }
+
+    /** 三点定圆的圆心；共线返回 null */
+    function circum(ax, ay, bx, by, cx2, cy2) {
+      var d = 2 * (ax * (by - cy2) + bx * (cy2 - ay) + cx2 * (ay - by));
+      if (Math.abs(d) < 1e-9) return null;
+      var a2 = ax * ax + ay * ay, b2 = bx * bx + by * by, c2 = cx2 * cx2 + cy2 * cy2;
+      return {
+        x: (a2 * (by - cy2) + b2 * (cy2 - ay) + c2 * (ay - by)) / d,
+        y: (a2 * (cx2 - bx) + b2 * (ax - cx2) + c2 * (bx - ax)) / d
+      };
+    }
+
+    for (var i = 0; i < n - 1; i++) {
+      var p1x = xs[i], p1y = ys[i], p2x = xs[i + 1], p2y = ys[i + 1];
+      var segLen = Math.hypot(p2x - p1x, p2y - p1y);
+      if (segLen < 1e-6) continue;
+      var k = clamp(Math.ceil(segLen / s0), 1, 24);
+      // 急转段 / 已经很密：直接落点，保角
+      if (sharp[i] || sharp[i + 1] || k < 2) {
+        ox.push(p2x); oy.push(p2y); op.push(ps[i + 1]);
+        continue;
+      }
+      // 第三点：优先取前一点（i>0），否则取后一点 —— 圆弧方向更贴近「已经画过的轨迹」
+      var qx, qy;
+      if (i > 0) { qx = xs[i - 1]; qy = ys[i - 1]; }
+      else { qx = xs[i + 2 < n ? i + 2 : i + 1]; qy = ys[i + 2 < n ? i + 2 : i + 1]; }
+      var ct = (Math.abs(qx - p1x) + Math.abs(qy - p1y) > 1e-6) ? circum(qx, qy, p1x, p1y, p2x, p2y) : null;
+      var pA = ps[i], pB = ps[i + 1];
+      var ok = false, rr = 0, a0 = 0, dA = 0;
+      if (ct) {
+        rr = Math.hypot(p1x - ct.x, p1y - ct.y);
+        // 半径要合理（别对着几乎共线的三点外推出几万像素的圆），张角也不能太大
+        if (rr > 0.2 && rr < Math.max(4000, segLen * 400)) {
+          a0 = Math.atan2(p1y - ct.y, p1x - ct.x);
+          var a1 = Math.atan2(p2y - ct.y, p2x - ct.x);
+          dA = a1 - a0;
+          while (dA > Math.PI) dA -= Math.PI * 2;
+          while (dA < -Math.PI) dA += Math.PI * 2;
+          if (Math.abs(dA) < 1.2) ok = true;   // < ~69°，再大就不可信
+        }
+      }
+      for (var s = 1; s <= k; s++) {
+        var t = s / k;
+        if (ok) {
+          var ang = a0 + dA * t;
+          ox.push(ct.x + Math.cos(ang) * rr);
+          oy.push(ct.y + Math.sin(ang) * rr);
+        } else {
+          ox.push(p1x + (p2x - p1x) * t);
+          oy.push(p1y + (p2y - p1y) * t);
+        }
+        op.push(pA + (pB - pA) * t);
+      }
+    }
+    return { xs: ox, ys: oy, ps: op };
+  }
+
   /** 确定性伪随机：散布 / 颗粒必须让所有客户端得到完全一样的结果 */
   function mulberry32(a) {
     a = a >>> 0;
@@ -409,7 +499,12 @@
     //   「方形的斜切角」，用户报的就是这个（68px 的笔上，切口有 20px 那么明显）。
     //   ⚠ 所有调用点传的都是 fromIndex = 0（整笔重画）；非 0 的增量路径不做这一步。
     var compact = !fromIndex;
-    var drop = clamp(stroke.size * 0.06, 0.5, 6);
+    // ★ 2.1.8：阈值不再跟着笔刷尺寸放大。
+    //   以前是 clamp(size*0.06, 0.5, 6)：100px 的笔会把 6px 以内的点「合并」，
+    //   而合并的做法是把上一个点**挪到**当前点上 —— 圆上的连续采样被一路吞掉，
+    //   剩下的顶点连起来就是一圈多边形折线（用户报的「画圆出现明显折线」）。
+    //   真正的重合/亚像素点只需要 0.35px 的判据，而且只跳过、不挪动，形状不动。
+    var drop = 0.35;
     var n = pts.length;
     var xs = [], ys = [], rs = [], as = [], ps = [];
     for (var i = 0; i < n; i++) {
@@ -417,9 +512,8 @@
       var rr0 = Math.max(0.18, widthAt(stroke, pts[i][2]) / 2);
       var aa0 = qa(alphaAt(stroke, pts[i][2]));
       if (compact && xs.length && Math.hypot(q[0] - xs[xs.length - 1], q[1] - ys[ys.length - 1]) < drop) {
-        // 太近：挪到后一个点的位置上（保留更靠后的压力），点数不增
-        xs[xs.length - 1] = q[0]; ys[ys.length - 1] = q[1];
-        rs[xs.length - 1] = rr0; as[xs.length - 1] = aa0; ps[xs.length - 1] = pts[i][2];
+        // 重合点：跳过（气压取更靠后的那一个，位置不动 —— 挪动会吃掉弧度）
+        rs[rs.length - 1] = rr0; as[as.length - 1] = aa0; ps[ps.length - 1] = pts[i][2];
         continue;
       }
       xs.push(q[0]); ys.push(q[1]); rs.push(rr0); as.push(aa0); ps.push(pts[i][2]);
@@ -446,6 +540,9 @@
     //   · 拐角天然是圆的（不需要 miter → 没有尖刺、不会自交）
     //   · 整条路径一次 fill（nonzero 并集）→ 重叠不叠深、也不可能抵消出洞
     var step = Math.max(0.5, stroke.size * 0.06);
+    // 采样点稀疏时先保角加密：圆 / 弧线才不会变成多边形（见 densifyPath 注释）
+    var dense = densifyPath(xs, ys, ps, step);
+    if (dense) { xs = dense.xs; ys = dense.ys; ps = dense.ps; n = xs.length; }
     var key = -1, open = false;
     var flush = function () {
       if (!open) return;
@@ -741,24 +838,31 @@
     var spacing = Math.max(1, stroke.size * (stroke.spacing || 0.1));
     var rnd = mulberry32(((stroke.seed >>> 0) ^ 0x85ebca6b) >>> 0);
 
-    // 整条路径累计弧长（每次都从头算，保证分批与整笔结果一致）
+    // 先映射到目标空间，再做保角加密 —— 与 paintRuns 同一个理由：
+    // 导入笔刷的采样点一稀疏，圆就画成一圈折线。
+    var xs = [], ys = [], ps = [];
+    for (var j = 0; j < n; j++) {
+      var mq = mp(m, pts[j][0], pts[j][1]);
+      xs.push(mq[0]); ys.push(mq[1]); ps.push(pts[j][2]);
+    }
+    var dense = densifyPath(xs, ys, ps, Math.max(0.5, spacing * 0.5));
+    if (dense) { xs = dense.xs; ys = dense.ys; ps = dense.ps; n = xs.length; }
+
     var start = fromIndex || 0;
-    var pos = mp(m, pts[0][0], pts[0][1]);
     var s = 0, next = 0;
     var i;
     // 起点先盖一枚
-    stampTip(ctx, tip, stroke, pos, pts[0][2]);
+    stampTip(ctx, tip, stroke, [xs[0], ys[0]], ps[0]);
     next = spacing;
     for (i = 1; i < n; i++) {
-      var a = mp(m, pts[i - 1][0], pts[i - 1][1]);
-      var b = mp(m, pts[i][0], pts[i][1]);
-      var seg = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      var ax2 = xs[i - 1], ay2 = ys[i - 1], bx2 = xs[i], by2 = ys[i];
+      var seg = Math.hypot(bx2 - ax2, by2 - ay2);
       if (seg <= 0) continue;
       while (next <= s + seg) {
         var t = (next - s) / seg;
-        var x = a[0] + (b[0] - a[0]) * t;
-        var y = a[1] + (b[1] - a[1]) * t;
-        var pr = pts[i - 1][2] + (pts[i][2] - pts[i - 1][2]) * t;
+        var x = ax2 + (bx2 - ax2) * t;
+        var y = ay2 + (by2 - ay2) * t;
+        var pr = ps[i - 1] + (ps[i] - ps[i - 1]) * t;
         if (stroke.scatter > 0) {
           var ang = rnd() * Math.PI * 2;
           var rad = Math.pow(rnd(), 0.6) * stroke.size * (0.15 + stroke.scatter * 0.85);
@@ -768,10 +872,9 @@
         next += spacing;
       }
       s += seg;
-      pos = b;
     }
     ctx.globalAlpha = 1;
-    void start; void pos;
+    void start;
     return true;
   }
 
@@ -4745,6 +4848,7 @@
     floodFill: floodFill,
     hexToRgb: hexToRgb,
     rgbToHex: rgbToHex,
-    clamp: clamp
+    clamp: clamp,
+    densifyPath: densifyPath
   };
 })(window);

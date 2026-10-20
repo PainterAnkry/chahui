@@ -139,6 +139,8 @@
     toolPrefs: null,          // { order: [id], hidden: [id] }
     toolEdit: false,
     imported: [],             // 导入的笔刷（PS .abr / CSP .sut），存 localStorage
+    brushManage: false,       // 笔刷栏「批量管理」模式：多选导入笔刷后一次删除
+    brushSel: {},             // 批量模式下选中的笔刷 id（对象当 set 用）
     // 协作视图：别人的笔迹在本机显示得多淡（纯本地，见「他人笔触」那一段）
     dimMode: 'off',           // 'off' | 'soft' | 'faint' | 'hide'
     uiTheme: 'system',        // 'system' | 'light' | 'dark'（见「界面主题」那一段）
@@ -1206,14 +1208,21 @@
     box.classList.toggle('editing', S.toolEdit);
     list.forEach(function (it) {
       var isBrushList = box.id === 'brushGrid';
+      var managing = isBrushList && S.brushManage;
       var keyBadge = itemKeyBadge(it, list, isBrushList);
       var b = document.createElement('button');
       b.className = 'tool' + (it.id === S.brushId ? ' active' : '');
+      if (managing) {
+        b.classList.add('managing');
+        if (!it.imported) b.classList.add('dis');
+        else if (S.brushSel[it.id]) b.classList.add('sel');
+      }
       b.dataset.tool = it.tool;
       b.dataset.item = it.id;
       b.title = it.name + (keyBadge ? '（快捷键 ' + (keyBadge === '␣' ? '空格' : keyBadge) + '）' : '') + '｜' + it.tip;
       b.innerHTML = Brushes.iconSvg(it.icon || it.id) + '<span>' + esc(it.name) + '</span>' +
         (keyBadge ? '<span class="tkey">' + esc(keyBadge) + '</span>' : '') +
+        (managing && it.imported ? '<span class="tsel">' + (S.brushSel[it.id] ? '✓' : '') + '</span>' : '') +
         (S.toolEdit
           ? '<span class="tbadge">' +
             '<button data-act="left" title="前移">◀</button>' +
@@ -1222,6 +1231,11 @@
             '</span>'
           : '');
       b.onclick = function (e) {
+        if (managing) {
+          if (!it.imported) { toast('内置笔刷不能删除，只能「收起」', 'err'); return; }
+          toggleBrushSel(it.id);
+          return;
+        }
         if (S.toolEdit) {
           var act = e.target && e.target.dataset ? e.target.dataset.act : null;
           if (act === 'left') return moveItem(it.id, -1);
@@ -1263,6 +1277,8 @@
     if (fam) fam.textContent = Brushes.FAMILY[S.tool] || '画笔';
     var tip = $('#brushTip');
     if (tip) tip.textContent = cur ? cur.tip : '—';
+    // 批量管理条的文案 / 按钮态跟着网格刷新（全选、删除后都要同步）
+    if (typeof updateBrushManageBar === 'function') updateBrushManageBar();
   }
 
   function renderHiddenPool() {
@@ -2947,20 +2963,9 @@
   function syncToolBox() {
     var box = $('#toolBox');
     if (!box || !box.dataset.built) return;
-    var cur = Brushes.get(S.brushId);
-    var bp = $('#tbBrush');
-    if (bp) {
-      bp.innerHTML = (cur ? Brushes.iconSvg(cur.icon || cur.id) : '') +
-        '<em>' + (cur ? cur.name : '笔刷') + '</em>';
-      bp.classList.toggle('active', !eraseOn() && !isSpecialToolId(S.tool));
-    }
-    var be = $('#tbErase');
-    if (be) be.classList.toggle('active', eraseOn());
     $$('#toolBox .tb-btn[data-tool]').forEach(function (b) {
       b.classList.toggle('active', !eraseOn() && S.brushId === b.dataset.tool);
     });
-    var bt = $('#tbTransform');
-    if (bt) bt.classList.toggle('active', !!(engine.transform && engine.transform.active));
     var dot = document.querySelector('#tbColor i');
     if (dot) dot.style.background = isSpecialToolId(S.tool) ? '#c9ced8' :
       (eraseOn() ? '#c9ced8' : S.color);
@@ -4030,6 +4035,99 @@
       renderToolGrid();
     }
     toast('已删除「' + it.name + '」');
+  }
+
+  /* ------------------------------------------------ 批量管理导入的笔刷
+   * 导入几十支笔之后，一支支右键删太折磨。这里给笔刷栏一个「批量」模式：
+   * 点格子多选（只有导入的笔可选，内置笔刷是灰的）→ 全选 / 反选 → 一次删掉。
+   */
+  function setBrushManage(on) {
+    S.brushManage = !!on;
+    S.brushSel = {};
+    if (S.brushManage) S.toolEdit = false;   // 两种编辑模式互斥，避免格子里的按钮打架
+    renderToolGrid();
+    updateBrushManageBar();
+  }
+
+  function toggleBrushSel(id) {
+    if (S.brushSel[id]) delete S.brushSel[id]; else S.brushSel[id] = 1;
+    renderToolGrid();
+    updateBrushManageBar();
+  }
+
+  function selectedBrushIds() {
+    return Object.keys(S.brushSel).filter(function (id) {
+      var it = Brushes.get(id);
+      return !!(it && it.imported);
+    });
+  }
+
+  function updateBrushManageBar() {
+    var bar = $('#brushManageBar');
+    if (!bar) return;
+    bar.classList.toggle('hidden', !S.brushManage);
+    var n = selectedBrushIds().length;
+    var c = $('#bmCount');
+    if (c) c.textContent = '已选 ' + n + ' 支';
+    var del = $('#bmDelete');
+    if (del) {
+      del.disabled = n === 0;
+      del.textContent = n ? '删除所选（' + n + '）' : '删除所选';
+    }
+    var mbtn = $('#btnBrushManage');
+    if (mbtn) mbtn.textContent = S.brushManage ? '退出' : '批量';
+    var grid = $('#brushGrid');
+    if (grid) grid.classList.toggle('managing', !!S.brushManage);
+  }
+
+  function brushSelectAll() {
+    S.brushSel = {};
+    (S.imported || []).forEach(function (it) { if (Brushes.get(it.id)) S.brushSel[it.id] = 1; });
+    renderToolGrid();
+    updateBrushManageBar();
+  }
+
+  function brushInvertSel() {
+    var next = {};
+    (S.imported || []).forEach(function (it) {
+      if (Brushes.get(it.id) && !S.brushSel[it.id]) next[it.id] = 1;
+    });
+    S.brushSel = next;
+    renderToolGrid();
+    updateBrushManageBar();
+  }
+
+  function deleteSelectedBrushes() {
+    var ids = selectedBrushIds();
+    if (!ids.length) return;
+    var names = ids.slice(0, 3).map(function (id) {
+      var it = Brushes.get(id);
+      return it ? '「' + it.name + '」' : id;
+    }).join('、');
+    var msg = '删除 ' + ids.length + ' 支导入的笔刷？\n' + names + (ids.length > 3 ? ' 等' : '') +
+      '\n（只删本机这份，不影响原来的 .abr / .sut 文件）';
+    if (global.confirm && !global.confirm(msg)) return;
+    var delMap = {};
+    ids.forEach(function (id) { delMap[id] = 1; });
+    var wasCurrent = !!delMap[S.brushId];
+    S.imported = (S.imported || []).filter(function (x) { return !delMap[x.id]; });
+    ids.forEach(function (id) {
+      Brushes.unregister(id);
+      var oi = S.toolPrefs.order.indexOf(id);
+      if (oi >= 0) S.toolPrefs.order.splice(oi, 1);
+      var hi = S.toolPrefs.hidden.indexOf(id);
+      if (hi >= 0) S.toolPrefs.hidden.splice(hi, 1);
+    });
+    S.brushSel = {};
+    saveImported();
+    saveToolPrefs();
+    if (wasCurrent) {
+      var next = Brushes.forTool('brush')[0] || Brushes.ITEMS[0];
+      loadBrush(next.id);
+    }
+    renderToolGrid();
+    updateBrushManageBar();
+    toast('已删除 ' + ids.length + ' 支导入笔刷');
   }
 
   /** 重命名导入的笔刷：Brushes 与 S.imported 是同一份对象引用，改 name 两边同步 */
@@ -5446,7 +5544,10 @@
     }
     var last = S.session.last;
     var d = Math.hypot(x - last[0], y - last[1]);
-    var minStep = Math.max(0.7, S.brush.size * 0.07);
+    // ★ 2.1.8：抽稀阈值不再按笔刷大小放大（以前 size*0.07，100px 的笔就是 7px 一个点，
+    //   圆被切成多边形，看起来像「抖动修正」）。现在只做亚像素去重：
+    //   小笔 0.55px、大笔最多 1.5px，既能压住带宽，又保住弧度。
+    var minStep = Math.max(0.55, Math.min(1.5, S.brush.size * 0.03));
     if (d < minStep && S.session.pending.length > 0) return;
 
     // 起笔用的是不可信的占位压力 → 第一个真值到了就把它一起改掉，
@@ -8818,6 +8919,7 @@
     // 工具栏和笔刷栏各有一个「编辑」按钮，但共用同一个编辑状态 —— 点哪个都是两栏一起进编辑
     function toggleToolEdit(btn) {
       S.toolEdit = !S.toolEdit;
+      if (S.toolEdit) { S.brushManage = false; S.brushSel = {}; }   // 和「批量」互斥
       $$('#btnToolEdit, #btnBrushEdit').forEach(function (b) { b.classList.toggle('active', S.toolEdit); });
       renderToolGrid();
       toast(S.toolEdit ? '编辑中：直接拖动调顺序，✕ 收起，右键改快捷键' : '已退出编辑');
@@ -8867,6 +8969,20 @@
 
     // 笔刷导入（PS .abr / CSP .sut）
     $('#btnBrushImport').addEventListener('click', function (e) { e.stopPropagation(); openBrushImport(); });
+
+    // 批量管理导入笔刷：多选 → 一次删除
+    $('#btnBrushManage').addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (!(S.imported || []).length && !S.brushManage) {
+        toast('还没有导入过笔刷', 'err');
+        return;
+      }
+      setBrushManage(!S.brushManage);
+    });
+    $('#bmAll').addEventListener('click', function () { brushSelectAll(); });
+    $('#bmInvert').addEventListener('click', function () { brushInvertSel(); });
+    $('#bmDelete').addEventListener('click', function () { deleteSelectedBrushes(); });
+    $('#bmDone').addEventListener('click', function () { setBrushManage(false); });
     $('#brushFileInput').addEventListener('change', function () { handleBrushFiles(this.files); });
     $('#btnImportCancelX').addEventListener('click', function () { $('#importMask').classList.add('hidden'); });
 
@@ -14160,6 +14276,11 @@
     $('#btnAboutClose').addEventListener('click', function () { $('#aboutMask').classList.add('hidden'); });
     $('#btnCheckUpdate').addEventListener('click', checkUpdate);
     $$('.about-tabs .tab').forEach(function (t) { t.addEventListener('click', function () { showAboutTab(t.dataset.atab); }); });
+    // 切语言时把当前页签重渲一遍（长文是整块查表的，不会跟着 DOM 文本层自动变）。
+    // 弹窗关着也要重渲：不然隐藏的 #aboutBody 里留着上一门语言，切回中文时会被当成「残留」。
+    global.addEventListener('chahu:lang', function () {
+      showAboutTab(aboutTab || 'terms');
+    });
     $('#refFileInput').addEventListener('change', function () { loadReferenceImage(this.files[0]); });
     bindTransformPanel();
     // 你画我猜的倒计时：本地每 250ms 按服务端 deadline 刷新一次，
@@ -15584,6 +15705,8 @@
     ].join('')
   };
 
+  var aboutTab = 'terms';
+
   function openAbout() {
     var mask = $('#aboutMask');
     if (!mask) return;
@@ -15601,7 +15724,11 @@
     $$('.about-tabs .tab').forEach(function (t) {
       t.classList.toggle('active', t.dataset.atab === name);
     });
-    $('#aboutBody').innerHTML = ABOUT_TABS[name] || '';
+    var raw = ABOUT_TABS[name] || '';
+    // 长文（用户准则/风险须知/致谢）整段查 i18n 字典：逐节点翻会把句子切碎、语序也不对
+    $('#aboutBody').innerHTML = (global.ChaI18n && global.ChaI18n.html)
+      ? global.ChaI18n.html(raw, 'about.' + name) : raw;
+    aboutTab = name;
   }
 
   /**
@@ -16679,6 +16806,12 @@
     handleBrushFiles: handleBrushFiles,
     applyImported: applyImported,
     removeImported: removeImported,
+    // 批量删除导入笔刷（测试与菜单都从这里进）
+    setBrushManage: setBrushManage,
+    toggleBrushSel: toggleBrushSel,
+    selectAllBrushes: brushSelectAll,
+    invertBrushSel: brushInvertSel,
+    deleteSelectedBrushes: deleteSelectedBrushes,
     tipThumb: tipThumb,
     // 色轮取色区形状（'square' / 'triangle'）：测试要靠它把形状切到被测的那一种，
     // 不然「三角形那套几何」的用例在新默认（方形）下会点到形状外面去。

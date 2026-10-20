@@ -129,11 +129,13 @@ const WANT = ['文件', '编辑', '图像', '图层', '选择', '尺子', '滤�
     open: !document.querySelector('#keyMask').classList.contains('hidden'),
     rows: document.querySelectorAll('#keyBody .key-row').length,
     groups: document.querySelectorAll('#keyBody .key-group').length,
+    // 菜单标题数：分组应当和顶栏菜单数一致（写死数字的话，加一个菜单就要改测试）
+    menus: document.querySelectorAll('#menuBar .menu-title').length,
     inputs: document.querySelectorAll('#keyBody .kinput').length
   }));
   console.log('  ' + JSON.stringify(dlg));
   ok('对话框能打开并列出全部可执行动作', dlg.open && dlg.rows > 60 && dlg.inputs === dlg.rows, JSON.stringify(dlg));
-  ok('按菜单分组显示', dlg.groups === 10, String(dlg.groups));
+  ok('按菜单分组显示', dlg.menus > 0 && dlg.groups === dlg.menus + 1, dlg.groups + '/' + dlg.menus + '(+笔刷与工具)');
 
   // 在输入框里按键 → 写成新快捷键
   await page.evaluate(() => {

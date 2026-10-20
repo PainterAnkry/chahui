@@ -46,3 +46,6 @@ client/build/icon-red-backup.png
 .workbuddy/
 # 本地 .sut 样本库（真实 CSP 文件，不入库）
 tools/_sut-lab/
+
+# 安装包（发布走 Release，不进版本库）
+*.apk
