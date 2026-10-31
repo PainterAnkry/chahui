@@ -16,11 +16,16 @@ window.CHAHU_CONFIG = {
   // 额外 ICE 服务器（TURN 打洞失败时用来转发，数据是 DTLS 加密的）。
   // 例：[{ urls: 'turn:turn.example.com:3478', username: 'u', credential: 'p' }]
   iceServers: [],
+  // 公共中继兜底（默认开）：P2P 打洞 20 秒不通时，自动改走公共 MQTT 中继
+  // （relay://，见 mqtt-relay.js）。跨 WiFi、手机流量、公司网这些对称 NAT 场景
+  // 全靠它 —— 不需要任何人拥有服务器。代价：数据经第三方公共 broker 转发，
+  // 延迟多 100~300 毫秒；介意隐私/延迟可以关掉。
+  relayFallback: true,
   localServer: 'ws://localhost:8437/ws',
   defaultName: '',
   appName: '茶绘',
   // 版本号：关于页显示 + 和 GitHub 的最新 release 比对
-  appVersion: '2.1.9',
+  appVersion: '2.2.0',
   // 开源仓库（更新检测用）
   repo: 'PainterAnkry/chahui'
 };
@@ -60,6 +65,8 @@ window.CHAHU = window.CHAHU || {};
     if (/^local:\/\//i.test(url)) return 'local://';
     // P2P 直连入口（webrtc://<房主peerId>）：原样交给网络层（见 net.js connectWebRTC）
     if (/^webrtc:\/\//i.test(url)) return url.replace(/\/+$/, '');
+    // 公共中继入口（relay://<房间key>）：原样交给网络层（见 net.js connectRelay）
+    if (/^relay:\/\//i.test(url)) return url.replace(/\/+$/, '');
     if (/^wss?:\/\//i.test(url)) return url;
     if (/^https:\/\//i.test(url)) return 'wss://' + url.slice(8).replace(/\/+$/, '') + '/ws';
     if (/^http:\/\//i.test(url)) return 'ws://' + url.slice(7).replace(/\/+$/, '') + '/ws';

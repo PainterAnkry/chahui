@@ -7,6 +7,7 @@
  *   5. 安卓建房 → Web 访客 P2P 进房（浏览器）
  *   6. 安卓应用链接（chahui://）→ 另一台安卓点链接直接进房（冷启动 + 热启动）
  *   7. 安卓建房 → Web + 桌面渲染层同房作画（真 Electron 需 CHAHU_ELECTRON=1）
+ *   8. 跨 WiFi 联机：公共中继（relay://）进房 + P2P 打不通时自动降级（要外网）
  *
  * 用法: node tools/test-android-all.js
  * 说明：需要本机 Chrome；第 7 项要真 Electron 时，先准备 .tmp-electron/electron.exe
@@ -67,6 +68,8 @@ function run(name, args, opts) {
   results.push(['安卓建房 → Web P2P', await run('安卓建房 → Web P2P', ['tools/test-webrtc-p2p.js', 'http://127.0.0.1:' + PORT, '9527'])]);
   results.push(['安卓应用链接（chahui://）进房', await run('安卓应用链接进房', ['tools/test-android-deeplink.js', 'http://127.0.0.1:' + PORT, '9531'])]);
   results.push(['安卓建房 → Web + Windows 桌面', await run('安卓建房 → Web + Windows 桌面', ['tools/test-webrtc-desktop.js'])]);
+  // 跨 WiFi 的那条路：公共中继。走真实公共 broker，需要外网
+  results.push(['跨 WiFi 联机（公共中继）', await run('跨 WiFi 联机（公共中继）', ['tools/test-relay.js', 'http://127.0.0.1:' + PORT])]);
 
   srv.kill();
   try { fs.rmSync(DATA_DIR, { recursive: true, force: true }); } catch (e) { /* ignore */ }

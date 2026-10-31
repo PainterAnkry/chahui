@@ -7,8 +7,11 @@
  *   · `local://`   —— 离线模式：不走 socket 的客户端，消息还是这些消息（见 client/local-host.js）
  *   · `webrtc://…` —— P2P 直连（安卓 / 网页房主）：DataChannel 管道，接口对齐 WebSocket，
  *                     信令走 PeerJS 免费云，数据不经任何服务器（见 webrtc-host.js）
+ *   · `relay://…`  —— 公共中继（MQTT over WSS）：P2P 打不通时的兜底。跨 WiFi、
+ *                     手机流量、公司网这些对称 NAT 场景下 P2P 打洞会失败，
+ *                     这条通道借公共 broker 转发，只要双方能上网就一定连得通（见 mqtt-relay.js）
  *
- * 三条通道共用同一个收包出口 `_recv()`，所以「离线时某些消息没处理」这种
+ * 四条通道共用同一个收包出口 `_recv()`，所以「离线时某些消息没处理」这种
  * 只在真机上才发现的毛病，从结构上就不会出现。
  */
 (function (global) {
@@ -19,6 +22,21 @@
 
   function isLocalUrl(u) { return /^local:\/\//i.test(String(u || '')); }
   function isWebRtcUrl(u) { return /^webrtc:\/\//i.test(String(u || '')); }
+  function isRelayUrl(u) { return /^relay:\/\//i.test(String(u || '')); }
+
+  /**
+   * 从 P2P 入口地址反推「同一间房」的公共中继 key。
+   * 房主的信令 id 是 `chahui-<房间号去掉分隔符>`（见 webrtc-host.js 的 stablePeerId），
+   * 中继 topic 用的是同一个房间号的同样处理结果 —— 所以分享链接里不用额外带字段，
+   * 换通道时两边天然对得上。
+   */
+  function relayKeyOf(hostId) {
+    var k = String(hostId || '')
+      .replace(/^chahui-/i, '')
+      .replace(/[^A-Za-z0-9]/g, '')
+      .toLowerCase();
+    return k.length >= 4 ? k : '';
+  }
 
   /**
    * WebRTC DataChannel 的 WebSocket 外衣：net 层其余代码（readyState 判断、
@@ -137,6 +155,7 @@
     if (isLocalUrl(this.url)) return this.connectLocal();
     // P2P 也要先把本机通道拆干净，理由见 leaveLocalChannel
     if (isWebRtcUrl(this.url)) { this.leaveLocalChannel(); return this.connectWebRTC(); }
+    if (isRelayUrl(this.url)) { this.leaveLocalChannel(); return this.connectRelay(); }
     this.leaveLocalChannel();
     this.connectWs();
   };
@@ -295,11 +314,24 @@
     var timer = setTimeout(function () {
       if (settled) return;
       settled = true;
-      // 超时的两种可能要说清楚：房主不在/入口失效，或者两边网络打不通（对称 NAT 没 TURN）。
-      // 以前只写「房主可能不在线」，跨运营商失败的人永远不知道该换一条通道。
-      self.setStatus('offline', { message: 'P2P 连接超时 —— 房主可能不在线，或双方网络无法直连（手机流量常见）。让房主换个网络重开，或改用一台公网服务器/中继' });
+      // ★ 打洞失败的两类原因：房主不在线，或者两边都在对称 NAT 后面（手机流量、
+      //   校园网、公司网几乎都是）。后者以前只能干瞪眼 —— 现在只要房主开了
+      //   公共中继，这里就自动改走 relay://，用户什么都不用做。
+      //   P2P 正常握手 3~8 秒；等到 20 秒还没通，再等下去也不会有惊喜。
+      var fb = relayKeyOf(hostId);
+      var allow = (global.CHAHU_CONFIG || {}).relayFallback !== false;
+      if (allow && fb && global.ChaRelay && global.ChaRelay.hasLib && global.ChaRelay.hasLib()) {
+        try { if (self._rtc) self._rtc.destroy(); } catch (e) { /* ignore */ }
+        self._rtc = null;
+        self.url = 'relay://' + fb;
+        self.emit('fallback', { from: 'webrtc', to: 'relay://' + fb });
+        self.setStatus('connecting', { message: '直连打不通，正在改用公共中继…' });
+        return self.connectRelay();
+      }
+      // 没有中继兜底时把话说清楚：是「连不上」而不是「不存在」
+      self.setStatus('offline', { message: 'P2P 连接超时 —— 房主可能不在线，或双方网络无法直连（手机流量/公司网常见）。让房主换个网络重开，或改用一台公网服务器/中继' });
       self.scheduleRetry();
-    }, 30000);
+    }, 20000);
 
     peer.on('open', function () {
       if (self._rtc !== peer) return;
@@ -325,8 +357,22 @@
         return;
       }
       // 信令本身连不上（PeerJS 云被墙 / 弱网）：这条要单独说，
-      // 否则用户只看到「连接超时」，会以为是房主的问题
+      // 否则用户只看到「连接超时」，会以为是房主的问题。
+      // 而且这种情况不用等 20 秒 —— 立刻改走公共中继，那条只是普通 WSS。
       if (type === 'network' || type === 'server-error' || type === 'socket-error' || type === 'socket-closed') {
+        var fbSig = relayKeyOf(hostId);
+        var allowSig = (global.CHAHU_CONFIG || {}).relayFallback !== false;
+        if (allowSig && fbSig && global.ChaRelay && global.ChaRelay.hasLib && global.ChaRelay.hasLib()) {
+          settled = true;
+          clearTimeout(timer);
+          try { if (self._rtc) self._rtc.destroy(); } catch (e) { /* ignore */ }
+          self._rtc = null;
+          self.url = 'relay://' + fbSig;
+          self.emit('fallback', { from: 'webrtc', to: 'relay://' + fbSig, reason: type });
+          self.setStatus('connecting', { message: 'P2P 信令不通，正在改用公共中继…' });
+          self.connectRelay();
+          return;
+        }
         self.setStatus('offline', {
           message: '连不上 P2P 信令服务器 —— 换一条通道（公网服务器 / 中继）会更稳'
         });
@@ -340,8 +386,49 @@
     });
   };
 
-  Net.prototype.scheduleRetry = function () {
+  /* ------------------------------------------------------------ 公共中继通道 */
+
+  /**
+   * 公共中继（relay://<房间key>）：P2P 打不通时的兜底。
+   *
+   * 为什么需要它：跨 WiFi / 手机流量时两端大多在 NAT 后面，碰上对称 NAT
+   * 打洞必然失败 —— 这是 WebRTC 的物理上限，不是程序能修的 bug。
+   * 这条通道借公共 MQTT broker 转发，只要双方能上网就连得通，
+   * 代价是数据要过第三方服务器、延迟多 100~300ms（见 mqtt-relay.js）。
+   */
+  Net.prototype.connectRelay = function () {
     var self = this;
+    this.manualClose = false;
+    if (this.ws && (this.ws.readyState === 0 || this.ws.readyState === 1)) {
+      try { this.ws.close(); } catch (e) { /* ignore */ }
+      this.ws = null;
+    }
+    if (this._rtc) { try { this._rtc.destroy(); } catch (e) { /* ignore */ } this._rtc = null; }
+    clearTimeout(this.retryTimer);
+    if (!global.ChaRelay) {
+      this.setStatus('offline', { message: '缺少中继组件（vendor/mqtt.min.js 或 mqtt-relay.js 没加载）' });
+      return;
+    }
+    this.setStatus('connecting');
+
+    var key = this.url.replace(/^relay:\/\//i, '').replace(/\/+$/, '');
+    var t;
+    try {
+      t = global.ChaRelay.createTransport(key);
+    } catch (e) {
+      this.setStatus('offline', { message: '中继初始化失败：' + e.message });
+      return this.scheduleRetry();
+    }
+    this.ws = t;
+    wireTransport(self, t, '公共中继连接已断开');
+    // 首次连接要逐个试公共 broker（最坏 3 台 × 12s），给足时间再判死
+    setTimeout(function () {
+      if (self.ws !== t || t.readyState === 1) return;
+      self.setStatus('offline', { message: '连不上公共中继 —— 换个网络试试（公司/校园网常封 WSS）' });
+    }, 40000);
+  };
+
+  Net.prototype.scheduleRetry = function () {    var self = this;
     if (this.manualClose) return;
     clearTimeout(this.retryTimer);
     this.retry += 1;

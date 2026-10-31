@@ -817,6 +817,25 @@
         roomId: currentRoomId
       })
       : null;
+
+    /**
+     * 公共中继房主（零服务器、跨 WiFi 必通）：借公共 MQTT broker 转发。
+     *
+     * 为什么要有它：P2P 靠打洞，跨 WiFi 时两端都在 NAT 后面，碰上对称 NAT
+     * （手机流量 / 校园网 / 公司网）就打不通 —— 用户看到的是「安卓开房朋友进不来」。
+     * 这条通道是「一条普通 WSS 出站连接」，只要双方能上网就连得通。
+     *
+     * 它是**伴随通道**，不参与 tunnelState 上报：P2P 能用就优先 P2P（延迟低、
+     * 数据不经第三方），P2P 打不通时访客侧 20 秒后自动切到这里（见 net.js）。
+     */
+    var relayHost = (global.ChaRelay && global.ChaRelay.createHost)
+      ? global.ChaRelay.createHost({
+        boot: function () { return core.boot(); },
+        LocalWs: LocalWs,
+        roomId: currentRoomId
+      })
+      : null;
+
     // 中继地址缺省值：优先 relayServer（专给中继用），退回 publicServer（自建服务器兼作中继）
     CHAHU_CONFIG_REF = function () {
       var c = global.CHAHU_CONFIG || {};
@@ -970,36 +989,49 @@
        * 分享链接拼成 页面地址/?room=<房间号>&server=<url 编码的访客端点>。 */
       startTunnel: function (relayAddr) {
         if (relayAddr) return tunnelHost.start(relayAddr);
-        // ★ 配了中继 → 先走中继。P2P 要靠打洞，手机流量 / 公司网这类对称 NAT 打不通，
-        //   用户看到的就是「安卓开房朋友进不来」。中继只是一条出站 WebSocket，稳得多；
-        //   中继不通再退回 P2P（没有中继可用的机器还是能直连）。
-        var relay = (global.CHAHU_CONFIG &&
-          (global.CHAHU_CONFIG.relayServer || global.CHAHU_CONFIG.publicServer)) || '';
-        if (relay) {
-          return tunnelHost.start(String(relay)).then(function (r) {
+        var cfg = global.CHAHU_CONFIG || {};
+        var selfRelay = cfg.relayServer || cfg.publicServer || '';
+        var p2pStart = function () { return webrtcHost ? webrtcHost.start() : Promise.resolve({ ok: false }); };
+        var quietStart = function () { return relayHost ? relayHost.start() : Promise.resolve({ ok: false }); };
+
+        // ① 显式配了中继地址 → 直接走它。填这个地址就是为了「稳」，
+        //    没必要再去赌一次打洞（跨 WiFi 打不通才是常态）。
+        //    中继不成再退回 P2P / 公共中继。
+        if (selfRelay) {
+          return tunnelHost.start(String(selfRelay)).then(function (r) {
             if (r && r.ok) return r;
-            if (!webrtcHost) return r;
-            return webrtcHost.start().then(function (rr) {
-              return (rr && rr.ok) ? rr : r;   // 两条都不通就把中继的真实原因报出去
+            return p2pStart().then(function (a) {
+              if (a && a.ok) return a;
+              return quietStart().then(function (b) { return (b && b.ok) ? b : r; });
             });
           });
         }
-        if (webrtcHost) {
-          return webrtcHost.start().then(function (r) {
-            if (r && r.ok) return r;
-            // P2P 不成（对称 NAT / 信令不通）→ 回落中继。没配中继时把 P2P 的真实错误
-            // 原样报出去，别用「没有可用的中继服务器地址」盖掉真正的原因。
-            var fallback = (global.CHAHU_CONFIG && global.CHAHU_CONFIG.publicServer) || '';
-            if (!fallback) return r;
-            return tunnelHost.start('');
+
+        // ② 没配中继：P2P 优先（数据不经第三方、延迟低），
+        //    8 秒内没握上手就让公共中继顶上 —— 信令被墙时 P2P 会慢慢重试，
+        //    不能让用户对着「正在启动」干等一分钟。
+        var p2p = p2pStart();
+        var quiet = quietStart();
+        function raceP2P(ms) {
+          return new Promise(function (resolve) {
+            var done = false;
+            var t = setTimeout(function () { if (!done) { done = true; resolve(null); } }, ms);
+            p2p.then(function (r) { if (!done) { done = true; clearTimeout(t); resolve(r); } });
           });
         }
-        return tunnelHost.start('');
+        return raceP2P(8000).then(function (a) {
+          if (a && a.ok) return a;                 // P2P 通了：分享 webrtc://（最快）
+          return quiet.then(function (b) {
+            if (b && b.ok) return b;               // P2P 起不来（信令被墙等）→ 公共中继顶上
+            return a || { ok: false, error: '公网联机没起来' };
+          });
+        });
       },
       stopTunnel: function () {
         var p1 = tunnelHost.stop();
         var p2 = webrtcHost ? webrtcHost.stop() : Promise.resolve({ ok: true });
-        return Promise.all([p1, p2]).then(function () { return { ok: true }; });
+        var p3 = relayHost ? relayHost.stop() : Promise.resolve({ ok: true });
+        return Promise.all([p1, p2, p3]).then(function () { return { ok: true }; });
       },
       getTunnelStatus: function () {
         var a = webrtcHost ? webrtcHost.getStatus() : { phase: 'off' };

@@ -32,7 +32,7 @@
 | `chahui-android-<版本>.apk` | Android 7.0+ | 安卓版，下载后直接安装 |
 | `chahui-server-<版本>.tar.gz` | Linux | 自建服务端（解压覆盖 `server/` 即可） |
 
-> **v2.1.9 只提供 Windows 与安卓包**（Linux 桌面版与服务端包沿用 [v2.1.5](https://github.com/PainterAnkry/chahui/releases/tag/v2.1.5) 的产物）。
+> **v2.2.0 只提供 Windows 与安卓包**（Linux 桌面版与服务端包沿用 [v2.1.5](https://github.com/PainterAnkry/chahui/releases/tag/v2.1.5) 的产物）。
 
 - 桌面端升级：「其他 → 关于 → 检查更新」会自己认出该下哪个包并直接下载
 - 首次运行弹 SmartScreen 是未签名 exe 的正常提示，点「更多信息 → 仍要运行」即可
@@ -86,10 +86,12 @@
 **公网联机**
 
 - **桌面端**：房间信息面板点「开启公网联机」，App 自动起一条 cloudflared 快速隧道，复制公网链接发出去即可（不用装任何额外软件）
-- **安卓 / 网页端房主**：优先走 **WebRTC P2P 直连**（点对点，不经过服务器）；打洞失败时可回落到**你自己配置的服务端**当哑中继（在 `client/renderer/config.js` 的 `publicServer` 填自建地址即可）。官方公共服务器已下线，不再提供默认中继
+- **安卓 / 网页端房主**：优先走 **WebRTC P2P 直连**（点对点，不经过服务器）；跨 WiFi、手机流量这些还打不通的情况，会**自动改走公共中继**（内置的公共 MQTT 服务，免注册、免部署，两端只要都能上网就连得通，代价是延迟高 100~300ms）。想要自己可控的中继，在 `client/renderer/config.js` 的 `relayServer` 填任意一台 2.1.1+ 服务端即可
 - **网页端访客**：需要一台托管了网页版的服务端来打开页面（自建 `server/` 或任意静态托管）；装了茶绘的桌面 / 安卓端则可以直接用 `chahui://` 应用链接进房
 - 命令行方式：`npm run expose`（服务端跑着的情况下，一条命令开临时隧道）
 - 有公网服务器的话直接部署 `server/`，大家访问 `http://<公网地址>:8437`
+
+> **关于"不同 WiFi 也要能连"**：两端都在家宽后面时 P2P 打洞多数能成；但只要有一端在手机流量 / 校园网 / 公司网（对称 NAT），打洞在协议层面就不可能成功。2.2.0 起这类情况会自动切到公共中继，不需要任何人准备服务器。不想让数据经过第三方时，把 `relayFallback` 设为 `false`，改用自建中继（`relayServer`）。
 
 **自建服务端 / 网页版**
 
@@ -185,7 +187,7 @@ Grab a ready-made build from **[Releases](https://github.com/PainterAnkry/chahui
 | `chahui-android-<version>.apk` | Android 7.0+ | Android build, install directly |
 | `chahui-server-<version>.tar.gz` | Linux | Self-hosted server (unzip over `server/`) |
 
-> **v2.1.9 ships Windows and Android only.** The Linux desktop and server packages come from [v2.1.5](https://github.com/PainterAnkry/chahui/releases/tag/v2.1.5).
+> **v2.2.0 ships Windows and Android only.** The Linux desktop and server packages come from [v2.1.5](https://github.com/PainterAnkry/chahui/releases/tag/v2.1.5).
 
 - Desktop updates: **Other → About → Check for updates** picks the right package and downloads it for you
 - SmartScreen warns on first run because the exe is unsigned — click "More info → Run anyway"
@@ -239,10 +241,12 @@ Grab a ready-made build from **[Releases](https://github.com/PainterAnkry/chahui
 **Drawing over the internet**
 
 - **Desktop host**: click "Enable internet play" in the room info panel — the app opens a cloudflared quick tunnel and gives you a public link to share (no extra software to install)
-- **Android / web host**: prefers a direct **WebRTC P2P** connection (peer to peer, no server in between); if hole punching fails it can fall back to **a server you configure** as a dumb relay (put your address in `publicServer` in `client/renderer/config.js`). The official public server has been retired, so there is no default relay any more
+- **Android / web host**: prefers a direct **WebRTC P2P** connection (peer to peer, no server in between). When hole punching cannot work — different Wi-Fi networks, mobile data — it **falls back to the built-in public relay** (a public MQTT service; no sign-up, no deployment, both sides just need internet, at the cost of 100–300 ms extra latency). To use a relay you control, put the address of any 2.1.1+ server in `relayServer` in `client/renderer/config.js`
 - **Web guests**: you need a server hosting the web build to open the page (self-host `server/` or any static host); installed desktop / Android builds can also join through `chahui://` app links
 - From the command line: `npm run expose` (opens a temporary tunnel while the server is running)
 - With your own public server, just deploy `server/` and point everyone at `http://<your-host>:8437`
+
+> **On "it has to work across different Wi-Fi networks"**: when both sides sit behind home routers, hole punching usually succeeds. As soon as one side is on mobile data, a campus network, or a corporate network (symmetric NAT), punching *cannot* work at the protocol level — no amount of tuning fixes that. Since 2.2.0 those cases switch to the public relay automatically, without anyone having to run a server. If you would rather not route data through a third party, set `relayFallback` to `false` and use your own relay (`relayServer`).
 
 **Self-hosted server / web build**
 

@@ -193,6 +193,55 @@
         '<li>Electron（デスクトップ版のシェル）、ws（WebSocket サーバー）—— それぞれのライセンスに従います。</li>',
         '</ul>'
       ].join('')
+    ],
+    // ---- 2.2.0 跨 WiFi 联机（公共中继 relay://）----
+    '直连打不通（跨 WiFi / 手机流量常见），已自动切到公共中继 —— 一样能画，延迟略高': [
+      'Direct connection failed (common across different Wi-Fi networks or mobile data), switched to the public relay — still works, slightly higher latency',
+      '直接接続に失敗しました（別々の Wi-Fi やモバイル回線でよくあります）。公共リレーに切り替えました —— 描けますが、少し遅延します'
+    ],
+    '两边网络直连打不通，已自动改用公共中继…': [
+      'The two networks cannot reach each other directly — switching to the public relay…',
+      '両者のネットワークは直接つながりません —— 公共リレーに切り替えます…'
+    ],
+    '直连打不通，正在改用公共中继…': [
+      'Direct connection failed — switching to the public relay…',
+      '直接接続に失敗しました —— 公共リレーに切り替えます…'
+    ],
+    'P2P 信令不通，正在改用公共中继…': [
+      'P2P signalling unreachable — switching to the public relay…',
+      'P2P シグナリングに接続できません —— 公共リレーに切り替えます…'
+    ],
+    '连不上公共中继 —— 换个网络试试（公司/校园网常封 WSS）': [
+      'Cannot reach the public relay — try another network (company/campus networks often block WSS)',
+      '公共リレーに接続できません —— 別のネットワークを試してください（社内・学内ネットワークは WSS を遮断することが多いです）'
+    ],
+    '公共中继（免服务器，跨 WiFi 也能连；延迟略高）': [
+      'Public relay (no server needed, works across different Wi-Fi; slightly higher latency)',
+      '公共リレー（サーバー不要、別々の Wi-Fi でも接続可。少し遅延します）'
+    ],
+    'P2P 直连（点对点；两边网络打不通时自动改走公共中继）': [
+      'P2P direct (peer-to-peer; falls back to the public relay if the two networks cannot connect)',
+      'P2P 直接接続（端末同士。つながらない場合は公共リレーに自動で切り替わります）'
+    ],
+    '缺少中继组件（vendor/mqtt.min.js 或 mqtt-relay.js 没加载）': [
+      'Relay component missing (vendor/mqtt.min.js or mqtt-relay.js not loaded)',
+      'リレー部品がありません（vendor/mqtt.min.js または mqtt-relay.js が読み込まれていません）'
+    ],
+    '公共中继连接已断开': [
+      'Public relay connection lost',
+      '公共リレーの接続が切れました'
+    ],
+    '缺少 MQTT 组件（vendor/mqtt.min.js 没加载）': [
+      'MQTT component missing (vendor/mqtt.min.js not loaded)',
+      'MQTT 部品がありません（vendor/mqtt.min.js が読み込まれていません）'
+    ],
+    '还没有房间号，无法开中继': [
+      'No room yet — cannot start the relay',
+      'まだルームに入っていないため、リレーを開始できません'
+    ],
+    '公共中继都连不上': [
+      'Cannot reach any public relay',
+      'どの公共リレーにも接続できません'
     ]
   });
 })();

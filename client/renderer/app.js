@@ -4753,14 +4753,39 @@
     //   P2P 要等信令 + 打洞，几十秒是常事；轮询窗口一过就再没人发 ROOM_JOIN 了，
     //   表现是「正在进入房间…」之后什么也没发生。net 的 open 事件会来兜这一手。
     S.pendingLinkJoin = { roomId: p.roomId, name: name };
+    S.lastJoinAt = 0;
+    // 通道一通就发 JOIN，没进房就每 2 秒补一次，直到进房或超时。
+    //   · 为什么要「一通就发」：P2P / 中继建立连接要几秒到几十秒，早发等于发进虚空；
+    //   · 为什么要补发：中继模式下「通道已建立」和「房主那边订阅就绪」之间有几百毫秒
+    //     的窗口，那一下的 JOIN 会石沉大海（公共 broker 不存离线消息），
+    //     用户看到的就是「明明显示已连接，却一直没进房」。
+    // ★ 必须去重：net 的 open 事件也会补发一帧 JOIN，两条路各自发就成了
+    //   「进房 → 被服务端请出去 → 再进房」，入口页会在眼前闪一下再打开。
     var t = setInterval(function () {
-      if (net.isOpen()) {
-        clearInterval(t);
-        joinRoom(p.roomId, name, getRoomPass(p.roomId));
-      }
+      // ★ 只看 pendingLinkJoin，不看 joined：测试/用户可能刚从上一个房间退出来，
+      //   leaveRoom 是异步的，这一瞬间 joined 还是 true —— 拿它当「已经进房」的判据
+      //   会让定时器立刻退出，然后干等下一次 open 事件，进房白白慢半拍。
+      //   ROOM_JOINED（成功）和 ERROR（失败）都会把它清空，所以它是唯一准确的信号。
+      if (!S.pendingLinkJoin) { clearInterval(t); return; }
+      if (!net.isOpen()) return;
+      joinRoomDebounced(p.roomId, name, getRoomPass(p.roomId));
     }, 200);
-    setTimeout(function () { clearInterval(t); }, 45000);
+    setTimeout(function () { clearInterval(t); }, 60000);
     return true;
+  }
+
+  /**
+   * 进房请求的节流版：1.8 秒内只发一次。
+   *
+   * 点链接进房有两条触发路径 —— 这里的轮询，和 net 的 open 事件（连接刚通时补发）。
+   * 两条都发的话，服务端会「先把你请出去再拉进来」（ROOM_JOIN 内部是 leave + join），
+   * 界面表现为入口页闪一下又弹回来。服务端是幂等的，但重复本身没有意义。
+   */
+  function joinRoomDebounced(roomId, name, password) {
+    var now = Date.now();
+    if (now - (S.lastJoinAt || 0) < 1800) return;
+    S.lastJoinAt = now;
+    joinRoom(roomId, name, password);
   }
 
   /** 入口页那一行：按钮 / 回车 / 粘贴都走这里 */
@@ -7526,7 +7551,8 @@
   /** 公网入口是哪种通道 —— 状态栏/房间信息共用一套说法，别一处写「直连」一处写「P2P」 */
   function tunnelKindText(url) {
     var u = String(url || '');
-    if (/^webrtc:\/\//i.test(u)) return 'P2P 直连（点对点；两边网络打不通时会连不上）';
+    if (/^webrtc:\/\//i.test(u)) return 'P2P 直连（点对点；两边网络打不通时自动改走公共中继）';
+    if (/^relay:\/\//i.test(u)) return '公共中继（免服务器，跨 WiFi 也能连；延迟略高）';
     var m = /^(wss?):\/\/([^\/]+)/i.exec(u);
     if (m) return '中继 · ' + m[2] + '（数据经中继转发，跨网更稳）';
     if (/^https?:\/\//i.test(u)) return '隧道 · ' + u.replace(/^https?:\/\//i, '');
@@ -7778,9 +7804,10 @@
       // 浏览器不认这个协议，所以网页端进不来 —— 这不是故障，得有人托管网页。
       (!L.http
         ? '<div class="kv"><label>网页端</label><div class="hint">' +
-          '浏览器打不开 chahui:// 链接。要让朋友用浏览器进来，需要一台托管网页的机器：' +
-          '任意一台电脑开着茶绘桌面版就行（它内置服务器会同时给出局域网 / 公网页面地址），' +
-          '或者用你自己的公网服务器。装了茶绘的电脑 / 手机点上面的应用链接则可以直接进房。' +
+          '浏览器打不开 chahui:// 链接 —— 网页端需要一个页面地址。最省事的是任意一台电脑开着茶绘桌面版' +
+          '（内置服务器会给出局域网 / 公网页面地址），或者用你自己的公网服务器。' +
+          '而装了茶绘的电脑 / 手机点上面的应用链接可以直接进房：同一个 WiFi 走局域网直连，' +
+          '各自在家（不同 WiFi、手机流量）打不通直连时会自动改走公共中继，一样能一起画。' +
           '</div></div>'
         : '') +
       '<div class="info-actions">' +
@@ -14387,7 +14414,7 @@
         // 点链接进来的：通道刚通就把那条 JOIN 补上（P2P 慢的时候轮询窗口可能已经过了）
         var pl = S.pendingLinkJoin;
         setStatus('已连上房主，正在进入「' + pl.roomId + '」…');
-        joinRoom(pl.roomId, pl.name, getRoomPass(pl.roomId));
+        joinRoomDebounced(pl.roomId, pl.name, getRoomPass(pl.roomId));
       }
       // 每次连上（含重连）都问一次：隧道可能是中途才开的
       probePublicUrl();
@@ -14396,6 +14423,13 @@
     });
     net.on('message', handleMessage);
     net.on('retry', function (e) { setStatus('连接中断，' + Math.round(e.delay / 1000) + 's 后重试…'); });
+    // P2P 打洞失败（跨 WiFi / 手机流量这些对称 NAT 场景）→ 网络层自动改走公共中继。
+    // 用户看不见中间那 20 秒，所以要主动解释一句：不是出错，是换了条更稳的路。
+    net.on('fallback', function (e) {
+      setStatus('两边网络直连打不通，已自动改用公共中继…');
+      toast('直连打不通（跨 WiFi / 手机流量常见），已自动切到公共中继 —— 一样能画，延迟略高', 'warn', 6200);
+      if (e && e.to) setStatus('已切换到公共中继 · ' + e.to);
+    });
 
     // 头像和昵称一样是「我是谁」的一部分：本地存着，启动就带回来
     S.me.avatar = Cfg.getAvatar ? (Cfg.getAvatar() || '') : '';
