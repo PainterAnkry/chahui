@@ -30,12 +30,9 @@
 | `chahui-linux-<版本>-amd64.deb` | Debian/Ubuntu x64 | 安装版：双击用软件安装器打开，或 `sudo dpkg -i <文件>` |
 | `chahui-linux-<版本>-x64.tar.gz` | Linux x64 | 绿色版：解压后运行 `./茶绘-绿色版-<版本>/chahui-desktop`（先 `chmod +x`） |
 | `chahui-android-<版本>.apk` | Android 7.0+ | 安卓版，下载后直接安装 |
-| `chahui-linux-<版本>-x86_64.AppImage` | Linux x64 | 通用版：`chmod +x` 后双击即用，无需安装 |
-| `chahui-linux-<版本>-amd64.deb` | Debian/Ubuntu x64 | 安装版：双击用软件安装器打开，或 `sudo dpkg -i <文件>` |
-| `chahui-linux-<版本>-x64.tar.gz` | Linux x64 | 绿色版：解压后运行 `./茶绘-绿色版-<版本>/chahui-desktop`（先 `chmod +x`） |
 | `chahui-server-<版本>.tar.gz` | Linux | 自建服务端（解压覆盖 `server/` 即可） |
 
-> **v2.1.8 只提供 Windows 与安卓包**（Linux 桌面版与服务端包沿用 [v2.1.5](https://github.com/PainterAnkry/chahui/releases/tag/v2.1.5) 的产物）。
+> **v2.1.9 只提供 Windows 与安卓包**（Linux 桌面版与服务端包沿用 [v2.1.5](https://github.com/PainterAnkry/chahui/releases/tag/v2.1.5) 的产物）。
 
 - 桌面端升级：「其他 → 关于 → 检查更新」会自己认出该下哪个包并直接下载
 - 首次运行弹 SmartScreen 是未签名 exe 的正常提示，点「更多信息 → 仍要运行」即可
@@ -188,7 +185,7 @@ Grab a ready-made build from **[Releases](https://github.com/PainterAnkry/chahui
 | `chahui-android-<version>.apk` | Android 7.0+ | Android build, install directly |
 | `chahui-server-<version>.tar.gz` | Linux | Self-hosted server (unzip over `server/`) |
 
-> **v2.1.8 ships Windows and Android only.** The Linux desktop and server packages come from [v2.1.5](https://github.com/PainterAnkry/chahui/releases/tag/v2.1.5).
+> **v2.1.9 ships Windows and Android only.** The Linux desktop and server packages come from [v2.1.5](https://github.com/PainterAnkry/chahui/releases/tag/v2.1.5).
 
 - Desktop updates: **Other → About → Check for updates** picks the right package and downloads it for you
 - SmartScreen warns on first run because the exe is unsigned — click "More info → Run anyway"
