@@ -4749,13 +4749,17 @@
       net.connect(server);
     }
     toast('正在进入房间 ' + p.roomId + ' …');
+    // ★ 把「要进哪间房」记在状态里，别只靠下面的轮询：
+    //   P2P 要等信令 + 打洞，几十秒是常事；轮询窗口一过就再没人发 ROOM_JOIN 了，
+    //   表现是「正在进入房间…」之后什么也没发生。net 的 open 事件会来兜这一手。
+    S.pendingLinkJoin = { roomId: p.roomId, name: name };
     var t = setInterval(function () {
       if (net.isOpen()) {
         clearInterval(t);
         joinRoom(p.roomId, name, getRoomPass(p.roomId));
       }
     }, 200);
-    setTimeout(function () { clearInterval(t); }, 12000);
+    setTimeout(function () { clearInterval(t); }, 45000);
     return true;
   }
 
@@ -5058,6 +5062,16 @@
   function applyServer(url) {
     var u = Cfg.normalize(url);
     if (!u) return;
+    if (u === net.url) { renderServerHint(); return; }
+    // ★ 换服务器 = 换一份房间存储。人还挂在旧房间的界面上，界面就成了「幽灵房间」：
+    //   看起来还在房里，其实新服务器上根本没有这间，分享出去的链接朋友一点就是
+    //   「房间不存在或已关闭」（2.1.9 修）。所以先正经退房，再换通道。
+    if (S.joined) {
+      try { net.send(P.C2S.ROOM_LEAVE, {}, { dropIfClosed: true }); } catch (e) { /* 通道已经断了 */ }
+      resetRoomUi('');
+      openEntry(true);
+      toast('已退出原来的房间，正在切换到 ' + u, 'ok', 3200);
+    }
     Cfg.remember(u);
     if (net.url !== u) net.connect(u);
     renderServerHint();
@@ -6337,6 +6351,8 @@
 
       case P.S2C.ROOM_JOINED: {
         S.room = msg.room;
+        S.rejoinPending = false;
+        S.pendingLinkJoin = null;
         S.me.userId = msg.you.userId;
         S.me.name = msg.you.name;
         S.me.color = msg.you.color;
@@ -6640,6 +6656,24 @@
         break;
 
       case P.S2C.ERROR:
+        // ★ 自动重连回房时服务器说「没这间房」：换过服务器 / 房间被清 / 服务端重启都会这样。
+        //   必须把界面收回大厅 —— 停在「看起来还在房里」的状态，一按分享就是一个死链接，
+        //   朋友点进去只会看到「房间不存在或已关闭」（这条是 2.1.9 修的安卓公网联机主要症结之一）。
+        if (msg.code === 'no_room' && S.rejoinPending && S.room) {
+          var goneName = S.room.name || S.room.id;
+          S.rejoinPending = false;
+          resetRoomUi('这台服务器上没有「' + goneName + '」了 —— 可能刚换过服务器，或房间已被清理。请重新建房，或从房间列表里进');
+          openEntry(true);
+          break;
+        }
+        // 点链接进房被拒（房间不在 / 满了）：别留着一个「待进房」的记录反复重试
+        if (msg.code === 'no_room' && S.pendingLinkJoin) {
+          S.pendingLinkJoin = null;
+          toast('房间不存在或已关闭 —— 房主那边已经没有这间房了。让他重新分享一次（他若重启过应用或换过服务器，旧链接就失效了）', 'err', 6500);
+          setStatus('房间不存在或已关闭');
+          openEntry(true);
+          break;
+        }
         // 密码错了：把密码框弹回来重输（记住的密码也不对就顺手清掉）
         if (msg.code === 'bad_password' && S.pendingJoin) {
           var pj = S.pendingJoin;
@@ -7489,10 +7523,23 @@
     return '';
   }
 
+  /** 公网入口是哪种通道 —— 状态栏/房间信息共用一套说法，别一处写「直连」一处写「P2P」 */
+  function tunnelKindText(url) {
+    var u = String(url || '');
+    if (/^webrtc:\/\//i.test(u)) return 'P2P 直连（点对点；两边网络打不通时会连不上）';
+    var m = /^(wss?):\/\/([^\/]+)/i.exec(u);
+    if (m) return '中继 · ' + m[2] + '（数据经中继转发，跨网更稳）';
+    if (/^https?:\/\//i.test(u)) return '隧道 · ' + u.replace(/^https?:\/\//i, '');
+    return u;
+  }
+
   function startTunnel() {
     var d = setupTunnelBridge();
     if (!d) { toast('公网联机只在桌面端有', 'err'); return; }
     if (S.tunnel && S.tunnel.phase !== 'off') return;      // 正在下 / 正在起，别重复点
+    // 没进房间也能先把入口开起来（桌面端习惯：先开隧道，再进房分享）。
+    // 但一定要说清楚：这一层服务的是「房间」，没有房间就没有可分享的东西。
+    if (!S.room) toast('公网入口开好了，但你还没进房间 —— 先进房再点「分享」才有链接', 'warn', 4200);
     S.tunnel = { phase: 'starting', url: '', error: '', percent: 0 };
     refreshTunnelUi();
     // 安卓主路径是 WebRTC P2P（零服务器依赖，见 webrtc-host.js）；失败自动回落中继。
@@ -7561,7 +7608,7 @@
     if (S.publicUrl || t.phase === 'on') {
       btn.textContent = '关闭公网联机';
       st.className = 'srv-state on';
-      st.textContent = '已开启' + (S.publicUrl ? ' · ' + (/^webrtc:\/\//i.test(S.publicUrl) ? 'P2P 直连' : S.publicUrl) : '');
+      st.textContent = '已开启' + (S.publicUrl ? ' · ' + tunnelKindText(S.publicUrl) : '');
     } else if (t.phase === 'downloading' || t.phase === 'starting') {
       btn.disabled = true;
       btn.textContent = '请稍候…';
@@ -7597,7 +7644,7 @@
     var inner;
     if (S.publicUrl) {
       inner = '<code>' + esc(S.publicUrl) + '</code>' +
-        '<span class="hint">（联机通道地址，不是网页也不是房间号；跨端请用下面的「分享链接」）</span>' +
+        '<span class="hint">' + esc(tunnelKindText(S.publicUrl)) + '；跨端请用下面的「分享链接」</span>' +
         (d ? ' <button class="btn tiny ghost" id="btnTunnelOff">关闭公网联机</button>' : '');
     } else if (t.phase === 'downloading' || t.phase === 'starting') {
       inner = '<span class="hint">' + esc(tunnelStatusText()) + '</span>'
@@ -7709,7 +7756,8 @@
     $('#infoTitle').textContent = '房间信息';
     var r = S.room || {};
     // 没显式传链接就自己算一条（有页面就 http 链接，没有就退回 chahui:// 应用链接）
-    if (text === undefined || text === null) text = shareLinks().text;
+    var L = shareLinks();
+    if (text === undefined || text === null) text = L.text;
     $('#infoBody').innerHTML =
       '<div class="kv"><label>房间名</label><div>' + esc(r.name || '-') + '</div></div>' +
       '<div class="kv"><label>房间号</label><div><code>' + esc(r.id || '-') + '</code></div></div>' +
@@ -7726,6 +7774,15 @@
         : '') +
       '<div class="kv"><label>分享链接</label><div><code id="shareLinkText">' +
         esc(text || '-') + '</code></div></div>' +
+      // 手机当服务器（安卓离线 + P2P）时没有页面地址，只有 chahui:// 应用链接。
+      // 浏览器不认这个协议，所以网页端进不来 —— 这不是故障，得有人托管网页。
+      (!L.http
+        ? '<div class="kv"><label>网页端</label><div class="hint">' +
+          '浏览器打不开 chahui:// 链接。要让朋友用浏览器进来，需要一台托管网页的机器：' +
+          '任意一台电脑开着茶绘桌面版就行（它内置服务器会同时给出局域网 / 公网页面地址），' +
+          '或者用你自己的公网服务器。装了茶绘的电脑 / 手机点上面的应用链接则可以直接进房。' +
+          '</div></div>'
+        : '') +
       '<div class="info-actions">' +
       '<button class="btn tiny" id="btnInfoCopy">复制链接</button>' +
       '<button class="btn tiny" id="btnInfoLeave">离开房间</button>' +
@@ -14321,8 +14378,16 @@
       if (S.session) cancelLocalStroke();
       if (S.room && S.room.id && S.me.name) {
         setStatus('已重连，正在回到「' + S.room.name + '」…');
+        // ★ 重连回房是「自动的」，服务器说没这间房时必须自己收场（见 ERROR 的 no_room 分支）——
+        //   否则界面停在看起来还在房间的状态，一按分享就是个死链接。
+        S.rejoinPending = true;
         // 带密码的房间重连也要带密码 —— 本地记着上次输对的那个
         net.send(P.C2S.ROOM_JOIN, { roomId: S.room.id, user: S.me.name, password: getRoomPass(S.room.id) });
+      } else if (S.pendingLinkJoin && !S.joined) {
+        // 点链接进来的：通道刚通就把那条 JOIN 补上（P2P 慢的时候轮询窗口可能已经过了）
+        var pl = S.pendingLinkJoin;
+        setStatus('已连上房主，正在进入「' + pl.roomId + '」…');
+        joinRoom(pl.roomId, pl.name, getRoomPass(pl.roomId));
       }
       // 每次连上（含重连）都问一次：隧道可能是中途才开的
       probePublicUrl();

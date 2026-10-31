@@ -98,7 +98,15 @@
     // 聊天表情 / 色板 / 快捷笔刷：「发送 😀」「#fff（点一下就用它）」「铅笔（点一下就换，长按弹笔刷库）」
     [/^发送 (.+)$/, 'Send $1', '「$1」を送信'],
     [/^(#[0-9a-fA-F]{3,8})（点一下就用它）$/, '$1 (click to use)', '$1（クリックで使用）'],
-    [/^(.+)（点一下就换，长按弹笔刷库）$/, '$1 (tap to switch, long-press for the brush library)', '$1（タップで切替、長押しでブラシ一覧）']
+    [/^(.+)（点一下就换，长按弹笔刷库）$/, '$1 (tap to switch, long-press for the brush library)', '$1（タップで切替、長押しでブラシ一覧）'],
+    // 2.1.9 联机相关（都是运行时拼出来的，批量字典抓不到）
+    [/^已退出原来的房间，正在切换到 (.+)$/, 'Left the previous room, switching to $1', '元のルームを退出しました。$1 に切り替え中'],
+    [/^这台服务器上没有「(.+)」了 —— 可能刚换过服务器，或房间已被清理。请重新建房，或从房间列表里进$/,
+      'This server no longer has “$1” — the server may have changed or the room was cleaned up. Create a new room, or pick one from the list',
+      'このサーバーに「$1」はありません —— サーバーを変えたか、ルームが削除された可能性があります。新しく作るか、一覧から選んでください'],
+    [/^已连上房主，正在进入「(.+)」…$/, 'Connected to the host, entering “$1”…', 'ホストに接続しました。「$1」に入室中…'],
+    [/^中继 · (.+)（数据经中继转发，跨网更稳）$/, 'Relay · $1 (forwarded through the relay — steadier across networks)', 'リレー · $1（リレー経由で転送、ネットワークをまたぐと安定）'],
+    [/^隧道 · (.+)$/, 'Tunnel · $1', 'トンネル · $1']
   ];
 
   /** 键位名（只处理中文的那几个，字母/符号原样） */

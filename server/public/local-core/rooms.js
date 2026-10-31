@@ -805,7 +805,13 @@ class RoomStore {
     }
     const room = new Room(Object.assign({}, meta, { id }));
     this.rooms.set(id, room);
+    // ★ 新建房间**立刻落盘**，不等那 1.5 秒防抖。
+    //   安卓离线时房间跑在 WebView 里，存档还要再过一层 IndexedDB 防抖：
+    //   两个防抖叠起来有 2~3 秒窗口，房主建完房就去发链接、切到聊天软件，
+    //   系统把 WebView 杀掉，房间就凭空消失了 —— 朋友点链接只会看到
+    //   「房间不存在或已关闭」。一次同步写换掉这个窗口，代价只在建房这一下。
     this.markDirty(room);
+    try { this.save(room); } catch (e) { /* 写不进去就让防抖再试一次 */ }
     return room;
   }
 

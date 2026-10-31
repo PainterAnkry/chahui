@@ -25,6 +25,32 @@
     ],
     '还没有公开房间': ['No public rooms yet', '公開ルームはまだありません'],
     '右侧创建一个吧': ['Create one on the right', '右側で作成しましょう'],
+    // 2.1.9 联机：失败提示 / 通道说明
+    '公网入口开好了，但你还没进房间 —— 先进房再点「分享」才有链接': [
+      'Public entry is ready, but you are not in a room yet — enter one, then hit Share to get a link',
+      '公開エントリは準備できましたが、まだルームに入っていません —— 入室してから「共有」でリンクを取得してください'
+    ],
+    '房间不存在或已关闭 —— 房主那边已经没有这间房了。让他重新分享一次（他若重启过应用或换过服务器，旧链接就失效了）': [
+      'Room not found or closed — the host no longer has this room. Ask them to share again (an old link dies if they restarted the app or changed servers)',
+      'ルームが存在しないか閉じられています —— ホスト側にもうこのルームはありません。もう一度共有してもらってください（アプリ再起動やサーバー変更で古いリンクは無効になります）'
+    ],
+    'P2P 直连（点对点；两边网络打不通时会连不上）': [
+      'P2P direct (peer-to-peer; will fail if the two networks cannot reach each other)',
+      'P2P 直結（端末同士。ネットワークが繋がらないと接続できません）'
+    ],
+    'P2P 连接超时 —— 房主可能不在线，或双方网络无法直连（手机流量常见）。让房主换个网络重开，或改用一台公网服务器/中继': [
+      'P2P timed out — the host may be offline, or the two networks cannot connect directly (common on mobile data). Ask the host to switch networks, or use a public server/relay',
+      'P2P タイムアウト —— ホストが不在か、双方のネットワークが直接繋がりません（モバイル回線でよくあります）。ホストに回線を変えてもらうか、公開サーバー／リレーを使ってください'
+    ],
+    '连不上 P2P 信令服务器 —— 换一条通道（公网服务器 / 中继）会更稳': [
+      'Cannot reach the P2P signalling server — a public server or relay will be more reliable',
+      'P2P シグナリングサーバーに繋がりません —— 公開サーバーやリレーを使うと安定します'
+    ],
+    '网页端': ['Web', 'Web'],
+    '浏览器打不开 chahui:// 链接。要让朋友用浏览器进来，需要一台托管网页的机器：任意一台电脑开着茶绘桌面版就行（它内置服务器会同时给出局域网 / 公网页面地址），或者用你自己的公网服务器。装了茶绘的电脑 / 手机点上面的应用链接则可以直接进房。': [
+      'A browser cannot open a chahui:// link. To let a friend join from a browser, you need a machine hosting the web page: just leave the desktop app running on any computer (its built-in server gives you both a LAN and a public page address), or use your own public server. Computers and phones with Chahui installed can join directly through the app link above.',
+      'ブラウザは chahui:// リンクを開けません。ブラウザから参加してもらうには、Web ページを配信するマシンが必要です：どれか 1 台で茶絵デスクトップ版を起動しておけば（内蔵サーバーが LAN／公開のページアドレスを提示します）、あるいはご自身の公開サーバーを使ってください。茶絵が入っている PC・スマホなら上のアプリリンクから直接入室できます。'
+    ],
     '拖动小节标题排序，也能拖到右栏': [
       'Drag a section title to reorder, or to the right panel',
       '見出しをドラッグで並べ替え、右パネルにも移動できます'

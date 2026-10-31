@@ -8,11 +8,19 @@ window.CHAHU_CONFIG = {
   // ★ 官方公共服务器已下线，这里**不再带默认值**：留空时安卓默认进离线模式
   //   （本机房间 + 公网联机 P2P），桌面端默认连本机内置服务器，网页版默认同源。
   publicServer: '',
+  // 安卓「公网联机」用的中继地址（可选）。填了以后，手机开公网联机优先走中继：
+  // 手机主动连出去的一条普通 WebSocket，只要这台服务器在，跨网就一定连得通，
+  // 不像 P2P 那样受对称 NAT 影响。留空则继续用 P2P（PeerJS 免费信令 + STUN）。
+  // 形如 'ws://1.2.3.4:8437/ws' 或 'chahui.example.com'（任何 2.1.1+ 服务端都能当中继）。
+  relayServer: '',
+  // 额外 ICE 服务器（TURN 打洞失败时用来转发，数据是 DTLS 加密的）。
+  // 例：[{ urls: 'turn:turn.example.com:3478', username: 'u', credential: 'p' }]
+  iceServers: [],
   localServer: 'ws://localhost:8437/ws',
   defaultName: '',
   appName: '茶绘',
   // 版本号：关于页显示 + 和 GitHub 的最新 release 比对
-  appVersion: '2.1.8',
+  appVersion: '2.1.9',
   // 开源仓库（更新检测用）
   repo: 'PainterAnkry/chahui'
 };

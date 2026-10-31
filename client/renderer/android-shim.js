@@ -176,6 +176,13 @@
       dirty.add(p);
       deleted.delete(p);
       if (!flushTimer && persist) flushTimer = setTimeout(flush, 1200);
+      // ★ room.json 是「这间房还在不在」的唯一凭证：一落地就尽快写进 IndexedDB，
+      //   别等那 1.2 秒防抖。安卓上「建完房 → 切到聊天软件发链接」很容易在这个窗口里
+      //   被系统杀掉 WebView，房间就凭空消失（朋友进房只会看到「房间不存在或已关闭」）。
+      if (persist && /\/room\.json$/.test(p)) {
+        if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+        flush();
+      }
     }
 
     function openDb() {
@@ -252,8 +259,7 @@
     }
 
     var fs = {
-      existsSync: function (p) {
-        p = pathm.normalize(p);
+      existsSync: function (p) {        p = pathm.normalize(p);
         return files.has(p) || !!dirs[p];
       },
       mkdirSync: function (p, _o) { mkdirp(p); },
@@ -792,12 +798,30 @@
     });
 
     var tunnelHost = createTunnelHost(core, LocalWs);
+
+    /** 当前房间号 —— 「现在在哪间房」只有渲染层知道；拿不到就返回空串（回落随机信令 id）。 */
+    function currentRoomId() {
+      try {
+        var st = global.ChaApp && global.ChaApp.state;
+        return (st && st.room && st.room.id) || '';
+      } catch (e) { return ''; }
+    }
+
     // WebRTC P2P 房主端（零服务器依赖）：安卓「公网联机」的主路径。
     // 信令只走 PeerJS 免费云握手一次，数据直达访客 —— 中继（任何 2.1.1+ 服务端）作为回落。
+    // 把 roomId 交进去：信令 id 跟着房间号走，手机被系统回收后重开，旧分享链接依然有效。
     var webrtcHost = (global.ChaWebRTC && global.ChaWebRTC.createHost)
-      ? global.ChaWebRTC.createHost({ boot: function () { return core.boot(); }, LocalWs: LocalWs })
+      ? global.ChaWebRTC.createHost({
+        boot: function () { return core.boot(); },
+        LocalWs: LocalWs,
+        roomId: currentRoomId
+      })
       : null;
-    CHAHU_CONFIG_REF = function () { return (global.CHAHU_CONFIG && global.CHAHU_CONFIG.publicServer) || ''; };
+    // 中继地址缺省值：优先 relayServer（专给中继用），退回 publicServer（自建服务器兼作中继）
+    CHAHU_CONFIG_REF = function () {
+      var c = global.CHAHU_CONFIG || {};
+      return c.relayServer || c.publicServer || '';
+    };
 
     /* ---------- 离线会话（与桌面端 client/main.js 的 localSession 同构） */
     var session = null;
@@ -843,6 +867,45 @@
           } catch (e) { /* 存不进就算了 */ }
           return { ok: true };
         });
+      },
+
+      /* ★ 2.1.9：应用链接（chahui://join?room=…&server=…）
+       *
+       * 桌面端早就支持「点分享链接直接进房」（2.0.10，preload 暴露 takeOpenLink /
+       * onOpenLink）。安卓这边一直缺这两个名字 —— 渲染层 app.js 的 boot() 判
+       * `chahuDesktop.takeOpenLink` 存在才去取链接，不存在就当没有链接直接开入口页，
+       * 所以手机上点别人发来的应用链接毫无反应（以前安卓只能手动粘链接）。
+       *
+       * 现在补上同名实现，渲染层那段代码原样复用，不用分平台写两套：
+       *   · 冷启动（进程没起来）→ App.getLaunchUrl()，URL 来自 BridgeActivity.onCreate
+       *     存下的 intent；没有 intent 时 resolve 空串，走正常的入口页。
+       *   · 热启动（已在后台）    → appUrlOpen 事件。MainActivity 是 singleTask，
+       *     新的 VIEW intent 走 onNewIntent → AppPlugin 派发，不会重开 Activity。
+       *
+       * 插件没装 / 老 WebView：静默降级成「没有链接」，不能让入口页卡死。 */
+      takeOpenLink: function () {
+        var App = CapPlugins.App;
+        if (!App || !App.getLaunchUrl) return Promise.resolve('');
+        return Promise.resolve()
+          .then(function () { return App.getLaunchUrl(); })
+          .then(function (r) { return (r && r.url) ? String(r.url) : ''; })
+          .catch(function () { return ''; });
+      },
+      onOpenLink: function (cb) {
+        var App = CapPlugins.App;
+        if (!App || !App.addListener || typeof cb !== 'function') return function () { /* 没得取消 */ };
+        var handle = null, dead = false;
+        try {
+          Promise.resolve(App.addListener('appUrlOpen', function (ev) {
+            if (dead || !ev || !ev.url) return;
+            try { cb(String(ev.url)); } catch (e) { /* 渲染层的问题不外抛 */ }
+          })).then(function (h) { handle = h; dead && h && h.remove && h.remove(); },
+            function () { /* 监听不上就算了，热启动这条路走不通而已 */ });
+        } catch (e) { /* ignore */ }
+        return function () {
+          dead = true;
+          try { if (handle && handle.remove) handle.remove(); } catch (e) { /* ignore */ }
+        };
       },
 
       /**
@@ -907,14 +970,27 @@
        * 分享链接拼成 页面地址/?room=<房间号>&server=<url 编码的访客端点>。 */
       startTunnel: function (relayAddr) {
         if (relayAddr) return tunnelHost.start(relayAddr);
+        // ★ 配了中继 → 先走中继。P2P 要靠打洞，手机流量 / 公司网这类对称 NAT 打不通，
+        //   用户看到的就是「安卓开房朋友进不来」。中继只是一条出站 WebSocket，稳得多；
+        //   中继不通再退回 P2P（没有中继可用的机器还是能直连）。
+        var relay = (global.CHAHU_CONFIG &&
+          (global.CHAHU_CONFIG.relayServer || global.CHAHU_CONFIG.publicServer)) || '';
+        if (relay) {
+          return tunnelHost.start(String(relay)).then(function (r) {
+            if (r && r.ok) return r;
+            if (!webrtcHost) return r;
+            return webrtcHost.start().then(function (rr) {
+              return (rr && rr.ok) ? rr : r;   // 两条都不通就把中继的真实原因报出去
+            });
+          });
+        }
         if (webrtcHost) {
           return webrtcHost.start().then(function (r) {
             if (r && r.ok) return r;
-            // P2P 不成（对称 NAT / 信令不通）→ 回落中继。官方公共服务器已下线，
-            // 没配 publicServer 时没有中继可用：把 P2P 的真实错误原样报出去，
-            // 别用「没有可用的中继服务器地址」盖掉真正的原因。
-            var relay = (global.CHAHU_CONFIG && global.CHAHU_CONFIG.publicServer) || '';
-            if (!relay) return r;
+            // P2P 不成（对称 NAT / 信令不通）→ 回落中继。没配中继时把 P2P 的真实错误
+            // 原样报出去，别用「没有可用的中继服务器地址」盖掉真正的原因。
+            var fallback = (global.CHAHU_CONFIG && global.CHAHU_CONFIG.publicServer) || '';
+            if (!fallback) return r;
             return tunnelHost.start('');
           });
         }

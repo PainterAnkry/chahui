@@ -19,6 +19,17 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- ★ 2.1.9：注册 chahui:// 应用链接。
+                 分享面板里那条「茶绘应用链接」就是这个形式；装了茶绘的安卓机点一下
+                 直接拉起本程序并进房（桌面端 2.0.10 起支持同一协议）。
+                 没有这一段，安卓收到的 chahui:// 只能被浏览器打开然后报「无法访问」。 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="chahui" />
+            </intent-filter>
         </activity>
 
         <provider

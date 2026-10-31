@@ -5,10 +5,11 @@
  *   3. 房间链接解析 / 分享链接生成（浏览器）
  *   4. 安卓默认服务器 /「无需开启」按钮（浏览器）
  *   5. 安卓建房 → Web 访客 P2P 进房（浏览器）
- *   6. 安卓建房 → Web + 桌面渲染层同房作画（真 Electron 需 CHAHU_ELECTRON=1）
+ *   6. 安卓应用链接（chahui://）→ 另一台安卓点链接直接进房（冷启动 + 热启动）
+ *   7. 安卓建房 → Web + 桌面渲染层同房作画（真 Electron 需 CHAHU_ELECTRON=1）
  *
  * 用法: node tools/test-android-all.js
- * 说明：需要本机 Chrome；第 6 项要真 Electron 时，先准备 .tmp-electron/electron.exe
+ * 说明：需要本机 Chrome；第 7 项要真 Electron 时，先准备 .tmp-electron/electron.exe
  *       （或 dist/win-unpacked），再设 CHAHU_ELECTRON=1。
  */
 'use strict';
@@ -64,6 +65,7 @@ function run(name, args, opts) {
   results.push(['房间链接 / 分享链接', await run('房间链接与分享链接', ['tools/test-room-link.js', 'http://127.0.0.1:' + PORT])]);
   results.push(['安卓默认服务器 / 无需开启按钮', await run('安卓默认服务器与公网联机按钮', ['tools/test-android-default.js', 'http://127.0.0.1:' + PORT])]);
   results.push(['安卓建房 → Web P2P', await run('安卓建房 → Web P2P', ['tools/test-webrtc-p2p.js', 'http://127.0.0.1:' + PORT, '9527'])]);
+  results.push(['安卓应用链接（chahui://）进房', await run('安卓应用链接进房', ['tools/test-android-deeplink.js', 'http://127.0.0.1:' + PORT, '9531'])]);
   results.push(['安卓建房 → Web + Windows 桌面', await run('安卓建房 → Web + Windows 桌面', ['tools/test-webrtc-desktop.js'])]);
 
   srv.kill();

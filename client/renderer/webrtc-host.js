@@ -22,13 +22,38 @@
    *  国内可达性优先（Google STUN 在国内时好时坏，放最后兜底）。 */
   var ICE_SERVERS = [
     { urls: ['stun:stun.miwifi.com:3478', 'stun:stun.cloudflare.com:3478'] },
+    { urls: ['stun:stun.qq.com:3478', 'stun:stun.chat.bilibili.com:3478'] },
     { urls: 'stun:stun.l.google.com:19302' }
   ];
+
+  /**
+   * 实际用的 ICE 列表 = 内置 STUN + 配置里补的 TURN。
+   *
+   * 为什么需要 TURN：手机流量 / 公司网大多是「对称 NAT」，双方都打洞打不通时
+   * 只能经一台 TURN 服务器转发（数据是 DTLS 加密的，TURN 只看到密文包）。
+   * 没有 TURN 时 P2P 在跨运营商场景下成功率会明显下降 —— 这是 P2P 方案的物理上限，
+   * 不是 bug。要稳定就配一台中继（服务端）或 TURN。
+   *
+   * 配置方式（client/renderer/config.js）：
+   *   CHAHU_CONFIG.iceServers = [
+   *     { urls: 'turn:turn.example.com:3478', username: 'u', credential: 'p' }
+   *   ]
+   */
+  function iceServers() {
+    var cfg = global.CHAHU_CONFIG || {};
+    var list = ICE_SERVERS.slice();
+    if (Array.isArray(cfg.iceServers)) {
+      cfg.iceServers.forEach(function (s) {
+        if (s && s.urls) list.push(s);
+      });
+    }
+    return list;
+  }
 
   /** PeerJS 免费信令云（握手完成后数据不经过它）。可被 CHAHU_CONFIG.signalServer 覆盖。 */
   function signalOpts() {
     var cfg = global.CHAHU_CONFIG || {};
-    var opts = { config: { iceServers: ICE_SERVERS }, debug: 1 };
+    var opts = { config: { iceServers: iceServers() }, debug: 1 };
     var sig = String(cfg.signalServer || '').trim();
     if (sig) {
       // 形如 'ws(s)://host[:port][/path]' 或 'host[:port]' —— PeerJS 自建信令
@@ -64,11 +89,29 @@
    * @param {Object} deps
    *   boot     () => Promise<serverLike>   拿到本机房间状态机（有 onClient 方法）
    *   LocalWs  (toClient) => wsLike        服务端侧的本地客户端构造器（同 android-shim 的 LocalWs）
+   *   roomId   () => string                可选：当前房间号。给了就让信令 id 跟着房间走
+   *                                        （见 stablePeerId），手机重开后旧链接还能用。
    */
   function createHost(deps) {
     var peer = null;
     var state = { phase: 'off', url: '', error: '' };
     var sink = null;
+
+    /**
+     * 信令 id = 房间号，而不是每次随机。
+     *
+     * 手机上的 WebView 很容易被系统回收（切去聊天软件发个链接就可能没了）。
+     * 以前 id 是随机的，重开应用 = 换地址，已经发出去的分享链接全部失效 ——
+     * 这正是「安卓开房，朋友明明拿到链接却进不来」的一大来源。
+     * 用房间号派生以后，房间还在（存档持久化已经保证了这点），地址就还在。
+     */
+    function stablePeerId() {
+      var rid = '';
+      try { rid = deps && deps.roomId ? String(deps.roomId() || '') : ''; } catch (e) { rid = ''; }
+      // PeerJS 的 id 只认字母数字和 - _ 空格；房间号形如 r_e1x8b7j94q，去掉分隔符即可
+      rid = rid.replace(/[^A-Za-z0-9]/g, '');
+      return rid ? ('chahui-' + rid) : ('chahui-' + randId(12));
+    }
 
     function push(s) {
       state = { phase: s.phase || 'off', url: s.url || '', error: s.error || '' };
@@ -101,6 +144,9 @@
       conn.on('error', function () { /* close 会跟着来 */ });
     }
 
+    /** 同一个 peer id 在重试之间保持不变：入口地址是分享出去过的，能不变就不变 */
+    var peerId = '';
+
     function start() {
       if (peer) return Promise.resolve({ ok: true, reused: true });
       if (!global.Peer) {
@@ -108,19 +154,29 @@
         return Promise.resolve({ ok: false, error: state.error });
       }
       push({ phase: 'starting', url: '', error: '' });
+      peerId = peerId || stablePeerId();
+      return attempt(1);
+    }
+
+    /**
+     * 挂一条信令连接。PeerJS 免费云在弱网下偶尔会「连上又掉」——
+     * 之前一次失败就直接报错，用户看到的是「公网联机失败」但再点一次又好了。
+     * 现在同一轮启动内自动重试（最多 3 次，间隔递增），id 保持不变。
+     */
+    function attempt(n) {
       return new Promise(function (resolve) {
         var settled = false;
-        var id = 'chahui-' + randId(12);
         var timer = setTimeout(function () {
           if (settled) return;
           settled = true;
           try { peer.destroy(); } catch (e) { /* ignore */ }
           peer = null;
-          push({ phase: 'off', url: '', error: 'P2P 信令超时（网络受限？）' });
+          if (n < 3) { setTimeout(function () { attempt(n + 1).then(resolve); }, 600 * n); return; }
+          push({ phase: 'off', url: '', error: 'P2P 信令超时（网络受限？试试连一台公网服务器）' });
           resolve({ ok: false, error: state.error });
         }, 20000);
         try {
-          peer = new global.Peer(id, signalOpts());
+          peer = new global.Peer(peerId, signalOpts());
         } catch (e) {
           clearTimeout(timer);
           settled = true;
@@ -132,6 +188,7 @@
         peer.on('open', function (myId) {
           clearTimeout(timer);
           settled = true;
+          peerId = myId;
           var url = 'webrtc://' + myId;
           push({ phase: 'on', url: url, error: '' });
           resolve({ ok: true, url: url });
@@ -147,6 +204,22 @@
             settled = true;
             try { peer.destroy(); } catch (e) { /* ignore */ }
             peer = null;
+            // id 撞了 / 信令网络抖一下：换一个 id 或稍等再试，别第一次失败就判死
+            var type = String((err && err.type) || '');
+            var retriable = /network|server-error|socket-error|socket-closed|unavailable-id|ssl/i.test(type);
+            if (retriable && n < 3) {
+              var wait = 700 * n;
+              if (type === 'unavailable-id') {
+                // 这个 id 还挂在信令上（上次的连接没退干净 —— 手机刚被系统清掉后重开
+                // 就是这种情况）。先等一会儿用**同一个 id** 再试，尽量保住已经分享
+                // 出去的地址；到第三轮还撞才换成随机 id（旧链接作废，但新链接能用）。
+                wait = 1600 * n;
+                if (n >= 2) peerId = 'chahui-' + randId(12);
+              }
+              push({ phase: 'starting', url: '', error: errText(err) });
+              setTimeout(function () { attempt(n + 1).then(resolve); }, wait);
+              return;
+            }
             push({ phase: 'off', url: '', error: errText(err) });
             resolve({ ok: false, error: state.error });
             return;
@@ -165,6 +238,8 @@
         try { peer.destroy(); } catch (e) { /* ignore */ }
         peer = null;
       }
+      // 下次开的是不是同一间房还不知道 —— 让 start() 按当时的房间号重算（换房就换地址）
+      peerId = '';
       push({ phase: 'off', url: '', error: '' });
       return Promise.resolve({ ok: true });
     }

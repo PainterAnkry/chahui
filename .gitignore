@@ -7,6 +7,8 @@ dist/
 client/dist/
 *.exe
 *.exe.blockmap
+# electron 二进制下载缓存（打包时用 ELECTRON_CACHE 指到这里，免得写 AppData 被权限挡住）
+.cache-electron/
 
 # 运行期数据（房间存档不进版本库）
 server/data/

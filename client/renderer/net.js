@@ -109,21 +109,35 @@
     this.emit(msg.t, msg);
   };
 
-  Net.prototype.connect = function (url) {
-    if (url) this.url = url;
-    if (!this.url) return;
-    if (isLocalUrl(this.url)) return this.connectLocal();
-    if (isWebRtcUrl(this.url)) return this.connectWebRTC();
+  /**
+   * 离开本机通道（离线模式）：摘监听 + 收掉主进程/壳里的那份会话。
+   *
+   * ★ 切到**任何一条**网络通道前都要先做这一步。以前只有 ws 那条岔路做了，
+   *   webrtc:// 分支直接 `return this.connectWebRTC()` —— local 还是 true，
+   *   send() 继续把消息喂给本机那份**空**服务器，于是「明明已经连上房主，
+   *   却一直报房间不存在」。安卓默认落在 local://，点分享链接或粘 P2P 地址
+   *   进别人房间正好走这条岔路，这就是「安卓加不进去房间」的一大来源。
+   */
+  Net.prototype.leaveLocalChannel = function () {
     var wasLocal = this.local;
     this.local = false;
     this.localReady = false;
     if (this._localOff) { try { this._localOff(); } catch (e) { /* ignore */ } this._localOff = null; }
-    // 离开本机通道时把主进程那份会话也收掉。只摘监听不够 —— 会话还留在
-    // 本地房间里当一个「幽灵客户端」，既占着房间又让成员列表多出一个空位。
+    // 只摘监听不够 —— 会话还留在本地房间里当一个「幽灵客户端」，
+    // 既占着房间又让成员列表多出一个空位。
     if (wasLocal) {
       var DL = global.chahuDesktop;
       if (DL && DL.localClose) { try { DL.localClose(); } catch (e) { /* ignore */ } }
     }
+  };
+
+  Net.prototype.connect = function (url) {
+    if (url) this.url = url;
+    if (!this.url) return;
+    if (isLocalUrl(this.url)) return this.connectLocal();
+    // P2P 也要先把本机通道拆干净，理由见 leaveLocalChannel
+    if (isWebRtcUrl(this.url)) { this.leaveLocalChannel(); return this.connectWebRTC(); }
+    this.leaveLocalChannel();
     this.connectWs();
   };
 
@@ -156,7 +170,12 @@
     }
 
     D.localOpen().then(function (r) {
-      if (self.manualClose || !self.local) return;
+      if (self.manualClose || !self.local) {
+        // 等这份会话起来的这几十毫秒里已经切到别的通道了 —— 把刚建起来的
+        // 本机会话收掉，别在本地房间里留一个占位的「幽灵客户端」。
+        try { if (D.localClose) D.localClose(); } catch (e) { /* ignore */ }
+        return;
+      }
       if (!r || !r.ok) {
         self.setStatus('offline', { message: (r && r.error) || '离线模式没起来' });
         return;
@@ -276,9 +295,11 @@
     var timer = setTimeout(function () {
       if (settled) return;
       settled = true;
-      self.setStatus('offline', { message: 'P2P 连接超时 —— 房主可能不在线，或双方网络无法直连' });
+      // 超时的两种可能要说清楚：房主不在/入口失效，或者两边网络打不通（对称 NAT 没 TURN）。
+      // 以前只写「房主可能不在线」，跨运营商失败的人永远不知道该换一条通道。
+      self.setStatus('offline', { message: 'P2P 连接超时 —— 房主可能不在线，或双方网络无法直连（手机流量常见）。让房主换个网络重开，或改用一台公网服务器/中继' });
       self.scheduleRetry();
-    }, 25000);
+    }, 30000);
 
     peer.on('open', function () {
       if (self._rtc !== peer) return;
@@ -302,6 +323,13 @@
         clearInterval(self.pingTimer);
         self.setStatus('offline', { message: '房主不在线或入口已失效（P2P）' });
         return;
+      }
+      // 信令本身连不上（PeerJS 云被墙 / 弱网）：这条要单独说，
+      // 否则用户只看到「连接超时」，会以为是房主的问题
+      if (type === 'network' || type === 'server-error' || type === 'socket-error' || type === 'socket-closed') {
+        self.setStatus('offline', {
+          message: '连不上 P2P 信令服务器 —— 换一条通道（公网服务器 / 中继）会更稳'
+        });
       }
       self.emit('neterror', { url: self.url, error: type });
     });
