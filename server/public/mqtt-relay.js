@@ -111,6 +111,7 @@
           settled = true;
           clearTimeout(timer);
           rememberBroker(url);
+          try { cli.__url = url; } catch (e) { /* ignore */ }
           // 连上以后把重连交给库（掉线自动回来，比我们自己轮询稳）——
           // 访客端例外：那边交给 net.js 统一重连。
           if (!noAuto) { try { cli.options.reconnectPeriod = 3000; } catch (e) { /* 个别版本只读 */ } }
@@ -129,6 +130,50 @@
     });
   }
 
+  /**
+   * 连**指定的**那一台 broker（不按顺序挑）。房主端拿它去把其余几台也挂上，
+   * 见 createHost 里「多台并听」的说明。参数与 connectBroker 保持一致。
+   */
+  function connectTo(url, opts) {
+    var noAuto = !!(opts && opts.noAutoReconnect);
+    return new Promise(function (resolve, reject) {
+      if (!hasLib()) return reject(new Error('缺少 MQTT 组件（vendor/mqtt.min.js 没加载）'));
+      var settled = false;
+      var cli;
+      try {
+        cli = global.mqtt.connect(url, {
+          clientId: 'chahui_' + randomId(14),
+          clean: true,
+          connectTimeout: 9000,
+          keepalive: 45,
+          reconnectPeriod: 0,
+          protocolVersion: 4
+        });
+      } catch (e) { return reject(e); }
+      var timer = setTimeout(function () {
+        if (settled) return;
+        settled = true;
+        try { cli.end(true); } catch (e) { /* ignore */ }
+        reject(new Error('连接超时：' + url));
+      }, 12000);
+      cli.on('connect', function () {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { cli.__url = url; } catch (e) { /* ignore */ }
+        if (!noAuto) { try { cli.options.reconnectPeriod = 3000; } catch (e) { /* ignore */ } }
+        resolve(cli);
+      });
+      cli.on('error', function (e) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { cli.end(true); } catch (err) { /* ignore */ }
+        reject(e || new Error('连接失败：' + url));
+      });
+    });
+  }
+
   /* ------------------------------------------------------------ 房主端 */
 
   /**
@@ -143,9 +188,9 @@
   function createHost(deps) {
     var state = { phase: 'off', url: '', error: '' };
     var sink = null;
-    var cli = null;
+    var clis = [];        // 已连上的 broker 连接（可以有多台，见 start 的说明）
     var key = '';
-    var guests = {};      // sid -> { ws, ready, out }
+    var guests = {};      // sid -> { ws, ready, out, in, mq }
     var seen = {};        // sid -> 收到的最大序号
     var seq = Date.now();
     var wantOn = false;
@@ -159,14 +204,27 @@
     function topicIn() { return PREFIX + key + '/h'; }
     function topicOut(sid) { return PREFIX + key + '/g/' + sid; }
 
-    function publish(to, payload) {
-      if (!cli || !cli.connected) return;
-      try { cli.publish(to, payload, { qos: 1 }); } catch (e) { /* 通道正在死 */ }
+    /**
+     * 挑一台能用的连接发。
+     * 优先「这个访客是从哪台 broker 进来的」——访客只听自己那台，发到别台等于发进海里。
+     * 访客那台断了才退而求其次（此时这条消息本来也到不了，不额外报错）。
+     */
+    function liveCli(prefer) {
+      if (prefer && prefer.connected) return prefer;
+      for (var i = 0; i < clis.length; i++) { if (clis[i].connected) return clis[i]; }
+      return null;
+    }
+
+    function publish(to, payload, prefer) {
+      var c = liveCli(prefer);
+      if (!c) return;
+      try { c.publish(to, payload, { qos: 1 }); } catch (e) { /* 通道正在死 */ }
     }
 
     function publishTo(sid, raw) {
       seq += 1;
-      publish(topicOut(sid), JSON.stringify({ f: 'h', s: seq, d: String(raw) }));
+      var g = guests[sid];
+      publish(topicOut(sid), JSON.stringify({ f: 'h', s: seq, d: String(raw) }), g && g.mq);
     }
 
     /** 拿到（必要时新建）某个访客的本地客户端 */
@@ -177,7 +235,7 @@
       // 但服务端还没接上时的缓冲。**两侧都要缓冲** —— 只缓冲出站的话，
       // 访客的 JOIN 会赶在 onClient 之前到，LocalWs.feed 发出去无人接收，
       // 表现是「中继明明连上了却一直进不了房」（no_room）。
-      g = { ws: null, ready: false, out: [], in: [] };
+      g = { ws: null, ready: false, out: [], in: [], mq: null };
       g.ws = new deps.LocalWs(function (raw) {
         if (!g.ready) { if (g.out.length < 400) g.out.push(raw); return; }
         publishTo(sid, raw);
@@ -197,9 +255,10 @@
       return g;
     }
 
-    /** 把一帧喂给某个访客；服务端还没接好就先攒着 */
-    function feedGuest(sid, d) {
+    /** 把一帧喂给某个访客；服务端还没接好就先攒着。fromCli = 这帧是从哪台 broker 收到的 */
+    function feedGuest(sid, d, fromCli) {
       var g = guestFor(sid);
+      if (fromCli) g.mq = fromCli;
       if (!g.ready) { if (g.in.length < 400) g.in.push(d); return; }
       g.ws.feed(d);
     }
@@ -211,7 +270,7 @@
       try { g.ws.close(); } catch (e) { /* 已经死了 */ }
     }
 
-    function onPayload(buf) {
+    function onPayload(buf, fromCli) {
       var msg;
       try { msg = JSON.parse(buf.toString()); } catch (e) { return; }
       if (!msg || typeof msg.d !== 'string') return;
@@ -221,15 +280,38 @@
       // 否则房主这边还挂着一个已经断掉的 LocalWs，消息全被黑洞吃掉。
       if (msg.r) { dropGuest(sid); seen[sid] = 0; }
       var s = Number(msg.s) || 0;
-      if (s && s <= (seen[sid] || 0)) return;   // QoS1 重投，丢掉
+      // 多台 broker 并听时，同一帧理论上只会从访客那台来一次；QoS1 仍可能重投，按序号丢掉。
+      if (s && s <= (seen[sid] || 0)) return;
       if (s) seen[sid] = s;
       if (!msg.d) return;                       // 纯控制帧（重连握手），没有数据可喂
-      feedGuest(sid, msg.d);
+      // fromCli 会记到这个访客头上：房主回话必须发回同一台 broker，
+      // 否则访客（只听自己那台）收不到。
+      feedGuest(sid, msg.d, fromCli);
+    }
+
+    /**
+     * 把一条已连上的连接挂上订阅，之后它收到的帧都进 onPayload。
+     * 首次和每次重连都要重订阅（clean session 下重连会丢订阅）。
+     */
+    function attach(cli, rid) {
+      if (clis.indexOf(cli) < 0) clis.push(cli);
+      function resub() {
+        try { cli.subscribe(topicIn(), { qos: 1 }); } catch (e) { /* ignore */ }
+        push({ phase: 'on', url: 'relay://' + rid, error: '' });
+      }
+      cli.on('connect', resub);
+      cli.on('message', function (t, buf) { if (t === topicIn()) onPayload(buf, cli); });
+      cli.on('close', function () {
+        if (!wantOn) return;
+        // 只要还有别台活着就不必惊动用户 —— 多台并听的意义就在这里
+        var alive = clis.some(function (c) { return c.connected; });
+        if (!alive) push({ phase: 'starting', url: '', error: '公共中继断线，正在重连…' });
+      });
     }
 
     function start() {
       if (starting) return Promise.resolve({ ok: false, error: '正在启动' });
-      if (cli && cli.connected && state.phase === 'on') return Promise.resolve({ ok: true, reused: true });
+      if (liveCli(null) && state.phase === 'on') return Promise.resolve({ ok: true, reused: true });
       var rid = '';
       try { rid = String((deps.roomId && deps.roomId()) || ''); } catch (e) { rid = ''; }
       key = roomKey(rid);
@@ -243,20 +325,30 @@
       return connectBroker().then(function (c) {
         starting = false;
         if (!wantOn) { try { c.end(true); } catch (e) { /* ignore */ } return { ok: false }; }
-        cli = c;
-        // 首次 + 每次重连都要重新订阅（clean session 下重连会丢订阅）
-        function resub() {
-          try { cli.subscribe(topicIn(), { qos: 1 }); } catch (e) { /* ignore */ }
-          push({ phase: 'on', url: 'relay://' + rid, error: '' });
-        }
-        cli.on('connect', resub);
-        cli.on('message', function (t, buf) { if (t === topicIn()) onPayload(buf); });
-        cli.on('close', function () {
-          if (!wantOn) return;
-          push({ phase: 'starting', url: '', error: '公共中继断线，正在重连…' });
-        });
+        attach(c, rid);
+
+        // ── 多台并听 ────────────────────────────────────────────────
+        // 入口是 relay://<房间号>，里面没有「哪台 broker」这个信息，而访客是
+        // 按自己那份 broker 列表独立挑的（列表还被 localStorage 的「上次好用」
+        // 影响）。两边挑歪了就会谁也见不到谁、且不报错 —— 跨网最常见的哑火。
+        // 所以房主这边把其余几台也挂上：访客落哪台都有人接。收到的重复帧由
+        // onPayload 的序号去重挡掉。首批连上的那台先用着，不给用户加等待。
+        (function openRest() {
+          var rest = brokerList().filter(function (u) {
+            return !clis.some(function (x) { return x.__url === u; });
+          });
+          rest.forEach(function (u) {
+            if (!wantOn) return;
+            connectTo(u).then(function (c2) {
+              if (!wantOn) { try { c2.end(true); } catch (e) { /* ignore */ } return; }
+              try { c2.__url = u; } catch (e) { /* ignore */ }
+              attach(c2, rid);
+            }).catch(function () { /* 某台连不上不影响别的 */ });
+          });
+        })();
+
         return new Promise(function (resolve) {
-          cli.subscribe(topicIn(), { qos: 1 }, function (err) {
+          c.subscribe(topicIn(), { qos: 1 }, function (err) {
             if (err) {
               push({ phase: 'off', url: '', error: '中继订阅失败：' + err.message });
               return resolve({ ok: false, error: state.error });
@@ -277,10 +369,8 @@
       Object.keys(guests).forEach(dropGuest);
       guests = {};
       seen = {};
-      if (cli) {
-        try { cli.end(true); } catch (e) { /* ignore */ }
-        cli = null;
-      }
+      clis.forEach(function (c) { try { c.end(true); } catch (e) { /* ignore */ } });
+      clis = [];
       push({ phase: 'off', url: '', error: '' });
       return Promise.resolve({ ok: true });
     }

@@ -35,10 +35,16 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 async function androidContext(browser) {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
   await ctx.route('**/*', async route => {
-    const resp = await route.fetch();
-    const headers = Object.assign({}, resp.headers());
-    delete headers['content-security-policy'];
-    await route.fulfill({ response: resp, headers });
+    // 上下文关闭时可能还有在途请求，route 会被 dispose；
+    // 那是收尾阶段的正常现象，不该把整个测试炸掉
+    try {
+      const resp = await route.fetch();
+      const headers = Object.assign({}, resp.headers());
+      delete headers['content-security-policy'];
+      await route.fulfill({ response: resp, headers });
+    } catch (e) {
+      try { await route.abort(); } catch (e2) { /* 已关闭 */ }
+    }
   });
   await ctx.addInitScript(() => {
     window.Capacitor = { isNativePlatform: () => true, Plugins: {} };
@@ -103,10 +109,16 @@ async function bootPage(page) {
   /* ---------------- 访客：另一台安卓，点链接进房 ---------------- */
   const guestCtx = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
   await guestCtx.route('**/*', async route => {
-    const resp = await route.fetch();
-    const headers = Object.assign({}, resp.headers());
-    delete headers['content-security-policy'];
-    await route.fulfill({ response: resp, headers });
+    // 上下文关闭时可能还有在途请求，route 会被 dispose；
+    // 那是收尾阶段的正常现象，不该把整个测试炸掉
+    try {
+      const resp = await route.fetch();
+      const headers = Object.assign({}, resp.headers());
+      delete headers['content-security-policy'];
+      await route.fulfill({ response: resp, headers });
+    } catch (e) {
+      try { await route.abort(); } catch (e2) { /* 已关闭 */ }
+    }
   });
   await guestCtx.addInitScript(({ url }) => {
     window.Capacitor = {
@@ -150,26 +162,94 @@ async function bootPage(page) {
   }));
   ok('房主看到 2 人在房间', hostSees >= 2, String(hostSees));
 
-  // 真落一笔：鼠标在画布上拖一下，笔迹要真的穿过中继到房主那边
-  const box = await guest.evaluate(() => {
-    const c = document.querySelector('#canvasWrap') || document.querySelector('canvas');
-    const r = c.getBoundingClientRect();
-    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-  });
-  await guest.mouse.move(box.x, box.y);
-  await guest.mouse.down();
-  await guest.mouse.move(box.x + 40, box.y + 30, { steps: 6 });
-  await guest.mouse.move(box.x + 80, box.y + 10, { steps: 6 });
-  await guest.mouse.up();
-  await sleep(1200);
+  // 真落一笔：鼠标在画布上拖一下，笔迹要真的穿过中继到房主那边。
+  //
+  // 注意这里的两段式判定：先确认「访客自己落上笔了」，再看「房主收到没有」。
+  // 一次曾经只断言后者，落笔点被浮层挡住（访客自己也没画成）时报成
+  // 「中继丢笔迹」，把一个测试布局问题误判成产品 bug。分开报才不会冤枉人。
+  async function drawOnce(ox, oy) {
+    const box = await guest.evaluate(() => {
+      const c = document.querySelector('#canvasWrap') || document.querySelector('canvas');
+      const r = c.getBoundingClientRect();
+      return { x: r.left, y: r.top, w: r.width, h: r.height };
+    });
+    const x = box.x + Math.round(box.w * ox);
+    const y = box.y + Math.round(box.h * oy);
+    await guest.mouse.move(x, y);
+    await guest.mouse.down();
+    await guest.mouse.move(x + 40, y + 30, { steps: 6 });
+    await guest.mouse.move(x + 80, y + 10, { steps: 6 });
+    await guest.mouse.up();
+    await sleep(1200);
+    return guest.evaluate(() => (window.ChaApp.engine.strokes || []).length);
+  }
+
+  // 试几个落笔点，直到访客那边确实产生了一笔（避开居中工具栏/浮层）
+  let guestStrokes = await drawOnce(0.5, 0.5);
+  for (const [ox, oy] of [[0.3, 0.65], [0.5, 0.2], [0.7, 0.75]]) {
+    if (guestStrokes > 0) break;
+    guestStrokes = await drawOnce(ox, oy);
+  }
+  ok('访客在本机画笔确实落下（前提条件）', guestStrokes > 0, String(guestStrokes));
 
   const hostGotStroke = await host.waitForFunction(
-    () => (window.ChaApp.engine.strokes || []).length > 0, { timeout: 15000 }
+    () => (window.ChaApp.engine.strokes || []).length > 0, { timeout: 20000 }
   ).then(() => true).catch(() => false);
   ok('房主收到了访客的笔迹（数据真的过了中继）', hostGotStroke,
-    await host.evaluate(() => String((window.ChaApp.engine.strokes || []).length)));
+    '房主笔迹数 ' + await host.evaluate(() => String((window.ChaApp.engine.strokes || []).length)));
 
-  ok('全程没有 JS 报错', errs.length === 0, errs.slice(0, 3).join(' | '));
+  /* ---------------- 两边挑到不同的公共 broker，也得能遇上 ---------------- */
+  // 分享出去的入口是 relay://<房间号>，里面**没有**「哪台 broker」这个信息，
+  // 访客是按自己那份 broker 列表独立挑的（列表还受 localStorage 里
+  // 「上次好用那台」影响）。两边挑歪 = 谁也见不到谁，而且不报错。
+  // 房主端因此把其余几台也挂上（多台并听）。这里把访客钉在另一台上验证它。
+  const ALT_BROKER = 'wss://broker-cn.emqx.io:8084/mqtt';
+  const altCtx = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  await altCtx.route('**/*', async route => {
+    // 上下文关闭时可能还有在途请求，route 会被 dispose；
+    // 那是收尾阶段的正常现象，不该把整个测试炸掉
+    try {
+      const resp = await route.fetch();
+      const headers = Object.assign({}, resp.headers());
+      delete headers['content-security-policy'];
+      await route.fulfill({ response: resp, headers });
+    } catch (e) {
+      try { await route.abort(); } catch (e2) { /* 已关闭 */ }
+    }
+  });
+  await altCtx.addInitScript(({ url, broker }) => {
+    // 让它优先连另一台 broker（列表会把「上次好用」提到最前）
+    try { localStorage.setItem('chahu.broker', broker); } catch (e) { /* about:blank 上会抛 */ }
+    window.Capacitor = {
+      isNativePlatform: () => true,
+      Plugins: {
+        App: {
+          getLaunchUrl: () => Promise.resolve({ url }),
+          addListener: () => Promise.resolve({ remove: () => {} })
+        }
+      }
+    };
+  }, { url: link, broker: ALT_BROKER });
+
+  const alt = await altCtx.newPage();
+  alt.on('pageerror', e => errs.push('alt: ' + String(e).slice(0, 140)));
+  await alt.goto(BASE + '/?autotunnel=0&t=' + Date.now(), { waitUntil: 'domcontentloaded' });
+  await bootPage(alt);
+
+  const altJoined = await alt.waitForFunction(
+    () => (window.ChaApp.state.joined ? window.ChaApp.state.room.id : false), { timeout: 70000 }
+  ).then(h => h.jsonValue()).catch(() => '');
+  const altBroker = await alt.evaluate(() => {
+    try { return localStorage.getItem('chahu.broker') || ''; } catch (e) { return ''; }
+  });
+  const hostBroker = await host.evaluate(() => {
+    try { return localStorage.getItem('chahu.broker') || ''; } catch (e) { return ''; }
+  });
+  ok('访客落在另一台 broker 上也能进同一间房', altJoined === roomId,
+    altJoined + ' @ ' + altBroker.replace(/^wss:\/\//, '') +
+    '  ←房主在 ' + hostBroker.replace(/^wss:\/\//, ''));
+
+  await altCtx.close();
 
   /* ---------------- 自动开启：房主什么都不点 ---------------- */
   // 「快速上手」的核心：开完房就该能直接分享，不该让用户先搞懂「公网联机」是什么。
@@ -199,6 +279,8 @@ async function bootPage(page) {
     /关闭公网联机/.test(autoBtn.text), autoBtn.text + ' / ' + autoBtn.state.trim().slice(0, 40));
 
   await autoCtx.close();
+
+  ok('全程没有 JS 报错', errs.length === 0, errs.slice(0, 3).join(' | '));
 
   await guestCtx.close();
   await hostCtx.close();
