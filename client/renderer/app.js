@@ -5141,6 +5141,262 @@
     }
   }
 
+  /* ============================================================ 附近服务器扫描 */
+
+  /**
+   * 「附近服务器」：同一 WiFi（或同一个虚拟局域网）里别人开着的茶绘服务器，
+   * 点一下就连过去，不用复制粘贴链接。
+   *
+   * 为什么不是自动发现：浏览器没有 UDP 组播能力，收不到 mDNS 广播；网卡列表也拿不到
+   * （Chrome 把 WebRTC 的 host candidate 混淆成 xxx.local）。所以只能「先定网段，再逐个探」。
+   *
+   * 两道筛子都很便宜：
+   *   ① HTTP no-cors 探 /health —— 端口通就算候选。不读响应体，绕得开 CORS。
+   *   ② WebSocket 探 /ws      —— 只有茶绘服务端会完成握手，把同端口上的别的服务滤掉。
+   * 少了 ② 的话，任何一个跑在该端口上的其他程序都会被当成茶绘。
+   */
+  var SCAN_PORT = 8437;
+  var SCAN_HTTP_TIMEOUT = 450;    // 局域网内不通的端口一般是立刻 refused，只有防火墙 DROP 才等到超时
+  var SCAN_WS_TIMEOUT = 2200;
+  var SCAN_CONCURRENCY = 32;
+  var SCAN_WS_CONCURRENCY = 6;
+  var scanBusy = false;
+
+  /**
+   * 扫哪个端口：跟着当前服务器走。自建服务器常常改端口，写死 8437 就只对默认部署有效；
+   * 而「你自己刚才连的那个服务器在 8437 还是 9000」这件事，net.url 里现成的。
+   * local:// / webrtc:// 没有端口概念，退回默认值。
+   */
+  function scanPort() {
+    var m = /^wss?:\/\/[^\/:]+:(\d+)/i.exec(String(net.url || ''));
+    var p = m ? parseInt(m[1], 10) : NaN;
+    return (p > 0 && p < 65536) ? p : SCAN_PORT;
+  }
+
+  /** 192.168.1.37 → 192.168.1；非私有网段一律不认（对着公网扫 254 个端口既没意义也不礼貌） */
+  function lanPrefixOf(ip) {
+    var m = /^(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}$/.exec(String(ip || '').trim());
+    if (!m) return '';
+    var p = m[1];
+    if (!/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(p + '.')) return '';
+    return p;
+  }
+
+  /**
+   * 候选网段，按可信度排：
+   *   ① 壳给的网卡列表（桌面端最准；而且能带上 Astral / EasyTier 的虚拟网卡 —— 
+   *      用户装了组网工具的话，虚拟网段会自动出现在这里，不用他去抄那个虚拟 IP）
+   *   ② 本机内置服务器报出来的局域网地址
+   *   ③ 页面本身就是从这个局域网服务器打开的
+   *   ④ 输入框里手填的（安卓没有 ①②③，靠这条）
+   */
+  function lanScanPrefixes() {
+    var out = [];
+    var seen = {};
+    function add(p) {
+      if (!p || seen[p]) return;
+      seen[p] = 1;
+      out.push(p);
+    }
+    var dl = global.chahuDesktop;
+    var viaShell = (dl && typeof dl.lanIps === 'function')
+      ? Promise.resolve().then(function () { return dl.lanIps(); }).catch(function () { return []; })
+      : Promise.resolve([]);
+
+    return viaShell.then(function (list) {
+      // 真实网卡排前面、虚拟网卡排后面：装了 VMware / VirtualBox 的机器上虚拟网卡
+      // 能有好几个，要是它们排在头里，真正的那个网段反而落到被截断的位置上了。
+      var real = [], virt = [];
+      (list || []).forEach(function (it) {
+        var p = lanPrefixOf(typeof it === 'string' ? it : (it && it.ip));
+        if (!p) return;
+        var bucket = (it && it.virtual) ? virt : real;
+        if (bucket.indexOf(p) < 0) bucket.push(p);
+      });
+      real.forEach(add);
+      virt.forEach(add);
+      try {
+        var lb = Cfg.lanBase && Cfg.lanBase();
+        if (lb) add(lanPrefixOf(String(lb).replace(/^[a-z]+:\/\//i, '').split(':')[0]));
+      } catch (e) { /* 拿不到就算了 */ }
+      add(lanPrefixOf(location.hostname));
+      var inp = $('#lanScanPrefix');
+      var mp = /^(\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(((inp && inp.value) || '').trim());
+      if (mp) add(mp[1]);
+      // 一段 253 个地址，三段以上用户等的时间就不划算了（虚拟网卡多的机器尤其）
+      return out.slice(0, 3);
+    });
+  }
+
+  /** ① 端口通不通。no-cors 下拿不到响应体，但「有没有回话」这件事足够用了 */
+  function probeHttp(ip, port, ms) {
+    return new Promise(function (resolve) {
+      var done = false;
+      var ctl = (typeof AbortController === 'function') ? new AbortController() : null;
+      function fin(ok) {
+        if (done) return;
+        done = true;
+        clearTimeout(t);
+        if (ok) { resolve(true); return; }
+        if (ctl) { try { ctl.abort(); } catch (e) { /* ignore */ } }
+        resolve(false);
+      }
+      var t = setTimeout(function () { fin(false); }, ms);
+      var opt = { mode: 'no-cors', cache: 'no-store', redirect: 'follow' };
+      if (ctl) opt.signal = ctl.signal;
+      try {
+        fetch('http://' + ip + ':' + port + '/health', opt).then(function () { fin(true); }, function () { fin(false); });
+      } catch (e) { fin(false); }
+    });
+  }
+
+  /** ② 是不是茶绘服务端：真的完成 WebSocket 握手才算 */
+  function probeChahui(ip, port, ms) {
+    return new Promise(function (resolve) {
+      var ws = null;
+      var done = false;
+      function fin(ok) {
+        if (done) return;
+        done = true;
+        clearTimeout(t);
+        try { if (ws) ws.close(); } catch (e) { /* ignore */ }
+        resolve(ok);
+      }
+      var t = setTimeout(function () { fin(false); }, ms);
+      try { ws = new WebSocket('ws://' + ip + ':' + port + '/ws'); } catch (e) { return fin(false); }
+      ws.onopen = function () { fin(true); };
+      ws.onerror = function () { fin(false); };
+      ws.onclose = function () { fin(false); };
+    });
+  }
+
+  function setScanState(text) {
+    var el = $('#lanScanState');
+    if (el) el.textContent = text || '—';
+  }
+
+  /**
+   * 扫一个网段的顺序：DHCP 习惯从 100 往后发，所以先 100~254 再 1~99。
+   * 命中通常在头一两秒，用户不用对着进度条干等。
+   *
+   * 注意从 1 开始 —— `.1` 经常就是网关 / 路由 / 热点网卡本身，
+   * 漏掉它等于「本机自己开的服务器扫不到」，而这恰恰是最该扫到的那个。
+   */
+  function scanTargets(prefix) {
+    var out = [];
+    var i;
+    for (i = 100; i <= 254; i++) out.push(prefix + '.' + i);
+    for (i = 1; i < 100; i++) out.push(prefix + '.' + i);
+    return out;
+  }
+
+  function renderLanFound(list) {
+    var el = $('#lanFound');
+    if (!el) return;
+    if (!list || !list.length) {
+      el.innerHTML = '';
+      el.classList.add('hidden');
+      return;
+    }
+    el.classList.remove('hidden');
+    el.innerHTML = list.map(function (ip) {
+      // 带上 /ws：config.js 的 normalize 对 ws:// 是原样放行的（不像 http:// 会自动补 /ws），
+      // 少写这一段就连到了根路径，握手直接落空
+      var url = 'ws://' + ip + ':' + scanPort() + '/ws';
+      return '<button type="button" class="lan-hit" data-url="' + esc(url) + '">' +
+        '<b>' + esc(ip) + '</b><span>' + esc('端口 ' + scanPort()) + '</span></button>';
+    }).join('');
+    [].forEach.call(el.querySelectorAll('.lan-hit'), function (b) {
+      b.addEventListener('click', function () {
+        var url = b.getAttribute('data-url');
+        var si = $('#serverInput');
+        if (si) si.value = url;
+        toast('正在连接 ' + url, 'ok', 2600);
+        applyServer(url);
+      });
+    });
+  }
+
+  function scanLan() {
+    if (scanBusy) return;
+    scanBusy = true;
+    var btn = $('#btnLanScan');
+    if (btn) { btn.disabled = true; btn.textContent = '扫描中…'; }
+    renderLanFound([]);
+    setScanState('正在确定网段…');
+
+    // message 用来盖掉默认文案：像「先填网段」这种指引比「没找到」有用得多，
+    // 之前 done(0) 把提示直接冲掉了，用户点完只看到「没找到」，不知道该干什么
+    function done(count, message) {
+      scanBusy = false;
+      var b = $('#btnLanScan');
+      if (b) { b.disabled = false; b.textContent = '扫一下'; }
+      setScanState(message || (count ? ('找到 ' + count + ' 个') : '没找到'));
+    }
+
+    lanScanPrefixes().then(function (prefixes) {
+      if (!prefixes.length) {
+        var inp0 = $('#lanScanPrefix');
+        if (inp0) inp0.focus();
+        done(0, '先在上面填一段网段，再点扫一下');
+        // 返回 null 而不是 undefined：后面两个 then 靠它区分「这一轮没扫」和
+        // 「扫了但没结果」。直接 return 的话下一级拿到 undefined，hits.length 一取就抛，
+        // 异常又被 catch 的默认文案盖成「没找到」——提示全丢了。
+        return null;
+      }
+      var inp = $('#lanScanPrefix');
+      if (inp && !inp.value) inp.value = prefixes[0];
+
+      var queue = [];
+      prefixes.forEach(function (p) { queue = queue.concat(scanTargets(p)); });
+      var total = queue.length;
+      var scanned = 0;
+      var hits = [];
+
+      function worker() {
+        var ip = queue.shift();
+        if (!ip) return Promise.resolve();
+        return probeHttp(ip, scanPort(), SCAN_HTTP_TIMEOUT).then(function (ok) {
+          scanned++;
+          if (ok) hits.push(ip);
+          if (scanned % 25 === 0 || scanned === total) {
+            setScanState('扫描中 ' + scanned + ' / ' + total + '…');
+          }
+          return worker();
+        });
+      }
+
+      var lanes = [];
+      var n = Math.min(SCAN_CONCURRENCY, queue.length);
+      for (var w = 0; w < n; w++) lanes.push(worker());
+      return Promise.all(lanes).then(function () { return hits; });
+    }).then(function (hits) {
+      if (hits === null) return null;              // 上一级已经收尾（没有可扫的网段）
+      if (!hits.length) { done(0); return null; }
+      setScanState('确认身份（' + hits.length + ' 个端口通）…');
+      // 逐个用 WebSocket 握手确认 —— 只有茶绘服务端会认 /ws
+      var q = hits.slice();
+      var confirmed = [];
+      function cworker() {
+        var ip = q.shift();
+        if (!ip) return Promise.resolve();
+        return probeChahui(ip, scanPort(), SCAN_WS_TIMEOUT).then(function (ok) {
+          if (ok) confirmed.push(ip);
+          return cworker();
+        });
+      }
+      var cs = [];
+      for (var c = 0; c < Math.min(SCAN_WS_CONCURRENCY, q.length); c++) cs.push(cworker());
+      return Promise.all(cs).then(function () { return confirmed; });
+    }).then(function (confirmed) {
+      if (!confirmed) return;                      // 前面已经收尾
+      renderLanFound(confirmed);
+      done(confirmed.length);
+    }).catch(function (e) {
+      done(0, '扫描出错：' + ((e && e.message) || e));
+    });
+  }
+
   /* ============================================================ 指针绘制 */
 
   function stagePoint(e) {
@@ -6435,6 +6691,7 @@
         setTimeout(refreshNav, 200);
         toast('已进入「' + msg.room.name + '」', 'ok');
         updateUrlForRoom(msg.room.id);
+        maybeAutoTunnel();
         break;
       }
 
@@ -7559,18 +7816,20 @@
     return u;
   }
 
-  function startTunnel() {
+  function startTunnel(silent) {
     var d = setupTunnelBridge();
-    if (!d) { toast('公网联机只在桌面端有', 'err'); return; }
+    if (!d) { if (!silent) toast('公网联机只在桌面端有', 'err'); return; }
     if (S.tunnel && S.tunnel.phase !== 'off') return;      // 正在下 / 正在起，别重复点
     // 没进房间也能先把入口开起来（桌面端习惯：先开隧道，再进房分享）。
     // 但一定要说清楚：这一层服务的是「房间」，没有房间就没有可分享的东西。
-    if (!S.room) toast('公网入口开好了，但你还没进房间 —— 先进房再点「分享」才有链接', 'warn', 4200);
+    if (!S.room && !silent) toast('公网入口开好了，但你还没进房间 —— 先进房再点「分享」才有链接', 'warn', 4200);
     S.tunnel = { phase: 'starting', url: '', error: '', percent: 0 };
     refreshTunnelUi();
     // 安卓主路径是 WebRTC P2P（零服务器依赖，见 webrtc-host.js）；失败自动回落中继。
     // 桌面端第一次要下 cloudflared。
-    if (!(global.chahuDesktop && global.chahuDesktop.isAndroid)) {
+    if (silent) {
+      // 自动开的场合：别拿「正在准备公网入口…」打断用户刚进房的操作
+    } else if (!(global.chahuDesktop && global.chahuDesktop.isAndroid)) {
       toast('正在准备公网入口……第一次会先下载一个几十兆的组件', 'ok', 3600);
     } else {
       toast('正在建立 P2P 直连房间……（数据不经任何服务器）', 'ok', 3000);
@@ -7581,7 +7840,8 @@
       if (r && r.ok) return;
       if (r && r.error) {
         S.tunnel = { phase: 'off', url: '', error: r.error, percent: 0 };
-        toast('公网联机失败：' + r.error, 'err', 5200);
+        toast((silent ? '公网入口没开起来：' : '公网联机失败：') + r.error +
+          (silent ? '（可以点「公网联机」再试一次）' : ''), silent ? 'warn' : 'err', 5200);
         refreshTunnelUi();
       }
     }, function (e) {
@@ -7589,6 +7849,39 @@
       toast('公网联机失败：' + S.tunnel.error, 'err', 5200);
       refreshTunnelUi();
     });
+  }
+
+  /**
+   * 安卓开房后自动把公网入口备好 —— 「快速上手」最关键的一步。
+   *
+   * 跨网联机的前提是「房主这边有一条外网进得来的入口」。以前要用户开完房、
+   * 先搞懂「公网联机」是个什么东西、再点一下，分享出去的才不是一条 local:// 死链接。
+   * 大部分人恰恰卡在这里：开完房直接点分享，朋友点开就是「房间不存在」。
+   * 自动开完之后，房主需要做的只剩「点分享」。
+   *
+   * 只对安卓做 —— 桌面端的隧道第一次要先下几十兆的 cloudflared，不能背着用户开始。
+   */
+  var autoTunnelAt = 0;
+  // ?autotunnel=0 关掉自动开（自动化测试要自己控制隧道的时机，
+  // 否则「自动开」和测试里那次点击会撞在一起：点击看到正在起就直接返回了）
+  var autoTunnelOff = (function () {
+    try { return new URLSearchParams(location.search || '').get('autotunnel') === '0'; }
+    catch (e) { return false; }
+  })();
+
+  function maybeAutoTunnel() {
+    if (autoTunnelOff) return;
+    var d = global.chahuDesktop;
+    if (!d || !d.isAndroid || typeof d.startTunnel !== 'function') return;
+    if (!S.me.isOwner) return;                    // 只有房主要开，访客开的入口自己用不上
+    if (!net.isLocal()) return;                   // 连着别人的服务器时房间不在本机，开了白开
+    if (S.tunnel && S.tunnel.phase !== 'off') return;   // 已经在起 / 已经开好
+    if (Date.now() - autoTunnelAt < 15000) return;      // 刚失败过就别立刻再试，免得刷屏
+    autoTunnelAt = Date.now();
+    setTimeout(function () {
+      if (!S.joined || !S.room) return;
+      startTunnel(true);
+    }, 900);
   }
 
   function stopTunnel() {
@@ -7810,6 +8103,13 @@
           '各自在家（不同 WiFi、手机流量）打不通直连时会自动改走公共中继，一样能一起画。' +
           '</div></div>'
         : '') +
+      // 跨网联机的中继是「能用」，虚拟局域网是「更快」。这条不推、只是留个升级出口：
+      // 双方都装了组网工具之后，入口页「附近服务器」填虚拟网段就能直连，不必再经中继。
+      '<div class="kv"><label>想更快</label><div class="hint">' +
+      '跨网时数据都要经中继服务器转发（多几十到几百毫秒）。如果双方都装了 Astral、EasyTier ' +
+      '这类组网工具，把它们连进同一个虚拟局域网后，回到入口页在「附近服务器」里填那个虚拟网段' +
+      '（比如 10.126.0），扫一下就能直连 —— 延迟接近同一个 WiFi，而且绕开了公共中继。' +
+      '</div></div>' +
       '<div class="info-actions">' +
       '<button class="btn tiny" id="btnInfoCopy">复制链接</button>' +
       '<button class="btn tiny" id="btnInfoLeave">离开房间</button>' +
@@ -9172,6 +9472,15 @@
       setTimeout(function () { net.send(P.C2S.ROOM_LIST, {}); }, 350);
     });
     $('#btnCopyLan').addEventListener('click', copyLan);
+    var btnScan = $('#btnLanScan');
+    if (btnScan) btnScan.addEventListener('click', scanLan);
+    var scanInput = $('#lanScanPrefix');
+    if (scanInput) {
+      // 手填网段后回车直接扫，别让用户再去点一次按钮
+      scanInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); scanLan(); }
+      });
+    }
     var btnSrv = $('#btnServerToggle');
     if (btnSrv) btnSrv.addEventListener('click', serverButtonAction);
     var btnTun = $('#btnTunnelToggle');

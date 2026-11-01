@@ -3,6 +3,7 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard, nativeTheme } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const https = require('https');
 
 const isDev = !!process.env.CHAHU_DEV;
@@ -127,6 +128,38 @@ ipcMain.handle('chahu:get-info', () => ({
   config: readConfig(),
   server: serverInfo
 }));
+
+/**
+ * 本机所有 IPv4 网卡地址（非回环）。「附近服务器」扫描拿它当网段来源。
+ *
+ * 为什么必须走主进程：渲染进程拿不到网卡列表 —— Chrome 的 WebRTC 会把 host
+ * candidate 混淆成 mDNS 名字（xxx.local），这就把「本机内网 IP」这条唯一的
+ * 浏览器侧线索掐断了。
+ *
+ * 顺带覆盖了虚拟局域网：装了 Astral / EasyTier 这类组网工具时，它们的 TUN 网卡
+ * （常见 10.x / 172.x）也会出现在这里，于是「扫一下」能直接找到对方虚拟网段里的
+ * 茶绘服务器 —— 用户不用去抄那个虚拟 IP。
+ */
+ipcMain.handle('chahu:lan-ips', () => {
+  const out = [];
+  try {
+    const nets = os.networkInterfaces();
+    for (const name of Object.keys(nets)) {
+      for (const n of nets[name] || []) {
+        // 只要 IPv4、非回环、非 link-local（169.254 是 DHCP 失败时的自分配地址）
+        if (n.family !== 'IPv4' || n.internal) continue;
+        if (/^169\.254\./.test(n.address)) continue;
+        out.push({ iface: name, ip: n.address, virtual: isVirtualIface(name) });
+      }
+    }
+  } catch (e) { /* 拿不到就当没有 */ }
+  return out;
+});
+
+/** 虚拟网卡识别：组网工具 / 虚拟机 / 容器建的 TUN、TAP、vEthernet 之类 */
+function isVirtualIface(name) {
+  return /^(zt|tailscale|easytier|astral|nordlynx|wg|tun|tap|utun|vmnet|vboxnet|docker|br-|veth|vEthernet|ham)/i.test(String(name || ''));
+}
 
 ipcMain.handle('chahu:set-server', (e, url) => writeConfig({ server: String(url || '') }));
 

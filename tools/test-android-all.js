@@ -8,6 +8,8 @@
  *   6. 安卓应用链接（chahui://）→ 另一台安卓点链接直接进房（冷启动 + 热启动）
  *   7. 安卓建房 → Web + 桌面渲染层同房作画（真 Electron 需 CHAHU_ELECTRON=1）
  *   8. 跨 WiFi 联机：公共中继（relay://）进房 + P2P 打不通时自动降级（要外网）
+ *   9. 附近服务器扫描：同一网段里开着的茶绘服务器能被扫到、点一下就连过去
+ *  10. 两台安卓跨网联机：P2P 打不通时回落公共中继，房主不点按钮就能分享（要外网）
  *
  * 用法: node tools/test-android-all.js
  * 说明：需要本机 Chrome；第 7 项要真 Electron 时，先准备 .tmp-electron/electron.exe
@@ -70,6 +72,9 @@ function run(name, args, opts) {
   results.push(['安卓建房 → Web + Windows 桌面', await run('安卓建房 → Web + Windows 桌面', ['tools/test-webrtc-desktop.js'])]);
   // 跨 WiFi 的那条路：公共中继。走真实公共 broker，需要外网
   results.push(['跨 WiFi 联机（公共中继）', await run('跨 WiFi 联机（公共中继）', ['tools/test-relay.js', 'http://127.0.0.1:' + PORT])]);
+  results.push(['附近服务器扫描', await run('附近服务器扫描（局域网 / 虚拟局域网）', ['tools/test-lan-scan.js', 'http://127.0.0.1:' + PORT])]);
+  // 用户最关心的那条：两台安卓跨网连（P2P 打死 → 公共中继），房主什么都不点就能分享
+  results.push(['两台安卓跨网联机', await run('两台安卓跨网联机（中继）', ['tools/test-android-crossnet.js', 'http://127.0.0.1:' + PORT])]);
 
   srv.kill();
   try { fs.rmSync(DATA_DIR, { recursive: true, force: true }); } catch (e) { /* ignore */ }

@@ -24,6 +24,9 @@ contextBridge.exposeInMainWorld('chahuDesktop', {
     }
   },
   getInfo: () => ipcRenderer.invoke('chahu:get-info'),
+  // 本机 IPv4 网卡列表（[{ iface, ip, virtual }]）。「附近服务器」扫描靠它定网段：
+  // 渲染进程自己拿不到网卡（WebRTC 的 host candidate 被 mDNS 混淆了）。
+  lanIps: () => ipcRenderer.invoke('chahu:lan-ips'),
   openFile: (kind) => ipcRenderer.invoke('chahu:open', kind),
   clipboardImage: () => ipcRenderer.invoke('chahu:clipboard-image'),
   // 更新包下载：主进程下（没有 CORS 限制），进度通过事件回推

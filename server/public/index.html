@@ -1061,6 +1061,21 @@
         </div>
         <span class="hint" id="tunnelHint">开启后生成一个公网直连入口，跨网的朋友点链接就能进；关闭即切回本地。手机上房间跑在本机，走 P2P 直连（数据不经任何服务器；配了中继服务器时失败会自动切换）；桌面端走 cloudflared 隧道。</span>
       </div>
+      <!-- 附近服务器：同一 WiFi（或同一个虚拟局域网）里别人开着的茶绘服务器，点一下就进。
+           不能做成「自动发现」—— 浏览器收不到 mDNS 广播、也拿不到网卡列表，只能定网段再逐个探。
+           网段来源：桌面端自动填网卡地址（含 Astral / EasyTier 的虚拟网卡）；安卓拿不到，手填前三段。 -->
+      <div class="form-row srv-row" id="lanScanRow">
+        <div class="srv-top">
+          <label>附近服务器</label>
+          <div class="srv-line">
+            <input type="text" id="lanScanPrefix" class="mini-input" spellcheck="false" placeholder="192.168.1" title="先填前三段（网段），比如 192.168.1；虚拟局域网工具填它给的虚拟网段" />
+            <button class="btn tiny" id="btnLanScan">扫一下</button>
+            <span class="srv-state" id="lanScanState">—</span>
+          </div>
+        </div>
+        <div class="lan-found hidden" id="lanFound"></div>
+        <span class="hint" id="lanScanHint">找同一 WiFi 里别人开着的茶绘服务器，扫到点一下就进。用了 Astral / EasyTier 这类组网工具的话，把它的虚拟网段填进来也能发现对方 —— 那条路走的是虚拟局域网直连，比中继延迟更低。</span>
+      </div>
 
       <div class="split">
         <div class="split-col">

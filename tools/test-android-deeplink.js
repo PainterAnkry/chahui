@@ -74,7 +74,7 @@ async function bootPage(page) {
   });
   const host = await hostCtx.newPage();
   host.on('pageerror', e => errs.push('host: ' + String(e).slice(0, 140)));
-  await host.goto(BASE + '/?t=' + Date.now(), { waitUntil: 'domcontentloaded' });
+  await host.goto(BASE + '/?autotunnel=0&t=' + Date.now(), { waitUntil: 'domcontentloaded' });
   await bootPage(host);
 
   await host.evaluate(() => {

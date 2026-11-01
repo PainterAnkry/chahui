@@ -242,6 +242,40 @@
     '公共中继都连不上': [
       'Cannot reach any public relay',
       'どの公共リレーにも接続できません'
+    ],
+    /* ---- 2.3.0 附近服务器扫描 ---- */
+    '附近服务器': ['Nearby servers', '近くのサーバー'],
+    '扫一下': ['Scan', 'スキャン'],
+    '扫描中…': ['Scanning…', 'スキャン中…'],
+    '正在确定网段…': ['Figuring out your subnet…', 'ネットワーク範囲を判定中…'],
+    '先在上面填一段网段，再点扫一下': [
+      'Fill in a subnet above, then hit Scan',
+      '上にネットワーク範囲を入力してからスキャンしてください'
+    ],
+    '没找到': ['Nothing found', '見つかりませんでした'],
+    '找同一 WiFi 里别人开着的茶绘服务器，扫到点一下就进。用了 Astral / EasyTier 这类组网工具的话，把它的虚拟网段填进来也能发现对方 —— 那条路走的是虚拟局域网直连，比中继延迟更低。': [
+      'Finds Chahui servers other people are running on the same Wi-Fi — click one to join. ' +
+        'If you use a mesh tool like Astral or EasyTier, put its virtual subnet in here and it will find them too: ' +
+        'that path goes over the virtual LAN, with lower latency than a relay.',
+      '同じ Wi-Fi で他の人が立てている茶絵サーバーを探します。見つかったものをクリックすれば入室できます。' +
+        'Astral や EasyTier などのメッシュツールを使っている場合は、その仮想ネットワーク範囲を入力すれば相手も見つかります —— ' +
+        'こちらは仮想 LAN 経由で、リレーより低遅延です。'
+    ],
+    '192.168.1': ['192.168.1', '192.168.1'],
+    '先填前三段（网段），比如 192.168.1；虚拟局域网工具填它给的虚拟网段': [
+      'Enter the first three octets (the subnet), e.g. 192.168.1; for a mesh tool, use the virtual subnet it gives you',
+      '最初の 3 オクテット（ネットワーク部）を入力。例：192.168.1。メッシュツールなら割り当てられた仮想ネットワークを入力'
+    ],
+    '想更快': ['Faster?', 'もっと速く'],
+    '跨网时数据都要经中继服务器转发（多几十到几百毫秒）。如果双方都装了 Astral、EasyTier 这类组网工具，把它们连进同一个虚拟局域网后，回到入口页在「附近服务器」里填那个虚拟网段（比如 10.126.0），扫一下就能直连 —— 延迟接近同一个 WiFi，而且绕开了公共中继。': [
+      'Across networks, traffic goes through a relay server (adding tens to hundreds of milliseconds). ' +
+        'If both sides run a mesh tool like Astral or EasyTier, join the same virtual LAN, then enter that virtual subnet ' +
+        '(e.g. 10.126.0) under “Nearby servers” on the entry screen and scan — you get a direct connection, ' +
+        'close to same-Wi-Fi latency, and no public relay involved.',
+      'ネットワークをまたぐとデータはリレーサーバー経由になります（数十〜数百ミリ秒の遅延増）。' +
+        '双方が Astral や EasyTier などのメッシュツールを使っているなら、同じ仮想 LAN に入ったうえで、' +
+        '入口画面の「近くのサーバー」にその仮想ネットワーク（例：10.126.0）を入力してスキャンすれば直結できます —— ' +
+        '同じ Wi-Fi 並みの低遅延で、公共リレーも使いません。'
     ]
   });
 })();

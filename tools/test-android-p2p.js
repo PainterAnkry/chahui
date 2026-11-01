@@ -67,7 +67,7 @@ async function createRoom(page, roomName) {
   const host = await hostCtx.newPage();
   const hostErrs = [];
   host.on('pageerror', e => hostErrs.push(String(e).slice(0, 160)));
-  await host.goto(BASE + '/?t=' + Date.now(), { waitUntil: 'domcontentloaded' });
+  await host.goto(BASE + '/?autotunnel=0&t=' + Date.now(), { waitUntil: 'domcontentloaded' });
   await bootPage(host);
   ok('安卓壳进的是离线模式（本机房间）', await host.evaluate(() => window.ChaApp.net.isLocal()));
 
@@ -147,7 +147,7 @@ async function createRoom(page, roomName) {
   /* ---------------- 3) 建完房立刻重启，房间还在 ---------------- */
   const ctx3 = await androidContext(browser);
   const p3 = await ctx3.newPage();
-  await p3.goto(BASE + '/?t=' + Date.now(), { waitUntil: 'domcontentloaded' });
+  await p3.goto(BASE + '/?autotunnel=0&t=' + Date.now(), { waitUntil: 'domcontentloaded' });
   await bootPage(p3);
   const persisted = await createRoom(p3, '重启房' + (Date.now() % 9999));
   await p3.reload({ waitUntil: 'domcontentloaded' });     // 立刻重载，不给防抖留时间

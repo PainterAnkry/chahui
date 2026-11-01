@@ -759,7 +759,16 @@
       getStatus: function () {
         return { phase: tunnelState.phase, url: tunnelState.url, error: tunnelState.error };
       },
-      onState: function (fn) { tunnelSink = typeof fn === 'function' ? fn : null; }
+      onState: function (fn) { tunnelSink = typeof fn === 'function' ? fn : null; },
+      /**
+       * 外部补推一次状态。
+       *
+       * 为什么需要：公共中继（relayHost）是「伴随通道」，本来不参与 tunnelState 上报。
+       * 可 P2P 打不通时全靠它，而渲染层的分享地址**只**从 onTunnelState 拿 ——
+       * 不补推的话，中继明明起来了，界面却一直停在「正在启动」，
+       * 用户以为没开成功，反复点。这条是 2.3.0 修的跨网联机主障碍。
+       */
+      emitState: function (s) { pushTunnelState(s || {}); }
     };
   }
 
@@ -876,6 +885,17 @@
         });
       },
 
+      /**
+       * 本机网卡地址 —— 安卓这边给不出来。
+       *
+       * WebView 里没有可用的网卡枚举接口（要拿就得写一个 Capacitor 原生插件，
+       * 用 java.net.NetworkInterface 遍历）。为这一点功能加一个原生插件不值得，
+       * 所以返回空数组，「附近服务器」扫描会退回让用户手填网段：
+       * 虚拟局域网工具（Astral / EasyTier）的虚拟 IP 在设置里能直接看到，
+       * 填前三段就够了。桌面端有真网卡列表，会自动填好。
+       */
+      lanIps: function () { return Promise.resolve([]); },
+
       /** 记住服务器地址。渲染端网页版的 ChaConfig.remember 就是 localStorage，这里保持同一种存储 */
       setServer: function (url) {
         return Promise.resolve().then(function () {
@@ -964,8 +984,7 @@
       },
 
       /* 离线四件套：net.js 的 connectLocal() 就认这几个名字，一个字都不用改 */
-      localOpen: function () { return openLocalSession(); },
-      localFeed: function (raw) {
+      localOpen: function () { return openLocalSession(); },      localFeed: function (raw) {
         if (!session) return Promise.resolve(false);
         try { session.ws.feed(String(raw || '')); return Promise.resolve(true); }
         catch (e) { return Promise.resolve(false); }
@@ -1022,8 +1041,18 @@
         return raceP2P(8000).then(function (a) {
           if (a && a.ok) return a;                 // P2P 通了：分享 webrtc://（最快）
           return quiet.then(function (b) {
-            if (b && b.ok) return b;               // P2P 起不来（信令被墙等）→ 公共中继顶上
-            return a || { ok: false, error: '公网联机没起来' };
+            if (b && b.ok) {
+              // ★ 公共中继起来了 —— 但它默认不参与 tunnelState 上报，而渲染层的
+              //   分享地址只从 onTunnelState 拿。不补推这一下，界面会永远停在
+              //   「正在启动」，用户看到的现象就是「点了公网联机没反应」。
+              tunnelHost.emitState({ phase: 'on', url: b.url || '' });
+              return b;
+            }
+            // 两条都不通：把两边的原因都带上。以前只报 P2P 那句「连不上信令服务器」，
+            // 用户以为是打洞的问题，其实中继也挂了 —— 排查时完全没有线索。
+            var ea = (a && a.error) || 'P2P 不通';
+            var eb = (b && b.error) || '公共中继不通';
+            return { ok: false, error: 'P2P：' + ea + '；中继：' + eb };
           });
         });
       },
@@ -1036,7 +1065,15 @@
       getTunnelStatus: function () {
         var a = webrtcHost ? webrtcHost.getStatus() : { phase: 'off' };
         if (a.phase !== 'off') return Promise.resolve(a);
-        return Promise.resolve(tunnelHost.getStatus());
+        var t = tunnelHost.getStatus();
+        if (t && t.phase !== 'off') return Promise.resolve(t);
+        // 前两条都没在跑时看公共中继：它是跨网的唯一退路，
+        // 刷新 / 重开页面后界面得显示「还开着」，不然用户会以为断了又去点一次
+        if (relayHost && relayHost.getStatus) {
+          var r = relayHost.getStatus();
+          if (r && r.phase !== 'off') return Promise.resolve(r);
+        }
+        return Promise.resolve(t);
       },
       onTunnelState: function (cb) {
         tunnelHost.onState(cb);

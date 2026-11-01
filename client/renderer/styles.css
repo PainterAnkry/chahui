@@ -2221,6 +2221,42 @@ body.panel-dragging * { cursor: grabbing !important; }
 .srv-state.off { color: var(--warn-ink); }
 .srv-state.err { color: var(--danger); }
 
+/* 附近服务器：网段输入框吃掉剩余宽度，按钮按内容宽（.srv-line .btn 的 92px
+   是给「检测中…」那类状态按钮定的，这里用不上，会白占一大截） */
+#lanScanRow .srv-line > .btn { min-width: auto; }
+#lanScanPrefix {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-family: var(--mono, ui-monospace, monospace);
+}
+/* 扫到之后列出来的服务器：一行一个，点一下就连过去 */
+.lan-found {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding-left: 70px;      /* 与 .srv-row .hint 的缩进对齐，视觉上归到同一列 */
+}
+.lan-hit {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 5px 10px;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.lan-hit:hover { background: var(--accent-soft); border-color: var(--accent-line); }
+.lan-hit b { font-weight: 600; font-family: var(--mono, ui-monospace, monospace); }
+.lan-hit span { font-size: 11px; color: var(--text-dim); }
+
 /* 侧栏收起后的窄条 + 收起把手 */
 .side-collapse { margin-left: auto; font-size: 14px; line-height: 1; }
 .side-rail {
